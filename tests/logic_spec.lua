@@ -355,15 +355,20 @@ describe("Planner in the scan and the panel", function()
 			runs = runs + 1
 			return finish(...)
 		end
-		local m = ns.Scan.build(plan2)
-		local m2 = ns.Scan.build(plan2) -- a bag update that moved nothing the plan uses
-		assert.equal(1, runs)
-		assert.equal(m.planner, m2.planner)
-		have[I.LION] = 3
-		local m3 = ns.Scan.build(plan2)
-		assert.equal(2, runs)
-		assert.is_not.equal(m.planner, m3.planner)
+		local ok, err = pcall(function()
+			local m = ns.Scan.build(plan2)
+			local m2 = ns.Scan.build(plan2) -- a bag update that moved nothing the plan uses
+			assert.equal(1, runs)
+			assert.equal(m.planner.steps, m2.planner.steps)
+			m2.planner.ms = -1 -- a per-build field never reaches the cache
+			assert.is_not.equal(-1, ns.Scan.build(plan2).planner.ms)
+			have[I.LION] = 3
+			local m3 = ns.Scan.build(plan2)
+			assert.equal(2, runs)
+			assert.is_not.equal(m.planner.steps, m3.planner.steps)
+		end)
 		ns.Planner.finish = finish
+		assert(ok, err)
 	end)
 
 	it("plans without recipe buys when the setting says so", function()

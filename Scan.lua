@@ -144,14 +144,18 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 	table.sort(haveKey)
 	haveKey = table.concat(haveKey, ",")
 	-- BAG_UPDATE_DELAYED fires for every bag change, most of them not in a reagent: same counts, same plan
-	local result = bc.haveKey == haveKey and bc.result
 	S.stockRuns = S.stockRuns or 0
-	if not result then
-		result = ns.Planner.finish(bc.ctx, bc.baseline, have)
-		bc.haveKey, bc.result = haveKey, result
+	if bc.haveKey ~= haveKey or not bc.result then
+		bc.haveKey, bc.result = haveKey, ns.Planner.finish(bc.ctx, bc.baseline, have)
+		bc.ms = clock() - t0
 		S.stockRuns = S.stockRuns + 1
 	end
-	result.ms = clock() - t0
+	-- a shallow copy per build, so the per-build fields below never write into the cached plan
+	local result = {}
+	for k, v in pairs(bc.result) do
+		result[k] = v
+	end
+	result.ms = bc.ms -- what the planner cost when it last ran, not the cache lookup
 	result.prices = pc.counts
 	result.ageHours = ns.TSM.ageHours(plan)
 	return result

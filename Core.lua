@@ -313,10 +313,17 @@ SLASH_SKILLUPHELPER1 = "/skillup"
 function ns.command(msg)
 	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
 	if cmd == "recipes" then
-		local off = arg:lower() == "off"
-		if db then
-			db.noRecipeBuys = off or nil
+		local word = arg:lower()
+		if word ~= "on" and word ~= "off" then
+			print(("SkillupHelper: /skillup recipes on|off (now %s)."):format(db and db.noRecipeBuys and "off" or "on"))
+			return true
 		end
+		if not db then
+			print("SkillupHelper: SavedVariables not loaded yet, setting not changed.")
+			return true
+		end
+		local off = word == "off"
+		db.noRecipeBuys = off or nil
 		print(
 			off and "SkillupHelper: planning without buying recipes."
 				or "SkillupHelper: planning with recipes to buy (/skillup recipes off to stop)."
