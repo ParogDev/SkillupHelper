@@ -248,7 +248,7 @@ function S.build(plan)
 		end
 	elseif prof and not ns.Logic.isPlanV2(plan, prof) then
 		model.plannerWhy =
-			"Data/Plan.lua is version 1 (no recipe reagents): rerun tools/tsm/skillup_lua.py, then /reload"
+			"Data/Plan.lua is version 1 (no recipe reagents): the price plan needs regenerating on the PC, then /reload"
 	end
 	if prof then
 		model.step, model.nextStep, model.planState = ns.Logic.planStep(prof, skill)
@@ -257,7 +257,7 @@ function S.build(plan)
 			return learned[spell] or false
 		end)
 	elseif not plan then
-		model.planWhy = "Data/Plan.lua absent: run tools/tsm/skillup_lua.py, then /reload"
+		model.planWhy = "Data/Plan.lua absent: the price plan was not generated for this copy of the addon"
 	else
 		model.planWhy = ("Data/Plan.lua has no plan for %s (id %s)"):format(
 			tostring(info.professionName),
