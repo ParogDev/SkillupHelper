@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2
+
+- The Next card can act on a recipe you know. "Craft 3" casts the step's crafts, as many as your bags allow now; when
+  nothing can be crafted yet the button says what to do first ("Buy 7 Gray Dye first"). Beside the WoW profession
+  window, "Show recipe" selects the recipe there.
+- Hiding the panel leaves a small tab in the same spot; click it to bring the panel back. `/skillup` still toggles it.
+- Beside the WoW profession window the panel now stands clear of the profession tabs on the window's right edge.
+- The panel is as tall as what it shows. The scroll bar appears only when the plan is longer than the window.
+
 ## 0.2.1
 
 - The panel leads with the next craft: a card with the recipe's icon, its name in its skill colour, how many to craft,
