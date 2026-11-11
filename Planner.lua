@@ -263,6 +263,22 @@ function P.prepare(input)
 	return ctx
 end
 
+-- Whether o's product goes to the AH: only when the sale beats the vendor and the market takes any.
+-- costPt, stockPass and finish all count proceeds by this one rule.
+local function sells(o)
+	return o.sell ~= nil and o.sell > o.vendor and o.takes > 0
+end
+P.sells = sells
+
+-- What one craft of o brings back when cum crafts of it were already sold.
+local function backOf(o, cum)
+	if sells(o) and (cum or 0) < o.takes then
+		return o.sell
+	end
+	return o.vendor
+end
+P.backOf = backOf
+
 -- Cost per expected point of option o at skill s. cheap: items counted at salvage (owned surplus).
 -- Returns cost, p (points per craft), net per craft; nil when o gives no skill or lacks a price.
 local function costPt(ctx, o, s, cum, cheap, chance)
@@ -286,8 +302,7 @@ local function costPt(ctx, o, s, cum, cheap, chance)
 	elseif not mat then
 		return nil
 	end
-	local back = (o.sell and (cum or 0) < o.takes) and o.sell or o.vendor
-	local net = mat - back
+	local net = mat - backOf(o, cum)
 	return ((net > 0 and net or 0) + ctx.effort * (1 + o.precrafts)) / p, p, net
 end
 P.costPt = costPt
@@ -448,7 +463,7 @@ local function stockPass(ctx, base, have)
 			end
 		end
 		if ok and mine then
-			local net = mat - ((o.sell and o.takes > 0) and o.sell or o.vendor)
+			local net = mat - backOf(o, 0)
 			local numer = (net > 0 and net or 0) + ctx.effort * (1 + o.precrafts)
 			for s = math.max(ctx.skill, o.at == -math.huge and ctx.skill or math.ceil(o.at)), ctx.cap - 1 do
 				local lv = base.levels[s]
@@ -563,6 +578,15 @@ local function ownedKinds(ctx, o, have)
 		end
 	end
 	return kinds
+end
+
+-- Whole crafts of o the pool still holds its owned reagents for (math.huge when it owns none of them).
+local function stockLimit(ctx, o, have, pool)
+	local limit = math.huge
+	for _, i in ipairs(ownedKinds(ctx, o, have)) do
+		limit = math.min(limit, math.floor((pool[i] or 0) / o.mats[i] + EPS))
+	end
+	return limit
 end
 
 -- Split each part where stock runs out and label it: stock (every non-vendor reagent from stock), mixed (owned ones
@@ -742,6 +766,17 @@ function P.finish(ctx, baseline, have)
 				why = "no known or buyable recipe gives skill here",
 			}
 			cur = math.max(cur, seg.to)
+		elseif
+			seg.source ~= "buy"
+			and stockLimit(ctx, seg.o, have, pool) < 1
+			and segs[idx + 1]
+			and segs[idx + 1].o == seg.o
+			and segs[idx + 1].source == "buy"
+		then
+			-- the stock this segment counted on is gone and the same recipe is bought next: one buy step, not two
+			local nx = segs[idx + 1]
+			nx.from, nx.alloc = seg.from, nx.alloc + seg.alloc
+			nx.pts, nx.cost = nx.pts + seg.pts, nx.cost + seg.cost
 		else
 			local o = seg.o
 			local b = buyBySpell[o.spell]
@@ -764,14 +799,18 @@ function P.finish(ctx, baseline, have)
 				steps[#steps + 1] = { kind = "train", spell = o.spell, name = o.name, at = o.at }
 			end
 			local crafts
-			if seg.source == "buy" then
-				crafts = math.max(1, math.ceil(seg.alloc - EPS))
-			else
-				local limit = math.huge
-				for _, i in ipairs(ownedKinds(ctx, o, have)) do
-					limit = math.min(limit, math.floor((pool[i] or 0) / o.mats[i] + EPS))
+			local source = seg.source
+			if source ~= "buy" then
+				local limit = stockLimit(ctx, o, have, pool)
+				if limit < 1 then
+					-- an earlier step used up the stock this one counted on: buy for it, never claim stock the bags lack
+					source = "buy"
+				else
+					crafts = math.max(1, math.min(math.ceil(seg.alloc - EPS), limit))
 				end
-				crafts = math.max(1, math.min(math.ceil(seg.alloc - EPS), limit))
+			end
+			if source == "buy" then
+				crafts = math.max(1, math.ceil(seg.alloc - EPS))
 			end
 			local from = math.max(cur, seg.from)
 			local pts = P.expectedPoints(from, crafts, o, chance, ctx.cap)
@@ -780,7 +819,7 @@ function P.finish(ctx, baseline, have)
 				spell = o.spell,
 				name = o.name,
 				crafts = crafts,
-				source = seg.source,
+				source = source,
 				from = from,
 				to = from + pts,
 				points = pts,
@@ -827,12 +866,12 @@ function P.finish(ctx, baseline, have)
 				}
 			end
 			local soldHere = 0
-			if o.sell and o.sell > o.vendor then
+			if sells(o) then
 				soldHere = math.max(0, math.min(crafts, o.takes - (sold[o.spell] or 0)))
 				sold[o.spell] = (sold[o.spell] or 0) + soldHere
 			end
 			step.cash = { out = out, back = soldHere * (o.sell or 0) + (crafts - soldHere) * o.vendor }
-			if seg.source ~= "buy" and step.color ~= "orange" then
+			if source ~= "buy" and step.color ~= "orange" then
 				local later = false
 				for j = idx + 1, #segs do
 					if segs[j].o and segs[j].o.spell == o.spell then
@@ -863,7 +902,7 @@ function P.finish(ctx, baseline, have)
 			if export or o.export then
 				step.tags[#step.tags + 1] = "prices from export"
 			end
-			if seg.source == "buy" then
+			if source == "buy" then
 				step.poolBefore = poolBefore
 			end
 			steps[#steps + 1] = step

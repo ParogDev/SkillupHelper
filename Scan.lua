@@ -97,9 +97,11 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 	local t0 = clock()
 	local now = GetTime and GetTime() or 0
 	local pc = priceCache[prof]
-	if not pc or now - pc.at > S.PRICE_TTL or now < pc.at then
+	-- salvage values depend on the sell-share setting: a changed share refetches like an expired entry
+	if not pc or now - pc.at > S.PRICE_TTL or now < pc.at or pc.sellShare ~= settings.sellShare then
 		local price, product, counts = ns.TSM.prices(plan, prof, nil, settings.sellShare)
 		pc = { at = now, price = price, product = product, counts = counts, stamp = (pc and pc.stamp or 0) + 1 }
+		pc.sellShare = settings.sellShare
 		priceCache[prof] = pc
 	end
 	local effort = settings.effort or plan.effort or ns.Planner.EFFORT

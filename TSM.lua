@@ -54,6 +54,20 @@ end
 -- The batch-2 post-or-vendor test (tools/tsm/skillup.py Prices.product): copper per stack.
 local POST_FAST_MIN, POST_SLOW_MIN, FAST_SALE_RATE, DEPOSIT_SHARE, AH_CUT, SELL_DAYS = 500, 5000, 0.25, 0.3, 0.95, 2
 
+-- dbregionsalerate as a fraction of listings that sell. TSM_API in this build already divides it by 1000 (design
+-- note, research/2026-11-11-skillup-planner.md: "a number, already /1000"), so a value in 0..1 is a fraction and 1
+-- means every listing sells, not a raw 1 per mille. Only a whole number of 2 or more cannot be a fraction: that is
+-- an undivided per-mille value (250 = 25%). Anything else over 1 is clamped to 1. nil stays nil.
+function T.saleRate(raw)
+	if type(raw) ~= "number" or raw ~= raw or raw < 0 then
+		return nil
+	end
+	if raw >= 2 and raw == math.floor(raw) then
+		return raw / 1000
+	end
+	return math.min(raw, 1)
+end
+
 -- Prices for the planner from TSM live, Data/Plan.lua's export when TSM returns nothing. The desktop app keeps
 -- AuctionDB synced, so live prices are the primary source; Plan.lua's are the fallback, and every fallback is counted.
 -- plan: Data/Plan.lua's table; prof: its profession entry; get(source, item) -> copper or nil (default T.value).
@@ -116,10 +130,7 @@ function T.prices(plan, prof, get, sellShare)
 			if house or sale then
 				counts.products.live = counts.products.live + 1
 				local s = math.min(house or sale, sale or house)
-				local rate = get("dbregionsalerate", r.makes)
-				if rate and rate > 1 then
-					rate = rate / 1000 -- a raw per-mille value
-				end
+				local rate = T.saleRate(get("dbregionsalerate", r.makes))
 				local perDay = get("dbregionsoldperday", r.makes) or 0
 				local stack = items[r.makes] and items[r.makes].stack or 1
 				local net = AH_CUT * s - math.max(vs, 0.001) * (1 + DEPOSIT_SHARE * (1 / (rate or FAST_SALE_RATE) - 1))

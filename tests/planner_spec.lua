@@ -309,6 +309,81 @@ describe("Planner scenarios", function()
 		print(("S6: passes 2 to 4 took %.3f ms a run over %d options"):format(ms, #ctx.options))
 		assert.is_true(ms < 2, ("%.3f ms"):format(ms))
 	end)
+
+	-- every stock or mixed step takes each owned reagent from the bags for all its crafts
+	local function claimsOnlyOwned(plan, label)
+		for _, st in ipairs(plan.steps) do
+			if st.kind == "craft" and st.source ~= "buy" then
+				assert.is_true(#st.used > 0, label .. ": " .. st.name .. " claims stock it has none of")
+			end
+		end
+	end
+
+	it("S7 a stock segment whose stock an earlier step used up is bought, never claimed", function()
+		-- 3 Clam Meat: the first Clams step rounds up and takes all three, so the later Clams steps buy
+		local input = F.cooking({ [I.TAIL] = 6, [I.CLAM] = 3, [I.LION] = 6 })
+		local plan = P.run(input)
+		claimsOnlyOwned(plan, "clams")
+		local sources, clams = {}, 0
+		for _, st in ipairs(plan.steps) do
+			if st.kind == "craft" and st.name == "Goblin Deviled Clams" then
+				sources[#sources + 1] = st.source
+				for _, u in ipairs(st.used) do
+					clams = clams + (u.item == I.CLAM and u.count or 0)
+				end
+			end
+		end
+		assert.same({ "stock", "buy", "buy" }, sources)
+		assert.equal(3, clams)
+		-- 1 Medium Leather is less than one Shoulders craft: one buy step, not a 1x mixed step and a buy step
+		plan = P.run(F.leather({ [I.MEDIUM] = 1 }))
+		claimsOnlyOwned(plan, "1 medium")
+		local shoulders = {}
+		for _, line in ipairs(crafts(plan)) do
+			if line:find("Shoulders", 1, true) then
+				shoulders[#shoulders + 1] = line
+			end
+		end
+		assert.same({ "Dark Leather Shoulders buy" }, shoulders)
+		for n = 1, 24 do
+			claimsOnlyOwned(P.run(F.leather({ [I.MEDIUM] = n, [I.LIGHT] = n })), "medium " .. n)
+			claimsOnlyOwned(P.run(F.cooking({ [I.TAIL] = n, [I.CLAM] = n % 4, [I.LION] = n % 7 })), "cooking " .. n)
+		end
+	end)
+
+	it("S8 a product that sells for less than the vendor pays is vendored, by one rule everywhere", function()
+		local recipes = { [1] = { name = "Widget", y = 200, g = 220, k = 1, mats = { I.SPICES, 1 }, src = "trainer" } }
+		local input = F.input(recipes, { [1] = true }, 100, 112)
+		input.product = { [1] = { vendor = 50, sell = 20, takes = 8 } }
+		local ctx = P.prepare(input)
+		local o = ctx.options[1]
+		assert.is_false(P.sells(o))
+		assert.equal(50, P.backOf(o, 0))
+		local _, _, net = P.costPt(ctx, o, 100, 0, nil, P.chance)
+		assert.equal(40 - 50, net)
+		local st = P.run(input).steps[1]
+		assert.equal(st.crafts * 50, st.cash.back)
+		assert.is_false(has(st.tags, "needs AH sale"))
+		-- a sale over the vendor counts until the market's `takes` is used up, then the vendor again
+		input.product = { [1] = { vendor = 10, sell = 100, takes = 8 } }
+		o = P.prepare(input).options[1]
+		assert.is_true(P.sells(o))
+		assert.equal(100, P.backOf(o, 7))
+		assert.equal(10, P.backOf(o, 8))
+		-- nothing taken: never sold, whatever the price
+		input.product = { [1] = { vendor = 10, sell = 100, takes = 0 } }
+		assert.is_false(P.sells(P.prepare(input).options[1]))
+	end)
+
+	it("S9 dbregionsalerate: a fraction already, a whole 2 or more is per mille", function()
+		local T = load().TSM
+		assert.equal(0.001, T.saleRate(0.001))
+		-- TSM_API already divides by 1000 here, so 1 is every listing selling, not 0.1%
+		assert.equal(1, T.saleRate(1))
+		assert.equal(0.25, T.saleRate(250))
+		assert.equal(1, T.saleRate(1.5))
+		assert.is_nil(T.saleRate(nil))
+	end)
 end)
 
 describe("Worked examples", function()
