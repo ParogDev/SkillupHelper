@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.8
+
+- The Next card has a guide strip: the guide chip's arrow, the place and the distance on one line under the card's
+  notes, and "Then: auction house" (or the trainer) when the step needs a second stop. Click it to pin the place on
+  your map; the chip pings so you can find its Target button. With the merchant open and a Buy button on the card
+  it says only "You are here".
+- The shopping list is grouped by city. The vendor block splits per town, and the city whose nearest stop is
+  closest comes first, with trainer, vendor and auction house in that order inside it. Block titles name the city
+  ("Vendor, Crossroads: 10c").
+- Vendors, trainers and auctioneers you open are remembered with their town.
+
 ## 0.2.7
 
 - The planner knows your profession's ranks. At a profession trainer the addon reads each rank (Journeyman, Expert,
