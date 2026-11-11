@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.1.2"
+ns.CODE_VERSION = "0.2.0"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -17,6 +17,7 @@ end
 local DEFAULTS = { shown = true }
 local db
 ns.selftest = {}
+ns.scans = {}
 
 function ns.initDB(saved)
 	saved = type(saved) == "table" and saved or {}
@@ -59,7 +60,14 @@ local function refreshSelftest()
 	st.savedAt = date("%Y-%m-%d %H:%M:%S")
 	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent"
 	st.lastScan = ns.lastScan
+	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
+	st.scans = ns.scans
+	st.settings = { effort = db.effort, sellShare = db.sellShare }
 	st.tsm = ns.TSM.status()
+	st.craftedEvent = ns.craftedEvent
+	local age = ns.TSM.ageHours(ns.Data.plan)
+	st.tsmAgeHours = age and math.floor(age * 10 + 0.5) / 10
+	st.tsmStale = age == nil or age > ns.TSM.STALE_HOURS
 	st.lastError = ns.lastError
 	db.selftest = st
 end
@@ -78,20 +86,65 @@ function ns.refresh()
 			model = { why = "scan failed: " .. tostring(model) }
 		end
 		ns.UI.show(model)
-		ns.lastScan = {
-			at = date("%Y-%m-%d %H:%M:%S"),
-			profession = model.profession,
-			skill = model.skill,
-			fromStock = model.fromStock and #model.fromStock or nil,
-			planState = model.planState,
-			why = model.why or model.planWhy,
-			counts = model.counts,
-			diag = model.diag,
-			idSource = model.idSource,
-			dock = ns.dockKind,
-			tsm = ns.TSM.status(),
-		}
+		ns.lastScan = ns.scanSummary(model)
+		ns.lastScan.dock = ns.dockKind
+		ns.lastScan.tsm = ns.TSM.status()
+		if model.profession then
+			ns.scans[model.profession] = ns.lastScan
+		end
 	end)
+end
+
+-- What one scan and its plan looked like, for the selftest (no item or character names beyond recipe names).
+function ns.scanSummary(model)
+	local s = {
+		at = date("%Y-%m-%d %H:%M:%S"),
+		profession = model.profession,
+		skill = model.skill,
+		maxSkill = model.maxSkill,
+		fromStock = model.fromStock and #model.fromStock or nil,
+		planState = model.planState,
+		why = model.why or model.planWhy or model.plannerWhy,
+		counts = model.counts,
+		diag = model.diag,
+		idSource = model.idSource,
+		greyCheck = model.greyCheck,
+	}
+	local p = model.planner
+	if p then
+		local ageHours = p.ageHours
+		s.planner = {
+			ms = p.ms and math.floor(p.ms * 100 + 0.5) / 100,
+			steps = #p.steps,
+			hold = #p.hold,
+			leftovers = #p.leftovers,
+			skipped = #p.skipped,
+			colourMismatch = #p.colourMismatch,
+			mismatches = p.colourMismatch,
+			priceSources = p.prices,
+			tsmAgeHours = ageHours and math.floor(ageHours * 10 + 0.5) / 10,
+			tsmStale = ageHours == nil or ageHours > ns.TSM.STALE_HOURS,
+		}
+		local list = {}
+		for i, st in ipairs(p.steps) do
+			if i > 6 then
+				break
+			end
+			list[#list + 1] = ("%s %s%s %s"):format(
+				st.kind,
+				st.crafts and (st.crafts .. "x ") or "",
+				tostring(st.name or st.why),
+				st.from and ("%.1f-%.1f"):format(st.from, st.to or st.from) or tostring(st.at or "")
+			)
+		end
+		s.planner.first = list
+	end
+	return s
+end
+
+-- The planner settings from SavedVariables (nil fields fall back to Data/Plan.lua's defaults).
+function ns.settings()
+	return { effort = db and db.effort, sellShare = db and db.sellShare }
 end
 
 function ns.setShown(shown)
@@ -169,6 +222,11 @@ f:RegisterEvent("TRADE_SKILL_CLOSE")
 for _, e in ipairs(REFRESH_EVENTS) do
 	f:RegisterEvent(e)
 end
+-- A craft result replans at once (it carries no recipe id and can fire for other sources: a trigger, not a counter).
+-- Registered under pcall so a client without it names the event instead of breaking the load.
+local okCrafted, errCrafted = pcall(f.RegisterEvent, f, "TRADE_SKILL_ITEM_CRAFTED_RESULT")
+ns.craftedEvent = okCrafted and "registered"
+	or ("TRADE_SKILL_ITEM_CRAFTED_RESULT not registered: " .. tostring(errCrafted))
 f:SetScript("OnEvent", function(_, event, arg1)
 	if event == "ADDON_LOADED" then
 		if arg1 == ADDON then
@@ -196,7 +254,30 @@ f:SetScript("OnEvent", function(_, event, arg1)
 end)
 
 SLASH_SKILLUPHELPER1 = "/skillup"
-SlashCmdList.SKILLUPHELPER = function()
+-- "/skillup effort 30": copper charged per craft by the planner ("/skillup effort" resets to the plan's default).
+function ns.command(msg)
+	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
+	if cmd ~= "effort" then
+		return false
+	end
+	local n = tonumber(arg)
+	if db then
+		db.effort = (n and n >= 0) and n or nil
+	end
+	print(
+		("SkillupHelper: effort %s copper a craft."):format(
+			db and db.effort and tostring(db.effort)
+				or "default (" .. tostring(ns.Data.plan and ns.Data.plan.effort or 20) .. ")"
+		)
+	)
+	ns.refresh()
+	return true
+end
+
+SlashCmdList.SKILLUPHELPER = function(msg)
+	if ns.command(msg) then
+		return
+	end
 	if not ns.tradeSkillOpen then
 		print("SkillupHelper: open a profession first.")
 		return

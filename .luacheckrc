@@ -15,7 +15,7 @@ else
 	-- CI in this repo runs standalone: every global the addon touches must be here.
 	read_globals = {
 		"CreateFrame", "C_AddOns", "C_Timer", "C_Item", "C_TradeSkillUI", "GetBuildInfo", "WOW_PROJECT_ID",
-		"issecretvalue", "date",
+		"issecretvalue", "date", "time", "GetTime", "debugprofilestop",
 	}
 end
 -- FrameXML globals the generated list doesn't carry (it is built from the C API lists).

@@ -6,13 +6,156 @@ ns.UI = UI
 local COLOR = { orange = "ffff8040", yellow = "ffffff00", green = "ff40c040", grey = "ff808080" }
 local HEAD, DIM, WARN = "ffffd100", "ffa0a0a0", "ffff6060"
 UI.MAX_STOCK_LINES = 15
+UI.MAX_STEPS = 8
 
 local function c(hex, text)
 	return "|c" .. hex .. text .. "|r"
 end
 
 local function itemName(item, fallback)
+	local plan = ns.Data and ns.Data.plan
+	local info = plan and plan.items and plan.items[item]
+	fallback = fallback or (info and info.name)
 	return ns.Scan and ns.Scan.itemName(item, fallback) or fallback or ("item " .. item)
+end
+
+local LABEL = { "NOW ", "NEXT", "THEN" }
+local WHERE = { vendor = "vendor", ah = "AH" }
+
+-- One planner step as panel lines.
+local function stepLines(add, st, i, nameOf, money)
+	local label = c(HEAD, LABEL[math.min(i, 3)])
+	if st.kind == "gap" then
+		add(("%s %s"):format(label, c(WARN, ("%d-%d: %s"):format(st.from, st.to, st.why))))
+	elseif st.kind == "train" then
+		add(("%s Train %s at the trainer (from %d)"):format(label, st.name, st.at))
+	elseif st.kind == "buyRecipe" then
+		local saves = st.saves and (", saves " .. money(st.saves)) or ""
+		add(
+			("%s Buy %s (AH %s), learn at %d%s"):format(
+				label,
+				nameOf(st.item, "Recipe: " .. st.name),
+				money(st.price),
+				st.learn or 0,
+				saves
+			)
+		)
+		if st.alt then
+			add(c(DIM, ("      or skip it: %s instead, +%s"):format(st.alt.name, money(st.alt.extra))))
+		end
+	else
+		local pct = st.chance and math.floor(st.chance[1] * 100 + 0.5) or 0
+		local col = st.color == "orange" and "orange" or ("%s %d%%"):format(st.color, pct)
+		add(
+			("%s Craft %dx %s %s  %s"):format(
+				label,
+				st.crafts,
+				c(COLOR[st.color] or HEAD, st.name),
+				c(DIM, st.source == "buy" and "" or ("from " .. st.source)),
+				c(DIM, ("%s, +%.1f, %d to %.0f"):format(col, st.points, math.floor(st.from), st.to))
+			)
+		)
+		local parts = {}
+		for _, b in ipairs(st.buy) do
+			parts[#parts + 1] = ("%d %s (%s %s)"):format(
+				b.count,
+				nameOf(b.item),
+				WHERE[b.where] or "?",
+				money((b.each or 0) * b.count)
+			)
+		end
+		if #parts > 0 then
+			add(c(DIM, "      buy " .. table.concat(parts, ", ")))
+		end
+		local pre = {}
+		for _, p in ipairs(st.pre) do
+			pre[#pre + 1] = ("%d %s"):format(p.count, nameOf(p.item))
+		end
+		if #pre > 0 then
+			add(c(DIM, "      craft first: " .. table.concat(pre, ", ")))
+		end
+		if #st.tags > 0 then
+			add(c(DIM, "      " .. table.concat(st.tags, "; ")))
+		end
+		if st.alt then
+			add(
+				c(
+					DIM,
+					("      or use stock: %dx %s, +%s over the path"):format(
+						st.alt.crafts,
+						st.alt.name,
+						money(st.alt.extra)
+					)
+				)
+			)
+		end
+	end
+end
+
+local VERDICT = {
+	now = "now",
+	alternative = "now, as the alternative",
+	ok = "ok",
+	later = "keep for later",
+	wasteful = "wasteful",
+}
+
+-- The planner's sections: warnings about prices, the steps, what to keep, leftovers, the from-stock verdicts.
+local function plannerLines(add, m, nameOf)
+	local p, money = m.planner, ns.Logic.money
+	local age = p.ageHours
+	if age == nil then
+		add(c(DIM, "TSM data age unknown (Data/Plan.lua has no pricesAt)"))
+	elseif age > ns.TSM.STALE_HOURS then
+		add(c(DIM, ("TSM data is %.0f h old: sync the TSM app"):format(age)))
+	end
+	if p.prices and (p.prices.export or 0) > 0 then
+		add(c(DIM, ("%d prices from the export (TSM had none)"):format(p.prices.export)))
+	end
+	add("")
+	add(c(HEAD, ("Plan %d to %d"):format(p.skill, p.cap)))
+	if #p.steps == 0 then
+		add(c(DIM, "No step: nothing gives skill in range."))
+	end
+	for i, st in ipairs(p.steps) do
+		if i > UI.MAX_STEPS then
+			add(c(DIM, ("... and %d more steps"):format(#p.steps - UI.MAX_STEPS)))
+			break
+		end
+		stepLines(add, st, i, nameOf, money)
+	end
+	for _, h in ipairs(p.hold) do
+		add(c(DIM, ("Keep %d %s for %s at %d"):format(h.count, nameOf(h.item), h.name, h.at)))
+	end
+	for _, l in ipairs(p.leftovers) do
+		add(
+			c(
+				DIM,
+				("Leftover: %d %s, worth %s (%s); no skill-up use beats the plan"):format(
+					l.count,
+					nameOf(l.item),
+					money(l.value),
+					l.how == "ah" and "AH" or "vendor"
+				)
+			)
+		)
+	end
+	if #p.fromStock > 0 then
+		add("")
+		add(c(HEAD, "Craftable from bags + bank"))
+		for i, e in ipairs(p.fromStock) do
+			if i > UI.MAX_STOCK_LINES then
+				break
+			end
+			local v = VERDICT[e.verdict] or e.verdict
+			if e.verdict == "wasteful" then
+				v = ("wasteful, +%s a point"):format(money(e.extra))
+			elseif e.verdict == "later" then
+				v = ("keep for %d"):format(e.at or 0)
+			end
+			add(("  %s x%d  %s"):format(c(COLOR[e.color] or HEAD, e.name), e.crafts, c(DIM, v)))
+		end
+	end
 end
 
 -- The panel's text, one string per line.
@@ -29,6 +172,13 @@ function UI.lines(m, nameOf)
 	add(c(HEAD, ("%s %d/%d"):format(m.profession or "?", m.skill or 0, m.maxSkill or 0)))
 	if m.why then
 		add(c(WARN, m.why))
+	end
+	if m.planner then
+		plannerLines(add, m, nameOf)
+		return out
+	end
+	if m.plannerWhy then
+		add(c(WARN, m.plannerWhy))
 	end
 
 	add("")
