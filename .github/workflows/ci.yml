@@ -1,0 +1,32 @@
+# Lint, test and format-check on every push, on the maintainer's self-hosted runner (label "wowforever").
+# No GitHub-hosted runner here: tools/ci/check-runners.sh in the scaffolding repo fails if one appears.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Fork PRs never run on the self-hosted runner.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, wowforever]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: luacheck
+        run: luacheck . --no-color
+      - name: busted
+        run: busted --verbose
+      - name: stylua
+        run: stylua --check .
