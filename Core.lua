@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.0"
+ns.CODE_VERSION = "0.2.1"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -69,6 +69,14 @@ local function refreshSelftest()
 	st.tsmAgeHours = age and math.floor(age * 10 + 0.5) / 10
 	st.tsmStale = age == nil or age > ns.TSM.STALE_HOURS
 	st.lastError = ns.lastError
+	local ui = ns.UI.stats
+	st.ui = {
+		layout = ui.layout,
+		animations = ui.animations,
+		played = ui.played,
+		lastDock = ui.lastDock,
+		docks = ui.docks,
+	}
 	db.selftest = st
 end
 
@@ -185,6 +193,9 @@ local function redock()
 	local target, kind = ns.dockTarget()
 	ns.UI.dock(target)
 	ns.dockKind = kind
+	if ns.UI.frame and ns.UI.frame:IsShown() then
+		ns.UI.noteDock(kind)
+	end
 end
 
 local function open()

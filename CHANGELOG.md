@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- The panel leads with the next craft: a card with the recipe's icon, its name in its skill colour, how many to craft,
+  the expected points and cost a point, each material with have/need or where to buy it, and the use-your-stock
+  alternative. Later steps follow as numbered rows; what to keep, spare stock and stock verdicts sit quietly below.
+- A bar under the skill fills toward the recipe's next colour change ("6 to yellow"). The card pulses in the step's
+  colour, materials strike through as you use them, and the next step slides in when the skill passes one.
+
 ## 0.2.0
 
 - A skill-up planner replaces the "cheapest next step" line. It prices every recipe per skill point with a small effort
