@@ -29,6 +29,17 @@ function ns.initDB(saved)
 	return saved
 end
 
+-- The cap model's SavedVariables, made on first use (ns.capTables): ranks[skillLineID][cap] learned at the trainer;
+-- exclude = { dungeon, ahPatterns, special, notNow[spellID] }; trainerSeen[skillLineID][spellID or lowercased name]
+-- = true for the recipes an ordinary trainer lists.
+function ns.capTables(saved)
+	saved.ranks = type(saved.ranks) == "table" and saved.ranks or {}
+	saved.exclude = type(saved.exclude) == "table" and saved.exclude or {}
+	saved.exclude.notNow = type(saved.exclude.notNow) == "table" and saved.exclude.notNow or {}
+	saved.trainerSeen = type(saved.trainerSeen) == "table" and saved.trainerSeen or {}
+	return saved
+end
+
 -- What Data/Plan.lua holds, for the selftest; nil when the file is absent.
 function ns.selftest.planSummary(plan)
 	if type(plan) ~= "table" then
@@ -65,6 +76,9 @@ local function refreshSelftest()
 	st.settings = ns.settings()
 	st.stockRuns = ns.Scan.stockRuns or 0
 	st.trips = db.trips
+	-- cap model: rank entries saved at trainers, and the last trainer read's broken link (nil when it read fine)
+	st.ranksSeen = ns.ranksSeen()
+	st.lastTrainerRead = ns.lastTrainerRead
 	st.tsm = ns.TSM.status()
 	st.craftedEvent = ns.craftedEvent
 	local age = ns.TSM.ageHours(ns.Data.plan)
@@ -91,7 +105,12 @@ local function refreshSelftest()
 		lastBuy = ui.lastBuy,
 		lastBuyError = ui.lastBuyError,
 		buysByUi = ui.buysByUi,
+		-- the AH list (UI.ahEvent / UI.ahAct)
+		ah = ui.ah,
+		lastAhBuy = ui.lastAhBuy,
+		lastAhError = ui.lastAhError,
 	}
+	st.ahSkip = db.ahSkip
 	db.selftest = st
 end
 
@@ -191,7 +210,56 @@ function ns.settings()
 		noRecipeBuys = db and db.noRecipeBuys,
 		luck = db and db.luck,
 		trips = db and db.trips,
+		exclude = db and db.exclude,
 	}
+end
+
+-- Ranks learned at the trainer -----------------------------------------------------------------------------------
+-- The saved ranks of one skill line ({ [cap] = rank }), or nil.
+function ns.savedTrainerSeen(skillLineID)
+	return db and skillLineID and db.trainerSeen and db.trainerSeen[skillLineID] or nil
+end
+
+function ns.savedRanks(skillLineID)
+	return db and skillLineID and db.ranks and db.ranks[skillLineID] or nil
+end
+
+function ns.ranksSeen()
+	local n = 0
+	for _, byCap in pairs(db and db.ranks or {}) do
+		for _ in pairs(byCap) do
+			n = n + 1
+		end
+	end
+	return n
+end
+
+-- TRAINER_SHOW / TRAINER_UPDATE: save the rank services of a profession trainer. Not a profession trainer is "not
+-- now" and leaves the last diagnostic alone.
+function ns.onTrainer()
+	if not db then
+		return
+	end
+	local ok, parsed, why, state = pcall(ns.Scan.readTrainer)
+	if not ok then
+		ns.lastTrainerRead = "trainer read failed: " .. tostring(parsed)
+		return
+	end
+	if state == "not now" then
+		return
+	end
+	if parsed and parsed.skillLine and #parsed.ranks > 0 then
+		-- the planner's cache key carries the ranks: the next scan replans on its own
+		ns.Scan.saveRanks(db.ranks, parsed.skillLine, parsed.ranks, time())
+	end
+	if parsed and parsed.skillLine and next(parsed.seen or {}) then
+		local set = db.trainerSeen[parsed.skillLine] or {}
+		for key in pairs(parsed.seen) do
+			set[key] = true
+		end
+		db.trainerSeen[parsed.skillLine] = set
+	end
+	ns.lastTrainerRead = why
 end
 
 -- The AH trip list kept per profession (View.tripBlock): what to buy at the AH, and the recipes it buys for, which
@@ -228,6 +296,52 @@ end
 -- The trip list kept for `prof`, or nil.
 function ns.savedTrip(prof)
 	return db and db.trips and prof and db.trips[prof] or nil
+end
+
+------------------------------------------------------------------------------- AH list (UI worker's block)
+
+-- Every saved trip list, per profession (Logic.ahList reads it at the auction house).
+function ns.savedTrips()
+	return db and db.trips or {}
+end
+
+-- A purchase from the AH list: `n` units of `item` count as bought on the saved rows (row.bought), oldest list
+-- first, so the row shows what is left and the list empties as it is bought.
+function ns.noteAhBought(item, n)
+	local left = n or 0
+	local profs = {}
+	for prof in pairs(db and db.trips or {}) do
+		profs[#profs + 1] = prof
+	end
+	table.sort(profs, function(a, b)
+		return tostring(a) < tostring(b)
+	end)
+	for _, prof in ipairs(profs) do
+		for _, r in ipairs(db.trips[prof].rows or {}) do
+			if left > 0 and r.item == item then
+				local take = math.min(left, (r.count or 0) - (r.bought or 0))
+				if take > 0 then
+					r.bought = (r.bought or 0) + take
+					left = left - take
+				end
+			end
+		end
+	end
+	return n - left
+end
+
+-- SkillupHelperDB.ahSkip[item] = "sold out" | "overpriced": an AH buy the next plan may go without (never set for a
+-- committed step's buy: View.ahRow says so on the row instead). why nil clears it (bought after all).
+function ns.setAhSkip(item, why)
+	if not db or type(item) ~= "number" then
+		return
+	end
+	if why then
+		db.ahSkip = db.ahSkip or {}
+		db.ahSkip[item] = why
+	elseif db.ahSkip then
+		db.ahSkip[item] = nil
+	end
 end
 
 -- Shows the panel or folds it to its handle (the choice is kept). byUser: a click, so the change fades in.
@@ -323,15 +437,53 @@ ns.craftedEvent = okCrafted and "registered"
 for _, e in ipairs({ "MERCHANT_SHOW", "MERCHANT_CLOSED", "MERCHANT_UPDATE" }) do
 	f:RegisterEvent(e)
 end
+-- A profession trainer opening or updating: read its rank services (ns.onTrainer).
+for _, e in ipairs({ "TRAINER_SHOW", "TRAINER_UPDATE" }) do
+	f:RegisterEvent(e)
+end
 -- A craft the client refuses raises no Lua error (pcall sees nothing): it fires one of these, naming the addon.
 for _, e in ipairs({ "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN" }) do
 	pcall(f.RegisterEvent, f, e)
 end
+-- The auction house: the saved AH list becomes buy rows (UI.ahEvent). Under pcall so a client without one of them
+-- names it in selftest.ahEvents instead of breaking the load.
+local AH_EVENTS = {
+	"AUCTION_HOUSE_SHOW",
+	"AUCTION_HOUSE_CLOSED",
+	"COMMODITY_SEARCH_RESULTS_UPDATED",
+	"ITEM_SEARCH_RESULTS_UPDATED",
+	"COMMODITY_PRICE_UPDATED",
+	"COMMODITY_PRICE_UNAVAILABLE",
+	"COMMODITY_PURCHASE_SUCCEEDED",
+	"COMMODITY_PURCHASE_FAILED",
+	"AUCTION_HOUSE_PURCHASE_COMPLETED",
+	"AUCTION_HOUSE_SHOW_ERROR",
+}
+local isAhEvent = {}
+for _, e in ipairs(AH_EVENTS) do
+	local ok, err = pcall(f.RegisterEvent, f, e)
+	isAhEvent[e] = ok or nil
+	if not ok then
+		ns.UI.stats.ah.unregistered = ns.UI.stats.ah.unregistered or {}
+		ns.UI.stats.ah.unregistered[e] = tostring(err)
+	end
+end
 f:SetScript("OnEvent", function(_, event, arg1, arg2)
+	if isAhEvent[event] then
+		ns.guard("ah", ns.UI.ahEvent, event, arg1, arg2)
+		return
+	end
 	if event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" then
+		if arg1 == ADDON and ns.UI.ah.open then
+			ns.UI.stats.lastAhError = { at = date("%Y-%m-%d %H:%M:%S"), err = event .. ": " .. tostring(arg2) }
+		end
 		if arg1 == ADDON then
 			ns.UI.stats.lastCraftError = ("%s: the client refused %s"):format(event, tostring(arg2))
 		end
+		return
+	end
+	if event == "TRAINER_SHOW" or event == "TRAINER_UPDATE" then
+		ns.onTrainer()
 		return
 	end
 	if event == "BAG_UPDATE_DELAYED" then
@@ -350,6 +502,7 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 		if arg1 == ADDON then
 			SkillupHelperDB = ns.initDB(SkillupHelperDB)
 			db = SkillupHelperDB
+			ns.capTables(db)
 		end
 	elseif event == "PLAYER_LOGIN" then
 		db.selftest = nil
@@ -371,11 +524,102 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 	end
 end)
 
+-- "/skillup ranks": the ranks saved at trainers, per profession ("unknown" for a field the trainer did not give).
+-- "/skillup exclude dungeon|ahpatterns|special|<spellID>": toggles an exclusion from the plan (special teachers start
+-- excluded); "/skillup exclude" lists them.
+local function unknown(v)
+	return v == nil and "unknown" or tostring(v)
+end
+
+function ns.capCommand(cmd, arg)
+	if not db then
+		print("SkillupHelper: SavedVariables not loaded yet.")
+		return true
+	end
+	if cmd == "ranks" then
+		local ids = {}
+		for id in pairs(db.ranks) do
+			ids[#ids + 1] = id
+		end
+		table.sort(ids)
+		if #ids == 0 then
+			print("SkillupHelper: no ranks saved yet: open your profession trainer once.")
+		end
+		local plan = ns.Data.plan
+		for _, id in ipairs(ids) do
+			local p = plan and plan.professions and plan.professions[id]
+			print(("SkillupHelper: %s (%s)"):format(p and p.name or "skill line", tostring(id)))
+			for _, r in ipairs(ns.Scan.ranksArray(db.ranks[id])) do
+				print(
+					("  %s to %s: skill %s, level %s, cost %s, at %s"):format(
+						unknown(r.name),
+						unknown(r.cap),
+						unknown(r.skill),
+						unknown(r.level),
+						r.cost and ns.Logic.money(r.cost) or "unknown",
+						unknown(r.where)
+					)
+				)
+			end
+		end
+		if ns.lastTrainerRead then
+			print("SkillupHelper: last trainer read: " .. ns.lastTrainerRead)
+		end
+		return true
+	end
+	local ex = db.exclude
+	local word = arg:lower()
+	local spell = tonumber(arg)
+	if word == "dungeon" then
+		ex.dungeon = not ex.dungeon or nil
+	elseif word == "ahpatterns" then
+		ex.ahPatterns = not ex.ahPatterns or nil
+	elseif word == "special" then
+		-- special teachers (dungeon or special NPC) are excluded by default: false enables them, nil excludes again
+		if ex.special == false then
+			ex.special = nil
+		else
+			ex.special = false
+		end
+	elseif spell then
+		ex.notNow[spell] = not ex.notNow[spell] or nil
+	elseif word ~= "" then
+		print("SkillupHelper: /skillup exclude dungeon|ahpatterns|special|<spellID> (no argument lists them).")
+		return true
+	end
+	local list = {}
+	if ex.dungeon then
+		list[#list + 1] = "dungeon patterns"
+	end
+	if ex.ahPatterns then
+		list[#list + 1] = "AH patterns"
+	end
+	if ex.special ~= false then
+		list[#list + 1] = "special teachers (dungeon or special NPC)"
+	end
+	local spells = {}
+	for id in pairs(ex.notNow) do
+		spells[#spells + 1] = id
+	end
+	table.sort(spells)
+	for _, id in ipairs(spells) do
+		list[#list + 1] = "spell " .. id
+	end
+	print("SkillupHelper: excluded from the plan: " .. (#list > 0 and table.concat(list, ", ") or "nothing") .. ".")
+	if word ~= "" then
+		ns.refresh()
+	end
+	return true
+end
+
 SLASH_SKILLUPHELPER1 = "/skillup"
 -- "/skillup effort 30": copper charged per craft by the planner ("/skillup effort" resets to the plan's default).
 -- "/skillup recipes off": plan without buying recipe items ("on" plans with them again, the default).
 function ns.command(msg)
 	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
+	if cmd == "ranks" or cmd == "exclude" then
+		return ns.capCommand(cmd, arg)
+	end
 	if cmd == "luck" then
 		-- "/skillup luck 95": buys cover this percentile of crafts (50, 75, 80, 90, 95, 99; empty resets to 90)
 		local n = tonumber(arg)

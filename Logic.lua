@@ -267,6 +267,99 @@ function L.money(c)
 	return (neg and "-" or "") .. table.concat(parts, " ")
 end
 
+--------------------------------------------------------------------------------------------------- the AH list
+
+-- A live AH price more than this many times the plan's estimate is overpriced: the row says so.
+L.AH_OVER = 1.5
+
+-- The AH list from the saved trip lists (SkillupHelperDB.trips, per profession): one row per item still to buy,
+-- { item, name, count, each, pattern, committed, profs }. count is what is left after the buys made from it
+-- (row.bought). A reagent row of a saved list buys for a committed step (planner rule 3); a pattern row does not.
+function L.ahList(trips)
+	local profs = {}
+	for prof in pairs(trips or {}) do
+		profs[#profs + 1] = prof
+	end
+	table.sort(profs, function(a, b)
+		return tostring(a) < tostring(b)
+	end)
+	local out, byItem = {}, {}
+	for _, prof in ipairs(profs) do
+		for _, r in ipairs(trips[prof].rows or {}) do
+			local left = (r.count or 0) - (r.bought or 0)
+			if type(r.item) == "number" and left > 0 then
+				local row = byItem[r.item]
+				if not row then
+					row = {
+						item = r.item,
+						name = r.name,
+						count = 0,
+						each = r.each,
+						pattern = r.recipe == true,
+						profs = {},
+					}
+					row.committed = not row.pattern
+					byItem[r.item] = row
+					out[#out + 1] = row
+				end
+				row.count = row.count + left
+				row.profs[#row.profs + 1] = prof
+			end
+		end
+	end
+	return out
+end
+
+-- What `need` units of a commodity cost from its search results ({ unitPrice, quantity }), cheapest first:
+-- { available, qty (what can be bought, at most need), total, unit (the cheapest unit price), avg }.
+function L.commodityQuote(results, need)
+	local list = {}
+	for _, r in ipairs(results or {}) do
+		if type(r.unitPrice) == "number" and type(r.quantity) == "number" and r.quantity > 0 then
+			list[#list + 1] = r
+		end
+	end
+	table.sort(list, function(a, b)
+		return a.unitPrice < b.unitPrice
+	end)
+	local q = { available = 0, qty = 0, total = 0, unit = list[1] and list[1].unitPrice or nil }
+	for _, r in ipairs(list) do
+		q.available = q.available + r.quantity
+		local take = math.min(r.quantity, (need or 0) - q.qty)
+		if take > 0 then
+			q.qty = q.qty + take
+			q.total = q.total + take * r.unitPrice
+		end
+	end
+	q.avg = q.qty > 0 and q.total / q.qty or nil
+	return q
+end
+
+-- The cheapest buyout among item search results ({ auctionID, buyoutAmount, quantity, containsOwnerItem }), the
+-- user's own auctions left out: { auctionID, buyout, quantity }, or nil when nothing has a buyout.
+function L.cheapestBuyout(results)
+	local best
+	for _, r in ipairs(results or {}) do
+		local price = r.buyoutAmount
+		if type(price) == "number" and price > 0 and r.auctionID and not r.containsOwnerItem then
+			if not best or price < best.buyout then
+				best = { auctionID = r.auctionID, buyout = price, quantity = r.quantity or 1 }
+			end
+		end
+	end
+	return best
+end
+
+-- Live AH price against the plan's estimate, per unit: "over" past L.AH_OVER times, else "ok"; "unknown" without an
+-- estimate. Returns the verdict and the ratio.
+function L.ahVerdict(each, live)
+	if type(each) ~= "number" or each <= 0 or type(live) ~= "number" then
+		return "unknown", nil
+	end
+	local ratio = live / each
+	return ratio > L.AH_OVER and "over" or "ok", ratio
+end
+
 -- The plan's profession entry for a profession the client names: by skill line id, then parent id, then name.
 function L.findProfession(plan, info)
 	if not plan or not plan.professions or not info then

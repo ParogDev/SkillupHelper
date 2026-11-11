@@ -95,7 +95,7 @@ describe("View description", function()
 
 	it("puts step 1 on the Next card with its colour, gain, cost and materials", function()
 		local have = { [I.LION] = 7, [I.BEAR] = 1 }
-		local d = cooking(have)
+		local d, p = cooking(have)
 		assert.equal("plan", d.state)
 		assert.same({ title = "Cooking", skill = "173 / 225" }, d.header)
 		local nx = d.next
@@ -109,7 +109,13 @@ describe("View description", function()
 		-- one bear meat from the bags, the spices from the vendor
 		assert.same({ "1/1", true }, { nx.mats[1].right, nx.mats[1].covered })
 		assert.same({ I.BEAR, 1, 1 }, { nx.mats[1].item, nx.mats[1].have, nx.mats[1].need })
-		assert.same({ "buy 1, vendor 40c", false }, { nx.mats[2].right, nx.mats[2].covered })
+		-- with a shopping list the row points to it; without one it names the place and price
+		local listed = false
+		for _, r in ipairs(p.shopping and p.shopping.vendor or {}) do
+			listed = listed or r.item == nx.mats[2].item
+		end
+		local want = listed and "0/1, on the list" or "buy 1, vendor 40c"
+		assert.same({ want, false }, { nx.mats[2].right, nx.mats[2].covered })
 		-- the runway runs to the next colour change of the step's own recipe (150/190)
 		assert.same({ "green", 190, "17 to grey" }, { d.runway.color, d.runway.target, d.runway.label })
 		-- prices are live and recent: no stale line
@@ -476,5 +482,264 @@ describe("AH trip on the Next card", function()
 			noteWith(d.next, "On your AH list")
 		)
 		assert.is_nil(d.next.alt)
+	end)
+end)
+
+describe("Cap model on the panel", function()
+	local ns
+	before_each(function()
+		ns = load()
+	end)
+
+	local function craft(spell, extra)
+		local st = {
+			kind = "craft",
+			spell = spell,
+			name = "Recipe " .. spell,
+			crafts = 3,
+			from = 100,
+			to = 103,
+			points = 3,
+			color = "orange",
+			used = {},
+			buy = { { item = 2318, count = 6, each = 20, where = "ah" } },
+		}
+		for k, v in pairs(extra or {}) do
+			st[k] = v
+		end
+		return st
+	end
+
+	local function plan(steps, extra)
+		local p = { steps = steps, hold = {}, leftovers = {}, fromStock = {}, ageHours = 1, prices = {} }
+		for k, v in pairs(extra or {}) do
+			p[k] = v
+		end
+		return p
+	end
+
+	local function show(p, env)
+		local m = { profession = "Leatherworking", skill = 100, maxSkill = 150, planner = p }
+		local d = ns.View.describe(m, env or envOf(ns, {}))
+		return d, table.concat(ns.View.text(d), "\n")
+	end
+
+	it("shows a rank step with unknown for what the trainer has not shown", function()
+		local env = envOf(ns, {})
+		local st = { kind = "trainRank", name = "Expert", cap = 225, level = 20, cost = 50000, skill = 125 }
+		assert.equal("Train Expert (225) — level 20, 5g 0s 0c", ns.View.rankLine(st, env))
+		assert.equal(
+			"Train Artisan (300) — level unknown, cost unknown",
+			ns.View.rankLine({ name = "Artisan", cap = 300 }, env)
+		)
+		local d = show(plan({ craft(1), st, { kind = "trainRank", name = "Artisan", cap = 300 } }))
+		assert.same({ "Train Expert (225)", "level 20, 5g 0s 0c" }, { d.later[1].text, d.later[1].right })
+		assert.same({ "Train Artisan (300)", "level unknown, cost unknown" }, { d.later[2].text, d.later[2].right })
+		local card = show(plan({ st }))
+		assert.same(
+			{ "gold", "Train Expert (225)", "needs skill 125" },
+			{ card.next.color, card.next.name, card.next.gain }
+		)
+	end)
+
+	it("notes the rank to train inside a craft step, the hard stop and the plan's coverage", function()
+		local up = { name = "Expert", at = 125, by = 150 }
+		local d, all = show(plan({ craft(1, { rankUp = up }) }, {
+			capBlock = { name = "Artisan", level = 35, have = 30, cap = 300 },
+			coverage = { to = 140 },
+		}))
+		assert.matches("Train Expert between 125 and 150", all, 1, true)
+		assert.equal("Artisan needs level 35, you are 30", d.capBlock)
+		assert.matches("^Artisan needs level 35, you are 30", d.notice)
+		assert.equal("Data/Plan.lua covers to 140", d.footer[1])
+		-- coverage up to the cap says nothing
+		local full = show(plan({ craft(1) }, { coverage = { to = 150 } }))
+		assert.same({}, full.footer)
+		assert.equal("Artisan needs level unknown, you are unknown", ns.View.capBlockLine({ name = "Artisan" }))
+	end)
+
+	it("lists other ways cheapest first, special teachers named", function()
+		local others = {
+			{ spell = 2, name = "Tea", extra = 900, src = "special", teacher = "a dungeon NPC" },
+			{ spell = 3, name = "Bread", extra = 120, src = "trainer" },
+			{ spell = 4, name = "Pie", extra = 50, src = "special" },
+		}
+		local d, all = show(plan({ craft(1, { others = others }) }))
+		assert.same({
+			"Other way: Pie, +50c (special NPC / dungeon)",
+			"Other way: Bread, +1s 20c (trainer)",
+			"Other way: Tea, +9s 0c (special NPC / dungeon: a dungeon NPC)",
+		}, d.next.others)
+		assert.matches("Other way: Pie", all, 1, true)
+	end)
+
+	it("marks a trainer recipe not checked at a trainer", function()
+		local st = { kind = "train", name = "Goldthorn Tea", at = 215, unchecked = true }
+		local d = show(plan({ craft(1), st }))
+		assert.equal("Train Goldthorn Tea, not checked at a trainer", d.later[1].text)
+		local card = show(plan({ st }))
+		assert.equal("not checked at a trainer", card.next.cost)
+		local checked = show(plan({ { kind = "train", name = "Bread", at = 50 } }))
+		assert.is_nil(checked.next.cost)
+	end)
+
+	it("shows plan.shopping once per place in travel order, and the AH block is the list it keeps", function()
+		local shopping = {
+			order = { "trainer", "vendor", "ah", "vendor" },
+			trainer = { { kind = "trainRank", name = "Expert", skill = 125, step = 2 } },
+			vendor = { { item = 2320, name = "Thread", count = 4, price = 10, merchant = "Supplies", step = 1 } },
+			ah = {
+				{ item = 2318, name = "Light Leather", count = 6, price = 20, kind = "reagent", step = 1 },
+				{ item = 9000, name = "Pattern", count = 1, price = 5000, kind = "pattern", step = 3 },
+			},
+		}
+		local d, all = show(plan({ craft(1) }, { shopping = shopping, profKey = "Leatherworking" }))
+		local titles = {}
+		for _, b in ipairs(d.next.blocks) do
+			titles[#titles + 1] = b.title
+		end
+		assert.same({ "Trainer: 0c + 1 unknown", "Vendor: 40c", "Auction House: 51s 20c" }, titles)
+		assert.equal("Thread (Supplies)", d.next.blocks[2].rows[1].name)
+		assert.equal("at 125, cost unknown", d.next.blocks[1].rows[1].right)
+		-- the step's own buy row points to the list instead of naming a place and a price
+		assert.equal("0/6, on the list", d.next.mats[1].right)
+		assert.is_nil(all:find("buy 6, AH", 1, true))
+		-- without plan.trip the AH block feeds "Add to AH list"
+		assert.equal("trip", d.next.actions[1].id)
+		local kept = d.next.trip
+		assert.same({ 2, true, 5120 }, { #kept.rows, kept.rows[2].recipe, kept.total })
+		assert.equal("Leatherworking", kept.prof)
+		-- with a trip that starts now, the list it keeps is plan.trip, its commit included
+		local trip = {
+			fromStep = 1,
+			to = 103,
+			ends = "cap",
+			total = 120,
+			commit = { { spell = 1, to = 103 } },
+			route = { 1 },
+			rows = { { item = 2318, count = 6, buffer = 0, total = 6, each = 20, cost = 120 } },
+		}
+		local withTrip = show(plan({ craft(1) }, { shopping = shopping, trip = trip, profKey = "Leatherworking" }))
+		assert.same(trip.commit, withTrip.next.trip.commit)
+		assert.equal(3, #withTrip.next.blocks)
+		-- without plan.shopping: today's rendering
+		local old = show(plan({ craft(1) }))
+		assert.is_nil(old.next.blocks)
+		assert.equal("buy 6, AH 1s 20c", old.next.mats[1].right)
+	end)
+
+	it("offers Show recipe on learned craft rows beside Blizzard's window only", function()
+		local learned = { [1] = true, [2] = true }
+		local env = envOf(ns, {})
+		env.dock = "blizzard"
+		env.craftable = function(spell)
+			if learned[spell] then
+				return 0
+			end
+			return nil, "recipe not learned"
+		end
+		local V = ns.View
+		local a = V.rowOpen(craft(2), env)
+		assert.same({ "open", 2, true }, { a.id, a.spell, a.enabled })
+		assert.is_nil(V.rowOpen(craft(3), env)) -- not learned
+		assert.is_nil(V.rowOpen({ kind = "train", name = "x", at = 1 }, env))
+		assert.is_nil(V.rowOpen({ kind = "trainRank", name = "Expert", cap = 225 }, env))
+		assert.is_nil(V.rowOpen({ kind = "buyRecipe", item = 9, name = "x", price = 1 }, env))
+		local d = show(plan({ craft(1), craft(2), craft(3), { kind = "train", name = "x", at = 1 } }), env)
+		assert.same({ 2, false, false }, { d.later[1].open.spell, d.later[2].open ~= nil, d.later[3].open ~= nil })
+		env.dock = "tsm"
+		assert.is_nil(V.rowOpen(craft(2), env))
+		env.dock = "blizzard"
+		env.craftable = nil
+		assert.is_nil(V.rowOpen(craft(2), env))
+	end)
+end)
+
+describe("AH buy rows", function()
+	local ns, env
+	before_each(function()
+		ns = load()
+		env = envOf(ns, {})
+		env.gold = function()
+			return 1000000
+		end
+	end)
+
+	local reagent = { item = 2318, name = "Light Leather", count = 6, each = 20, committed = true }
+	local pattern = { item = 9000, name = "Pattern", count = 1, each = 5000, pattern = true, committed = false }
+
+	it("starts a commodity buy, then asks to confirm the quoted total", function()
+		local live = { state = "listed", kind = "commodity", results = { { unitPrice = 22, quantity = 50 } } }
+		local r = ns.View.ahRow(reagent, live, env)
+		assert.same(
+			{ "ahStart", true, 6, "Buy 6 for 1s 32c" },
+			{ r.action.id, r.action.enabled, r.action.qty, r.action.label }
+		)
+		assert.equal("22c each, 1s 32c", r.right)
+		live.state = "quoting"
+		local q = ns.View.ahRow(reagent, live, env).action
+		assert.same({ false, "Getting the price" }, { q.enabled, q.label })
+		live.state, live.quote, live.qty = "quoted", { unit = 22, total = 132 }, 6
+		local c = ns.View.ahRow(reagent, live, env).action
+		assert.same({ "ahConfirm", true, "Confirm 6 for 1s 32c" }, { c.id, c.enabled, c.label })
+		live.state = "buying"
+		assert.is_false(ns.View.ahRow(reagent, live, env).action.enabled)
+		live.state = "bought"
+		assert.equal("Bought 6", ns.View.ahRow(reagent, live, env).action.label)
+	end)
+
+	it("never drops a committed step's buy when it is sold out or overpriced, and says so", function()
+		local none = ns.View.ahRow(reagent, { state = "listed", kind = "commodity", results = {} }, env)
+		assert.is_nil(none.skip)
+		assert.matches("^Sold out%. For a step you committed to", none.note)
+		assert.equal("ahSearch", none.action.id)
+		local dear = ns.View.ahRow(reagent, {
+			state = "listed",
+			kind = "commodity",
+			results = { { unitPrice = 40, quantity = 50 } },
+		}, env)
+		assert.is_nil(dear.skip)
+		assert.equal("2.0x the plan's 20c each", dear.warn)
+		assert.same({ true, "Buy anyway: 6 for 2s 40c" }, { dear.action.enabled, dear.action.label })
+	end)
+
+	it("buys a pattern at its cheapest buyout and marks it for a replan when overpriced or gone", function()
+		local live = {
+			state = "listed",
+			kind = "item",
+			results = { { auctionID = 7, buyoutAmount = 4000, quantity = 1 }, { auctionID = 8, buyoutAmount = 6000 } },
+		}
+		local r = ns.View.ahRow(pattern, live, env)
+		assert.same(
+			{ "ahBid", 7, 4000, "Buy for 40s 0c" },
+			{ r.action.id, r.action.auctionID, r.action.buyout, r.action.label }
+		)
+		assert.is_nil(r.skip)
+		live.results = { { auctionID = 8, buyoutAmount = 9000, quantity = 1 } }
+		local over = ns.View.ahRow(pattern, live, env)
+		assert.equal("overpriced", over.skip)
+		assert.matches("The next plan goes without it", over.note, 1, true)
+		live.results = {}
+		assert.equal("sold out", ns.View.ahRow(pattern, live, env).skip)
+	end)
+
+	it("lets one purchase run at a time and checks the gold", function()
+		local live = { state = "listed", kind = "commodity", results = { { unitPrice = 22, quantity = 50 } } }
+		env.busy = 9000
+		local r = ns.View.ahRow(reagent, live, env)
+		assert.same({ false, "Wait: another buy is in progress" }, { r.action.enabled, r.action.label })
+		env.busy = nil
+		env.gold = function()
+			return 100
+		end
+		local poor = ns.View.ahRow(reagent, live, env)
+		assert.same({ false, "Not enough gold: 1s 32c needed" }, { poor.action.enabled, poor.action.label })
+	end)
+
+	it("titles the panel with the plan's total, or says the list is empty", function()
+		local d = ns.View.ahPanel({ reagent, pattern }, {}, env)
+		assert.equal("SkillupHelper AH list: 2 items, plan 51s 20c", d.title)
+		assert.equal("Searching the AH", d.rows[1].action.label)
+		assert.truthy(ns.View.ahPanel({}, {}, env).empty)
 	end)
 end)
