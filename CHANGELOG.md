@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.6
+
+- One AH trip for the stretch ahead: when a step needs the auction house, the card lists every AH buy up to the next
+  trainer visit, patterns included, with one total. "Add to AH list" keeps the list.
+- Buys cover a bad-luck run. A step buys for the 90th percentile of the crafts it takes, so a run of failed
+  skill-ups no longer sends you back to the AH. `/skillup luck <50|75|80|90|95|99>` changes it.
+- Materials a later step needs are never offered for something else ("Or use stock", the from-stock list, a replan).
+- A step on your AH list keeps its recipe and target until you reach it or it turns grey.
+
 ## 0.2.4
 
 - The Next card buys its vendor reagents. When a step needs something a vendor sells ("buy 7 Hot Spices"), a Buy

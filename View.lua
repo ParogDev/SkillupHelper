@@ -102,7 +102,6 @@ local TAG_TEXT = {
 	["needs AH sale"] = "counts on selling the results on the AH",
 	["chance model"] = "the chance formula decides this one",
 	["prices from export"] = "some prices from the export",
-	["saves an AH trip"] = "stock first, the AH trip comes later",
 }
 
 local WHERE = { vendor = "vendor", ah = "AH" }
@@ -193,12 +192,15 @@ local function nextCard(st, env)
 			money(st.alt.extra)
 		)
 	end
-	if st.tripDeferred then
-		card.alt = ("Saves an AH trip now: %s more than %s, less than a trip (%s)"):format(
-			money(st.tripDeferred.extra),
-			st.tripDeferred.instead,
-			money(st.tripDeferred.cost)
+	if st.expected then
+		-- planner rule 1: the buys cover a bad-luck run; the mean is what it usually takes
+		card.notes[#card.notes + 1] = ("Bought for a bad-luck run: usually %d crafts, up to %d"):format(
+			math.ceil(st.expected - 1e-6),
+			st.crafts
 		)
+	end
+	if st.committed then
+		card.notes[#card.notes + 1] = ("On your AH list: this recipe holds until %d"):format(math.floor(st.to or 0))
 	end
 	local tags = {}
 	for _, t in ipairs(st.tags or {}) do
@@ -442,7 +444,14 @@ function V.tripBlock(trip, env, saved)
 	if not trip or #trip.rows == 0 then
 		return nil
 	end
-	local b = { rows = {}, total = trip.total, to = trip.to, route = trip.route, saved = saved ~= nil }
+	local b = {
+		rows = {},
+		total = trip.total,
+		to = trip.to,
+		route = trip.route,
+		commit = trip.commit,
+		saved = saved ~= nil,
+	}
 	local ENDS = { train = "the trainer", gap = "a gap", gold = "your gold", cap = "the cap" }
 	b.title = ("One AH trip: %s, covers to %d (up to %s)"):format(
 		env.money(trip.total),

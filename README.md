@@ -24,6 +24,19 @@ frames. TSM's API cannot add to its crafting queue, so there is no "queue these"
 
 Only WoW: Forever (interface 16001) is supported.
 
+## Planner rules
+
+Three rules hold for every plan, every replan and every alternative the panel offers:
+
+1. **Buy for bad luck.** A step that buys reagents buys enough for a bad-luck run: the 90th percentile of the crafts
+   it takes to reach the step's target, not the average. The card says "usually N crafts, up to M". A lucky run ends
+   early and the spares count as stock for later steps. `/skillup luck 95` changes the percentile (50, 75, 80, 90, 95
+   or 99).
+2. **Earmarked materials stay put.** A material a later step needs is never offered for something else: not as "Or use
+   stock", not in the from-stock list as "ok", and not by a replan. Only true spares are offered.
+3. **A bought step holds.** Once a step is on your AH list, its recipe and target hold until you reach the target or
+   the recipe turns grey. A replan after a skill-up or a price change never switches or shrinks it.
+
 ## Limits
 
 - Bank counts are what the client remembers from your last bank visit.

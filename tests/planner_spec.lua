@@ -223,27 +223,36 @@ describe("Planner scenarios", function()
 		assert.equal("A", plan.skipped[1].name)
 	end)
 
-	it("S4 Leatherworking 109 with four known recipes: stock first, then buy, then a gap", function()
+	it("S4 Leatherworking 109 with four known recipes: one Pants step using the stock, then a gap", function()
 		local only = {}
 		for _, s in ipairs({ 2167, 2168, 2169, 7135 }) do
 			only[s] = F.LEATHER[s]
 		end
 		local plan = P.run(F.input(only, F.LEATHER_LEARNED, 109, 150, { [I.MEDIUM] = 92 }, { noRecipeBuys = true }))
-		assert.same({ "Dark Leather Pants stock", "Dark Leather Pants buy", "gap" }, crafts(plan))
-		local s1, s2, gap = plan.steps[1], plan.steps[2], plan.steps[3]
-		assert.equal(7, s1.crafts)
-		assert.equal(3150, s1.cash.out) -- 7 Gray Dye and 7 Fine Thread: 31s 50c
-		assert.near(7, s1.points, 1e-9)
-		assert.near(116, s1.to, 1e-9)
-		assert.is_true(s2.crafts >= 90 and s2.crafts <= 100)
-		local medium = s2.buy[1]
-		assert.equal(I.MEDIUM, medium.item)
-		assert.is_true(medium.count >= 1080 and medium.count <= 1200)
+		-- one recipe over one contiguous range is one step: the stock is a materials line of it, not a step of its own
+		assert.same({ "Dark Leather Pants buy", "gap" }, crafts(plan))
+		local s2, gap = plan.steps[1], plan.steps[2]
+		assert.same({ 109, 140 }, { s2.from, s2.to })
+		-- rule 1: the step holds the p90 of the crafts from its start to its target (mean 97 to 107, plus 1.28 sd)
+		local mean, var = P.craftSpread(s2.from, s2.to, { y = 115, g = 140, k = 1 })
+		assert.is_true(mean >= 97 and mean <= 107)
+		assert.equal(math.ceil(mean + P.TRIP_Z * math.sqrt(var) - 1e-6), s2.crafts)
+		assert.near(mean, s2.expected, 1e-9)
+		local medium
+		for _, b in ipairs(s2.buy) do
+			medium = b.item == I.MEDIUM and b or medium
+		end
+		local inBags = 0
+		for _, u in ipairs(s2.used) do
+			inBags = inBags + (u.item == I.MEDIUM and u.count or 0)
+		end
+		assert.equal(92, inBags) -- all the stock goes into the step
+		assert.equal(12 * s2.crafts, medium.count + inBags)
 		assert.same({ 140, 150 }, { gap.from, gap.to })
+		-- the 92 Medium Leather are spoken for: Boots can only be "later", never wasteful stock
 		local boots = verdict(plan, "Gray Leather Boots")
-		assert.equal("wasteful", boots.verdict)
-		assert.near(461, boots.extra, 1)
-		assert.equal(23, boots.crafts)
+		assert.equal("later", boots.verdict)
+		assert.equal(7135, boots.instead)
 	end)
 
 	it("S5 TSM returns nil: prices from the export, every step tagged", function()
@@ -420,7 +429,10 @@ describe("Worked examples", function()
 		assert.equal(2811, recipe.price)
 		assert.equal(175, recipe.learn)
 		assert.equal("Hot Lion Chops", recipe.alt.name)
-		assert.is_true(cod.crafts >= 45 and cod.crafts <= 52)
+		-- rule 1: p90 of the crafts from 180.18 to 215 (the mean is 45 to 52)
+		local mean, var = P.craftSpread(cod.from, cod.to, { y = 190, g = 230, k = 1 })
+		assert.is_true(mean >= 45 and mean <= 52)
+		assert.equal(math.ceil(mean + P.TRIP_Z * math.sqrt(var) - 1e-6), cod.crafts)
 		assert.is_true(has(tea.tags, "needs AH sale"))
 		assert.near(225, tea.to, 1e-9)
 		assert.equal(0, #plan.leftovers)
@@ -445,9 +457,7 @@ describe("Worked examples", function()
 	end)
 
 	it("Leatherworking 109, 92 Medium Leather", function()
-		-- an AH trip worth nothing: the buy-first plan of the design note (the trip-cost case is in "AH trip")
 		local input = F.leather()
-		input.tripCost = 0
 		local plan = P.run(input)
 		print("\nLeatherworking 109 -> 150, 92 Medium Leather")
 		for _, l in ipairs(F.describe(plan, input.items)) do
@@ -456,22 +466,25 @@ describe("Worked examples", function()
 		local seq = crafts(plan)
 		assert.equal("Light Leather Pants buy", seq[1])
 		assert.equal("buyRecipe", seq[2])
-		assert.equal("Dark Leather Shoulders mixed", seq[3])
-		assert.equal("Dark Leather Shoulders buy", seq[4])
-		assert.equal("train", seq[5])
-		assert.equal("Heavy Leather Ammo Pouch buy", seq[6])
+		-- Shoulders 115 to 145 is one step (stock and buy merge: a recipe over a contiguous range is one step)
+		assert.equal("Dark Leather Shoulders buy", seq[3])
+		assert.equal("train", seq[4])
+		assert.equal("Heavy Leather Ammo Pouch buy", seq[5])
+		assert.equal(5, #seq)
 		local llp = plan.steps[1]
 		assert.same({ { item = I.CURED, count = llp.crafts, spell = 3816 } }, llp.pre)
-		assert.equal("Dark Leather Pants", llp.alt.name)
-		assert.is_true(llp.alt.extra > 1500 and llp.alt.extra < 4500) -- "about 30s more"
-		assert.equal(7, plan.steps[3].crafts)
+		-- rule 2: the 92 Medium Leather belong to the Shoulders step, so Dark Leather Pants is no alternative here
+		assert.is_nil(llp.alt)
+		assert.same({ 115, 145 }, { plan.steps[3].from, plan.steps[3].to })
 		assert.same(
 			{ { item = I.MEDIUM, count = 92, spell = 3769, name = "Dark Leather Shoulders", at = 115 } },
 			plan.hold
 		)
-		assert.equal("alternative", verdict(plan, "Dark Leather Pants").verdict)
-		for _, n in ipairs({ "Dark Leather Tunic", "Dark Leather Cloak", "Gray Leather Boots" }) do
-			assert.equal("wasteful", verdict(plan, n).verdict)
+		-- every from-stock option needs the earmarked leather: "later", instead = the Shoulders that hold it
+		for _, n in ipairs({ "Dark Leather Pants", "Dark Leather Tunic", "Dark Leather Cloak", "Gray Leather Boots" }) do
+			local v = verdict(plan, n)
+			assert.equal("later", v.verdict, n)
+			assert.equal(3769, v.instead, n)
 		end
 	end)
 end)
@@ -512,11 +525,12 @@ describe("AH trip", function()
 		assert.equal("train", trip.ends) -- the pattern is bought on the same trip; the trainer ends it
 		local light = row(trip, I.LIGHT)
 		assert.equal(10 * s1.crafts, light.count)
-		-- the p90 buffer: mean plus 1.28 standard deviations of the crafts 109 to 115 take, in Light Leather
+		-- rule 1: the step's own crafts are the p90 (mean plus 1.28 standard deviations of the crafts 109 to 115 take),
+		-- so the trip needs no top-up
 		local mean, var = P.craftSpread(s1.from, s1.to, { y = 100, g = 130, k = 1 })
-		local extra = math.ceil(mean + P.TRIP_Z * math.sqrt(var) - s1.crafts - 1e-6)
-		assert.is_true(extra >= 2)
-		assert.equal(10 * extra, light.buffer)
+		assert.equal(math.ceil(mean + P.TRIP_Z * math.sqrt(var) - 1e-6), s1.crafts)
+		assert.is_true(s1.crafts >= math.ceil(mean) + 2)
+		assert.equal(0, light.buffer)
 		assert.is_true(row(trip, I.PATTERN).recipe)
 		local total = 0
 		for _, r in ipairs(trip.rows) do
@@ -524,19 +538,17 @@ describe("AH trip", function()
 		end
 		assert.equal(total, trip.total)
 
-		-- bad luck: every planned craft done, the skill a point short of the step's end
+		-- bad luck: the p90 mean of crafts done, the skill a point short of the step's end, the rest of the p90 in the bags
 		local bags = afterTrip(trip)
+		local done = s1.crafts - 2
 		for _, u in ipairs({ { I.LIGHT, 10 }, { I.HIDE, 1 } }) do
-			bags[u[1]] = bags[u[1]] - u[2] * s1.crafts
+			bags[u[1]] = (bags[u[1]] or 0) - u[2] * done
 		end
 		local short = math.floor(s1.to) - 1
-		local route = {}
-		for _, spell in ipairs(trip.route) do
-			route[spell] = true
-		end
-		assert.is_true(route[9195])
+		assert.equal(9195, trip.commit[1].spell)
+		assert.equal(s1.to, trip.commit[1].to)
 		-- the pattern came on the same trip and waits in the bags for rank 115
-		local again = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, short, 150, bags, { route = route }))
+		local again = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, short, 150, bags, { commit = trip.commit }))
 		assert.is_true(again.steps[2].kind == "buyRecipe" and again.steps[2].owned)
 		for _, l in ipairs(again.leftovers) do
 			assert.not_equal(I.PATTERN, l.item)
@@ -551,38 +563,6 @@ describe("AH trip", function()
 		assert.is_nil(again.trip) -- nothing sends the user back to the AH before the trainer
 	end)
 
-	it("the trip cost makes the stock route win at 112 instead of a third trip", function()
-		local input = F.input(F.LEATHER, F.LEATHER_LEARNED, 112, 150, { [I.MEDIUM] = 96 })
-		local free = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 112, 150, { [I.MEDIUM] = 96 }, { tripCost = 0 }))
-		assert.equal("Light Leather Pants", free.steps[1].name)
-		assert.equal("buy", free.steps[1].source)
-		local alt = free.steps[1].alt
-		assert.equal("Dark Leather Pants", alt.name)
-		assert.is_true(alt.extra < P.TRIP_COST)
-
-		local plan = P.run(input)
-		print("\nLeatherworking 112, 96 Medium Leather, trip cost 50s")
-		for _, l in ipairs(F.describe(plan, input.items)) do
-			print("  " .. l)
-		end
-		local s1 = plan.steps[1]
-		assert.equal("Dark Leather Pants", s1.name)
-		assert.equal("stock", s1.source)
-		assert.equal(alt.crafts, s1.crafts)
-		assert.same({ cost = P.TRIP_COST, extra = alt.extra, instead = "Light Leather Pants" }, s1.tripDeferred)
-		-- the pattern and the leather for the shoulders: one trip after the stock runs out
-		assert.equal("buyRecipe", plan.steps[2].kind)
-		assert.equal(2, plan.trip.fromStep)
-		assert.near(s1.to, plan.steps[3].from, 1e-9)
-		assert.equal("train", plan.trip.ends)
-	end)
-
-	it("a planned trip keeps the AH route: no stock detour mid-trip", function()
-		local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 112, 150, { [I.MEDIUM] = 96 }, { tripPlanned = true }))
-		assert.equal("Light Leather Pants", plan.steps[1].name)
-		assert.is_nil(plan.steps[1].tripDeferred)
-	end)
-
 	it("the trip stops where the gold on hand runs out, never before its first step", function()
 		local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 109, 150, {}, { gold = 1 }))
 		assert.equal("gold", plan.trip.ends)
@@ -594,5 +574,366 @@ describe("AH trip", function()
 		local only = { [2169] = F.LEATHER[2169] }
 		local plan = P.run(F.input(only, { [2169] = true }, 109, 125, { [I.MEDIUM] = 600 }))
 		assert.is_nil(plan.trip)
+	end)
+end)
+
+describe("Planner rules", function()
+	local P
+	local EPS = 1e-6
+	before_each(function()
+		P = load().Planner
+	end)
+
+	-- Every case the property tests loop over: label, recipes, input.
+	local function cases()
+		local out = {}
+		local function add(label, recipes, learned, skill, cap, have)
+			out[#out + 1] = {
+				label = ("%s %d, %s"):format(label, skill, next(have) and "bags" or "empty"),
+				recipes = recipes,
+				input = F.input(recipes, learned, skill, cap, have),
+			}
+		end
+		for skill = 100, 145, 3 do
+			for _, have in ipairs({ {}, { [I.MEDIUM] = 96 }, { [I.MEDIUM] = 40, [I.LIGHT] = 30 } }) do
+				add("Leatherworking", F.LEATHER, F.LEATHER_LEARNED, skill, 150, have)
+			end
+		end
+		for skill = 173, 221, 3 do
+			for _, have in ipairs({
+				{},
+				{ [I.LION] = 7, [I.BEAR] = 1 },
+				{ [I.LION] = 60, [I.BEAR] = 1 },
+				{ [I.TAIL] = 6, [I.CLAM] = 3, [I.LION] = 6 },
+			}) do
+				add("Cooking", F.COOKING, F.COOKING_LEARNED, skill, 225, have)
+			end
+		end
+		return out
+	end
+
+	local function isVendor(item)
+		local pr = F.prices()[item]
+		return pr ~= nil and pr.where == "vendor"
+	end
+
+	-- non-vendor reagents of a spell, { item = count per craft }
+	local function mats(recipes, spell)
+		local out = {}
+		local m = recipes[spell].mats
+		for k = 1, #m, 2 do
+			if not isVendor(m[k]) then
+				out[m[k]] = m[k + 1]
+			end
+		end
+		return out
+	end
+
+	local function usedBy(step)
+		local out = {}
+		for _, u in ipairs(step.used or {}) do
+			out[u.item] = (out[u.item] or 0) + u.count
+		end
+		return out
+	end
+
+	it("never spends an item that a later step uses (alternatives and from-stock verdicts)", function()
+		local altSeen, stockSeen = 0, 0
+		for _, c in ipairs(cases()) do
+			local plan = P.run(c.input)
+			local have = c.input.have
+			for idx, st in ipairs(plan.steps) do
+				if st.kind == "craft" and st.alt then
+					altSeen = altSeen + 1
+					-- the bags when this step starts, less every later step's claim: the earlier steps' uses are gone
+					-- from the bags, the later ones are earmarked, so every other step's use comes off
+					local avail = {}
+					for i, q in pairs(have) do
+						avail[i] = q
+					end
+					for j = 1, #plan.steps do
+						if j ~= idx then
+							for i, n in pairs(usedBy(plan.steps[j])) do
+								avail[i] = (avail[i] or 0) - n
+							end
+						end
+					end
+					for item, n in pairs(mats(c.recipes, st.alt.spell)) do
+						assert.is_true(
+							n * st.alt.crafts <= (avail[item] or 0),
+							("%s: step %d alt %s x%d needs %d of item %d, %d spare"):format(
+								c.label,
+								idx,
+								st.alt.name,
+								st.alt.crafts,
+								n * st.alt.crafts,
+								item,
+								avail[item] or 0
+							)
+						)
+					end
+				end
+			end
+			local spare = {}
+			for i, q in pairs(have) do
+				spare[i] = q
+			end
+			for _, st in ipairs(plan.steps) do
+				for i, n in pairs(usedBy(st)) do
+					spare[i] = (spare[i] or 0) - n
+				end
+			end
+			for _, e in ipairs(plan.fromStock) do
+				if e.verdict == "ok" or e.verdict == "wasteful" then
+					stockSeen = stockSeen + 1
+					for item, n in pairs(mats(c.recipes, e.spell)) do
+						assert.is_true(
+							n * e.crafts <= math.max(0, spare[item] or 0),
+							("%s: from stock %s x%d (%s) needs %d of item %d, %d spare"):format(
+								c.label,
+								e.name,
+								e.crafts,
+								e.verdict,
+								n * e.crafts,
+								item,
+								spare[item] or 0
+							)
+						)
+					end
+				end
+			end
+		end
+		-- the loop must have met both kinds of output, or it checks nothing
+		assert.is_true(altSeen > 0, "no step had an alt in any case")
+		assert.is_true(stockSeen > 0, "no from-stock verdict ok/wasteful in any case")
+	end)
+
+	it("sizes every buy step at the luck percentile of its crafts and buys the materials for all of them", function()
+		local seen = 0
+		for _, c in ipairs(cases()) do
+			local plan = P.run(c.input)
+			for idx, st in ipairs(plan.steps) do
+				if st.kind == "craft" and st.source == "buy" then
+					seen = seen + 1
+					local o = { y = st.thresholds[1], g = st.thresholds[2], k = st.thresholds[3] }
+					local mean, var = P.craftSpread(st.from, st.to, o)
+					local want = math.ceil(mean + P.TRIP_Z * math.sqrt(var) - EPS)
+					assert.is_true(
+						st.crafts >= want,
+						("%s: step %d %s %d crafts < p90 %d"):format(c.label, idx, st.name, st.crafts, want)
+					)
+					assert.near(mean, st.expected, 1e-9)
+					local bought = {}
+					for _, b in ipairs(st.buy) do
+						bought[b.item] = b.count
+					end
+					local pre = {}
+					for _, p in ipairs(st.pre) do
+						pre[p.item] = p.count
+					end
+					local m = c.recipes[st.spell].mats
+					for k = 1, #m, 2 do
+						local have = (usedBy(st)[m[k]] or 0) + (bought[m[k]] or 0) + (pre[m[k]] or 0)
+						assert.is_true(
+							have >= m[k + 1] * st.crafts,
+							("%s: step %d %s covers %d of item %d, needs %d"):format(
+								c.label,
+								idx,
+								st.name,
+								have,
+								m[k],
+								m[k + 1] * st.crafts
+							)
+						)
+					end
+				end
+			end
+		end
+		assert.is_true(seen > 20, "too few buy steps checked: " .. seen)
+	end)
+
+	it("never plans two craft steps of one recipe in a row", function()
+		for _, c in ipairs(cases()) do
+			local plan = P.run(c.input)
+			for idx = 2, #plan.steps do
+				local a, b = plan.steps[idx - 1], plan.steps[idx]
+				if a.kind == "craft" and b.kind == "craft" then
+					assert.is_not.equal(
+						a.spell,
+						b.spell,
+						("%s: steps %d and %d craft %s"):format(c.label, idx - 1, idx, a.name)
+					)
+				end
+			end
+		end
+	end)
+
+	it("covers a recipe's whole range in one step when the bags hold only one craft of it", function()
+		local learned = { [3769] = true }
+		for s in pairs(F.LEATHER_LEARNED) do
+			learned[s] = true
+		end
+		local have = { [I.MEDIUM] = 12, [I.THREAD] = 2, [I.ELIXIR] = 1, [I.DYE] = 1 }
+		local plan = P.run(F.input(F.LEATHER, learned, 124, 150, have))
+		local s1 = plan.steps[1]
+		assert.equal("craft", s1.kind)
+		assert.equal(3769, s1.spell)
+		assert.equal(124, s1.from)
+		assert.is_true(s1.to >= 145, "step 1 ends at " .. s1.to)
+		assert.is_true(s1.crafts > 1)
+		assert.is_not.equal(3769, plan.steps[2].spell)
+		-- the current recipe's own later crafts are no earmark
+		for _, h in ipairs(plan.hold) do
+			assert.is_not.equal(3769, h.spell)
+		end
+	end)
+
+	it("a Shoulders run across 125 is one craft step, with or without a craft's worth of mats", function()
+		local learned = { [3769] = true }
+		for s in pairs(F.LEATHER_LEARNED) do
+			learned[s] = true
+		end
+		local one = { [I.MEDIUM] = 12, [I.THREAD] = 2, [I.ELIXIR] = 1, [I.DYE] = 1 }
+		for _, skill in ipairs({ 120, 124 }) do
+			for label, have in pairs({ none = {}, one = one }) do
+				local plan = P.run(F.input(F.LEATHER, learned, skill, 150, have))
+				local run
+				for idx, st in ipairs(plan.steps) do
+					if st.kind == "craft" and st.spell == 3769 then
+						assert.is_nil(run, ("%d %s: second Shoulders step %d"):format(skill, label, idx))
+						run = st
+					end
+					if st.kind == "craft" then
+						local at = ("%d %s: step %d %s %.2f-%.2f"):format(skill, label, idx, st.name, st.from, st.to)
+						assert.is_not.equal(125, st.from, at)
+						assert.is_not.equal(125, st.to, at)
+					end
+				end
+				assert.is_not_nil(run, skill .. " " .. label)
+				assert.is_true(
+					run.from < 125 and run.to >= 145,
+					("%d %s: %.2f-%.2f"):format(skill, label, run.from, run.to)
+				)
+			end
+		end
+	end)
+
+	describe("a committed step", function()
+		local function afterTrip(trip, have)
+			local bags = {}
+			for i, q in pairs(have or {}) do
+				bags[i] = q
+			end
+			for _, r in ipairs(trip.rows) do
+				bags[r.item] = (bags[r.item] or 0) + r.total
+			end
+			return bags
+		end
+
+		local function firstCraft(plan)
+			for _, st in ipairs(plan.steps) do
+				if st.kind == "craft" then
+					return st
+				end
+			end
+		end
+
+		it("keeps its recipe, never shrinks its target and gets no stock alternative", function()
+			local first = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 109, 150, {}))
+			local commit = first.trip.commit
+			assert.equal(9195, commit[1].spell)
+			local bags = afterTrip(first.trip)
+			-- light leather made dear: without the commit another recipe wins at 111
+			local function priced(skill, have, extra)
+				local input = F.input(F.LEATHER, F.LEATHER_LEARNED, skill, 150, have, extra)
+				input.price[I.LIGHT].buy = 20000
+				return input
+			end
+			local free = firstCraft(P.run(priced(111, {})))
+			assert.is_not.equal(9195, free.spell, "the price change must make another recipe the baseline")
+			for _, case in ipairs({
+				{ "same prices", F.input(F.LEATHER, F.LEATHER_LEARNED, 111, 150, bags, { commit = commit }) },
+				{ "dear Light Leather, held", priced(111, bags, { commit = commit }) },
+				{ "dear Light Leather, bags empty", priced(111, {}, { commit = commit }) },
+				{ "dear Light Leather, 113", priced(113, bags, { commit = commit }) },
+			}) do
+				local st = firstCraft(P.run(case[2]))
+				assert.equal(9195, st.spell, case[1])
+				assert.is_true(st.committed, case[1])
+				assert.is_true(st.to >= commit[1].to - EPS, ("%s: to %.2f < %d"):format(case[1], st.to, commit[1].to))
+				assert.is_nil(st.alt, case[1])
+			end
+		end)
+
+		it("stops holding once the target is reached", function()
+			local first = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 109, 150, {}))
+			local commit = first.trip.commit
+			local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, commit[1].to, 150, {}, { commit = commit }))
+			-- the trip's later steps (the Shoulders) still hold; the Light Leather Pants step is done
+			for _, st in ipairs(plan.steps) do
+				assert.is_not.equal(9195, st.spell)
+			end
+		end)
+	end)
+
+	it("Light Leather Pants from 109 to 115 is one purchase that covers a bad-luck run", function()
+		local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 109, 150, {}))
+		local s1 = plan.steps[1]
+		assert.equal(9195, s1.spell)
+		assert.equal("buy", s1.source)
+		assert.equal(115, s1.to)
+		local mean, var = P.craftSpread(109, 115, { y = 100, g = 130, k = 1 })
+		assert.equal(math.ceil(mean + P.TRIP_Z * math.sqrt(var) - EPS), s1.crafts)
+		assert.is_true(s1.crafts > math.ceil(mean))
+		assert.equal(1, plan.trip.fromStep)
+		for _, r in ipairs(plan.trip.rows) do
+			if r.item == I.LIGHT then
+				assert.equal(s1.crafts * 10, r.total)
+				assert.equal(0, r.buffer)
+			end
+		end
+	end)
+
+	it("at 112 the Medium Leather held for the Shoulders is not offered as Dark Leather Pants", function()
+		local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 112, 150, { [I.MEDIUM] = 96 }))
+		-- the premise: the Medium Leather is earmarked for Dark Leather Shoulders
+		local held = 0
+		for _, h in ipairs(plan.hold) do
+			if h.item == I.MEDIUM and h.spell == 3769 then
+				held = held + h.count
+			end
+		end
+		assert.is_true(held > 0, "the Medium Leather is held for Dark Leather Shoulders")
+		local s1 = plan.steps[1]
+		assert.equal("Light Leather Pants", s1.name)
+		if s1.alt then
+			assert.is_not.equal("Dark Leather Pants", s1.alt.name)
+		end
+		local v = verdict(plan, "Dark Leather Pants")
+		assert.is_not_nil(v)
+		assert.is_not.equal("alternative", v.verdict)
+		if v.verdict == "ok" or v.verdict == "wasteful" then
+			assert.is_true(12 * v.crafts <= 96 - held)
+		else
+			assert.equal("later", v.verdict)
+			assert.equal(3769, v.instead)
+		end
+	end)
+
+	it("zOf maps the luck setting to a z: 50 buys the mean, an unknown value falls back to p90", function()
+		assert.equal(P.TRIP_Z, P.zOf(90))
+		assert.equal(0, P.zOf(50))
+		assert.is_nil(P.zOf(37))
+		local function buyCrafts(luck)
+			local st = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 109, 150, {}, { luck = luck })).steps[1]
+			local mean, var = P.craftSpread(st.from, st.to, { y = 100, g = 130, k = 1 })
+			return st.crafts, mean, var
+		end
+		local n50, mean = buyCrafts(50)
+		assert.equal(math.ceil(mean - EPS), n50)
+		local n99, m99, v99 = buyCrafts(99)
+		assert.equal(math.ceil(m99 + P.zOf(99) * math.sqrt(v99) - EPS), n99)
+		assert.is_true(n99 > n50)
+		assert.equal((buyCrafts(90)), (buyCrafts(37)))
 	end)
 end)

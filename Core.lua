@@ -62,7 +62,7 @@ local function refreshSelftest()
 	st.lastScan = ns.lastScan
 	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
 	st.scans = ns.scans
-	st.settings = { effort = db.effort, sellShare = db.sellShare, tripCost = db.tripCost }
+	st.settings = { effort = db.effort, sellShare = db.sellShare, luck = db.luck }
 	st.trips = db.trips
 	st.tsm = ns.TSM.status()
 	st.craftedEvent = ns.craftedEvent
@@ -187,7 +187,7 @@ function ns.settings()
 	return {
 		effort = db and db.effort,
 		sellShare = db and db.sellShare,
-		tripCost = db and db.tripCost,
+		luck = db and db.luck,
 		trips = db and db.trips,
 	}
 end
@@ -206,6 +206,7 @@ function ns.saveTrip(block)
 	db.trips[block.prof] = {
 		rows = rows,
 		route = block.route,
+		commit = block.commit,
 		to = block.to,
 		total = block.total,
 		at = date("%Y-%m-%d %H:%M:%S"),
@@ -369,15 +370,16 @@ SLASH_SKILLUPHELPER1 = "/skillup"
 -- "/skillup effort 30": copper charged per craft by the planner ("/skillup effort" resets to the plan's default).
 function ns.command(msg)
 	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
-	if cmd == "trip" then
-		-- "/skillup trip 5000": copper one AH trip is worth (a stock route that costs less more goes first)
+	if cmd == "luck" then
+		-- "/skillup luck 95": buys cover this percentile of crafts (50, 75, 80, 90, 95, 99; empty resets to 90)
 		local n = tonumber(arg)
 		if db then
-			db.tripCost = (n and n >= 0) and n or nil
+			db.luck = ns.Planner.zOf(n) and n or nil
 		end
 		print(
-			("SkillupHelper: an AH trip is worth %s copper."):format(
-				db and db.tripCost and tostring(db.tripCost) or ("default " .. ns.Planner.TRIP_COST)
+			("SkillupHelper: buys cover a p%d run of crafts%s."):format(
+				db and db.luck or ns.Planner.LUCK,
+				(arg ~= "" and not ns.Planner.zOf(n)) and " (use 50, 75, 80, 90, 95 or 99)" or ""
 			)
 		)
 		ns.refresh()

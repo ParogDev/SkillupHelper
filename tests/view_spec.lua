@@ -428,7 +428,9 @@ describe("AH trip on the Next card", function()
 				light = r
 			end
 		end
-		assert.is_truthy(light.right:find("spare"))
+		-- the buy step already covers the p90, so the row has no separate spare count
+		assert.is_nil(light.right:find("spare"))
+		assert.equal(10 * plan.steps[1].crafts, light.count)
 		assert.equal("trip", d.next.actions[1].id)
 		assert.is_truthy(d.next.actions[1].label:find("^Add to AH list"))
 
@@ -438,12 +440,38 @@ describe("AH trip on the Next card", function()
 		assert.equal("untrip", ns.View.describe(model(109, plan), env).next.actions[1].id)
 	end)
 
-	it("a stock step that defers the trip says so, and the trip shows as a footer line", function()
+	local function noteWith(card, prefix)
+		for _, n in ipairs(card.notes) do
+			if n:find(prefix, 1, true) == 1 then
+				return n
+			end
+		end
+	end
+
+	it("a buy step says it is bought for a bad-luck run and offers no alt on earmarked leather", function()
 		local ns = load()
 		local plan = ns.Planner.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 112, 150, { [I.MEDIUM] = 96 }))
 		local d = ns.View.describe(model(112, plan), envOf(ns, { [I.MEDIUM] = 96 }))
-		assert.is_truthy(d.next.alt:find("^Saves an AH trip now"))
-		assert.is_nil(d.next.trip)
-		assert.is_truthy(d.footer[1]:find("^AH trip at step 2"))
+		local st = plan.steps[1]
+		assert.equal("Light Leather Pants", st.name)
+		assert.is_nil(d.next.alt)
+		assert.equal(
+			("Bought for a bad-luck run: usually %d crafts, up to %d"):format(math.ceil(st.expected - 1e-6), st.crafts),
+			noteWith(d.next, "Bought for a bad-luck run")
+		)
+		assert.is_nil(noteWith(d.next, "On your AH list"))
+	end)
+
+	it("a committed step says the recipe holds until its target", function()
+		local ns = load()
+		local first = ns.Planner.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 109, 150, {}))
+		local commit = first.trip.commit
+		local plan = ns.Planner.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 111, 150, {}, { commit = commit }))
+		local d = ns.View.describe(model(111, plan), envOf(ns, {}))
+		assert.equal(
+			("On your AH list: this recipe holds until %d"):format(math.floor(plan.steps[1].to)),
+			noteWith(d.next, "On your AH list")
+		)
+		assert.is_nil(d.next.alt)
 	end)
 end)

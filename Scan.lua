@@ -111,7 +111,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 		learnedKey[#learnedKey + 1] = spell
 	end
 	table.sort(learnedKey)
-	local key = table.concat({ skill, cap, pc.stamp, effort, nLearned, table.concat(learnedKey, ",") }, ":")
+	local luck = settings.luck or ns.Planner.LUCK
+	local key = table.concat({ skill, cap, pc.stamp, effort, luck, nLearned, table.concat(learnedKey, ",") }, ":")
 	local bc = baseCache[prof]
 	if not bc or bc.key ~= key then
 		local ctx = ns.Planner.prepare({
@@ -124,6 +125,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 			price = pc.price,
 			product = pc.product,
 			effort = effort,
+			luck = luck,
 		})
 		bc = { key = key, ctx = ctx, baseline = ns.Planner.baseline(ctx) }
 		baseCache[prof] = bc
@@ -135,18 +137,25 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 			have[item] = n
 		end
 	end
-	-- the AH trip list the user keeps for this profession: its recipes keep their levels until its skill is reached
+	-- the AH trip list the user keeps for this profession: its steps are committed until their target is reached
+	-- (planner rule 3); a list saved before 0.2.6 has only route and to
 	local saved = settings.trips and settings.trips[prof.name]
-	local route
+	local commit
 	if saved and skill < (saved.to or 0) then
-		route = {}
-		for _, spell in ipairs(saved.route or {}) do
-			route[spell] = true
+		commit = {}
+		for _, cm in ipairs(saved.commit or {}) do
+			if skill < (cm.to or 0) then
+				commit[#commit + 1] = { spell = cm.spell, to = cm.to }
+			end
+		end
+		if not saved.commit then
+			for _, spell in ipairs(saved.route or {}) do
+				commit[#commit + 1] = { spell = spell, to = saved.to }
+			end
 		end
 	end
 	local result = ns.Planner.finish(bc.ctx, bc.baseline, have, {
-		tripCost = settings.tripCost or plan.tripCost,
-		route = route,
+		commit = commit,
 		gold = GetMoney and GetMoney() or nil,
 	})
 	result.ms = clock() - t0
