@@ -10,7 +10,13 @@ ignore = {
 
 local ok, wow = pcall(dofile, "../../tools/luacheck-wow-globals.lua")
 if ok and type(wow) == "table" then
-	read_globals = wow.read_globals
+	-- SlashCmdList is written (the /skillup handler): it is in `globals` below, so not read-only here
+	read_globals = {}
+	for _, g in ipairs(wow.read_globals) do
+		if g ~= "SlashCmdList" then
+			read_globals[#read_globals + 1] = g
+		end
+	end
 else
 	-- CI in this repo runs standalone: every global the addon touches must be here.
 	read_globals = {
@@ -18,12 +24,20 @@ else
 		"issecretvalue", "date", "time", "GetTime", "debugprofilestop",
 		"C_MerchantFrame", "C_Container", "GetMerchantNumItems", "GetMerchantItemID", "GetMerchantItemMaxStack",
 		"GetMerchantFilter", "BuyMerchantItem", "GetMoney", "bit",
+		-- the guide (GuideUI.lua)
+		"C_Map", "C_SuperTrack", "C_Texture", "IsInInstance", "GetPlayerFacing", "UnitName", "UnitGUID", "IsInGroup",
+		"InCombatLockdown", "GetNumTrainerServices", "GetTrainerServiceSkillLine", "hooksecurefunc",
+		"GetTrainerServiceInfo", "GetTrainerServiceTypeFilter", "SetTrainerServiceTypeFilter",
 	}
 end
 -- FrameXML globals for the vendor buy: the merchant window and bag constants.
 for _, g in ipairs({ "MerchantFrame", "LE_LOOT_FILTER_ALL", "NUM_BAG_SLOTS", "NUM_TOTAL_EQUIPPED_BAG_SLOTS" }) do
 	read_globals[#read_globals + 1] = g
 end
+-- FrameXML helpers of the guide (Lua mixins, not C API).
+read_globals[#read_globals + 1] = "CreateVector2D"
+read_globals[#read_globals + 1] = "UiMapPoint"
+read_globals[#read_globals + 1] = "MenuUtil"
 -- FrameXML globals the generated list doesn't carry (it is built from the C API lists).
 read_globals[#read_globals + 1] = "ProfessionsFrame"
 read_globals[#read_globals + 1] = "UIParent"

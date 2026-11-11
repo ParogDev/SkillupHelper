@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.6
+
+- A guide chip says where to go for the step to do now: the nearest vendor that sells its materials, the
+  profession's trainer, or an auction house. An arrow turns with you and the distance counts down; it stays up with
+  the profession window closed. Click it to pin the place on your map (click again to remove the pin), right-click
+  for "Stop guiding this step", "Lock position" and "Reset position", drag it to move it.
+- "Target <name>" under the chip targets the NPC once they are in sight and, when you play solo, puts a star on
+  them. It is your click on a secure button; it keeps working in combat.
+- Horde trade supply, cooking and Leatherworking NPCs and auctioneers ship as approximate starting points. Every
+  vendor, trainer and auctioneer you open is remembered with where it stands and what it sells, and replaces the
+  starting point.
+
 ## 0.2.5
 
 - The Next card buys its vendor reagents. When a step needs something a vendor sells ("buy 7 Hot Spices"), a Buy
