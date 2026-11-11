@@ -86,6 +86,7 @@ local function refreshSelftest()
 	st.tsmStale = age == nil or age > ns.TSM.STALE_HOURS
 	st.lastError = ns.lastError
 	st.panelErrors = ns.panelErrors
+	st.guide = ns.GuideUI and ns.GuideUI.status()
 	local ui = ns.UI.stats
 	st.ui = {
 		layout = ui.layout,

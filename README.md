@@ -20,6 +20,9 @@ planner adds it to every craft so a cheap recipe with a low skill-up chance does
 `/skillup recipes off` plans only with recipes you know or can train; `/skillup recipes on` lets it suggest recipe
 items to buy again.
 
+**Guide**: a small chip, there with the profession window closed too, points to the nearest vendor, trainer or
+auction house the next step needs, with the distance and a "Target" button. It learns every vendor you open.
+
 Requires TradeSkillMaster. The panel docks to TSM's crafting window, and to Blizzard's window after you press TSM's
 "WoW UI" button; it follows you when you switch. It finds TSM's window through `TSM_API` only and never changes TSM's
 frames. TSM's API cannot add to its crafting queue, so there is no "queue these" button.
