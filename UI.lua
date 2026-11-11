@@ -453,7 +453,10 @@ local function newCard(parent)
 	outFade:SetDuration(0.25)
 	og:SetToFinalAlpha(true)
 	og:SetScript("OnFinished", function()
-		card:Hide()
+		-- a quick second step may have made this card current again: only hide a card that is not
+		if not card.live then
+			card:Hide()
+		end
 	end)
 	card.slideOut = og
 	local fg = card:CreateAnimationGroup()
@@ -967,6 +970,7 @@ function UI.draw(d, prev)
 			local old = cur
 			f.current = 3 - f.current
 			cur = f.cards[f.current]
+			old.live = false
 			if how == "advance" and old:IsShown() then
 				old.pulse:Stop()
 				old.slideIn:Stop()
@@ -975,6 +979,13 @@ function UI.draw(d, prev)
 			else
 				old:Hide()
 			end
+		end
+		cur.live = true
+		if how ~= "same" then
+			-- the card may still be sliding out from a step ago: stop that before it is reused
+			cur.slideOut:Stop()
+			cur.slideIn:Stop()
+			cur.fadeIn:Stop()
 		end
 		local consumed = how == "same" and ns.View.consumed(prev and prev.next, d.next) or nil
 		local h = fillCard(cur, d.next, consumed)
@@ -1000,6 +1011,7 @@ function UI.draw(d, prev)
 		y = y + h + 14
 	else
 		for _, c in ipairs(f.cards) do
+			c.live = false
 			c.pulse:Stop()
 			c:Hide()
 		end

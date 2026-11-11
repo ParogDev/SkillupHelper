@@ -218,11 +218,13 @@ end
 local function redock()
 	local target, kind = ns.dockTarget()
 	ns.UI.dock(target, kind)
-	if ns.dockKind ~= nil and ns.dockKind ~= kind then
+	local changed = ns.dockKind ~= nil and ns.dockKind ~= kind
+	-- set before the redraw, which reads it
+	ns.dockKind = kind
+	if changed then
 		-- Show recipe is offered beside Blizzard's window only: redraw the card for the new window
 		ns.refresh()
 	end
-	ns.dockKind = kind
 	if ns.UI.frame and ns.UI.frame:IsShown() then
 		ns.UI.noteDock(kind)
 	end

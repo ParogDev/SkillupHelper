@@ -451,13 +451,14 @@ function V.describe(m, env)
 	if nx and nx.kind == "craft" and nx.thresholds then
 		d.runway = V.colourTarget(m.skill, nx.thresholds[1], nx.thresholds[2])
 	end
+	if nx then
+		-- actions read every reagent (a buy row past the cut still blocks Craft); only the display is cut
+		nx.actions, nx.actionsWhy = V.actions(nx, env)
+	end
 	if nx and #nx.mats > V.MAX_MATS then
 		for k = #nx.mats, V.MAX_MATS + 1, -1 do
 			nx.mats[k] = nil
 		end
-	end
-	if nx then
-		nx.actions, nx.actionsWhy = V.actions(nx, env)
 	end
 	return d
 end
