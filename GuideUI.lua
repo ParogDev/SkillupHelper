@@ -37,11 +37,13 @@ local seeds = {}
 local cur -- the step to do now: { key, step, profession, color, base = { [item] = count at plan time }, hadNeeds }
 local open -- the window open now: { kind, npc } (npc nil when it could not be recorded)
 local worldCache = {}
+local knownList -- Guide.known(seeds, gdb.npcs), rebuilt only after a learn
+local ghost -- a fade-out finished in combat: the chip is shown at alpha 0 until it can be hidden
 local view = { phase = "none" } -- the last evaluation: phase, need, pick, d (Guide.describe), since
-local want = { visible = false, row = false, name = nil }
+local want = { visible = false, row = false, name = nil, star = false }
 local chip, row, sb
 local armedName, fadingOut, dragging, dragStoppedAt
-local waypointOurs -- { map, x, y } of the pin this addon set
+local waypointOurs -- { map, x, y } of the pin this addon set (also gdb.pin, so a /reload can still remove it)
 local flashText, flashUntil = nil, 0
 local angleShown, angleGoal
 local evaluate
@@ -195,12 +197,87 @@ local function trainerLine()
 	return G.mostCommon(lines)
 end
 
-local function countLearned()
-	local n = 0
-	for _ in pairs(gdb and gdb.npcs or {}) do
-		n = n + 1
+-- The trainer window's type filter (Blizzard_TrainerUI's Filter menu: GetTrainerServiceTypeFilter(type) and
+-- SetTrainerServiceTypeFilter(type, on)) hides services from GetNumTrainerServices/GetTrainerServiceInfo too. To read
+-- the whole list, every type off is switched on, the list read, and each one switched back off; the restore is
+-- checked. Anything that cannot be read or restored makes the list partial: then it only ever counts as "may teach".
+local FILTER_TYPES = { "available", "unavailable", "used" }
+
+local function trainerServices()
+	local names, partial = {}, false
+	local saved, turnedOn = {}, {}
+	status.teachesWhy = nil
+	if type(GetTrainerServiceTypeFilter) ~= "function" or type(SetTrainerServiceTypeFilter) ~= "function" then
+		partial = true
+		status.teachesWhy = "no trainer filter API: list read as shown"
+	else
+		for _, f in ipairs(FILTER_TYPES) do
+			local ok, on = pcall(GetTrainerServiceTypeFilter, f)
+			if not ok or secret(on) then
+				partial = true
+				status.teachesWhy = ("GetTrainerServiceTypeFilter(%s) failed or is secret: list read as shown"):format(
+					f
+				)
+				saved = {}
+				break
+			end
+			saved[f] = on and true or false
+		end
+		for _, f in ipairs(FILTER_TYPES) do
+			if saved[f] == false then
+				if pcall(SetTrainerServiceTypeFilter, f, true) then
+					turnedOn[#turnedOn + 1] = f
+				else
+					partial = true
+					status.teachesWhy = ("SetTrainerServiceTypeFilter(%s) failed: list read in part"):format(f)
+				end
+			end
+		end
 	end
-	status.learned = n
+	local okN, n = pcall(GetNumTrainerServices)
+	if not okN or type(n) ~= "number" or secret(n) then
+		n, partial = 0, true
+		status.teachesWhy = "GetNumTrainerServices is secret or failed"
+	end
+	for i = 1, n do
+		local ok, name, kind, _, _, sub = pcall(GetTrainerServiceInfo, i)
+		if not ok or type(name) ~= "string" or secret(name) or name == "" then
+			-- a name still loading (TRAINER_SERVICE_INFO_NAME_UPDATE) or secret: the list is not whole
+			partial = true
+			status.teachesWhy = ("GetTrainerServiceInfo(%d) gave no readable name"):format(i)
+		elseif secret(kind) or kind ~= "header" then
+			names[#names + 1] = name
+			-- a rank-up may come as "Cooking" with the rank as its subtext ("Expert")
+			if type(sub) == "string" and not secret(sub) and sub ~= "" then
+				names[#names + 1] = sub .. " " .. name
+				names[#names + 1] = ("%s (%s)"):format(name, sub)
+			end
+		end
+	end
+	if #names == 0 then
+		partial = true
+		status.teachesWhy = status.teachesWhy or "the trainer listed no services"
+	end
+	for _, f in ipairs(turnedOn) do
+		pcall(SetTrainerServiceTypeFilter, f, false)
+		local ok, on = pcall(GetTrainerServiceTypeFilter, f)
+		if not ok or on then
+			fail(("trainer filter %s not restored after reading the list"):format(f))
+		end
+	end
+	status.lastTeaches = { services = n, names = #names, partial = partial, filtersOpened = #turnedOn }
+	return names, partial
+end
+
+local function countLearned()
+	local n, t = 0, 0
+	for _, npc in pairs(gdb and gdb.npcs or {}) do
+		n = n + 1
+		if type(npc.teaches) == "table" then
+			t = t + 1
+		end
+	end
+	status.learned, status.teachesKnown = n, t
 end
 
 local function learn(kind)
@@ -213,15 +290,27 @@ local function learn(kind)
 		rec.sells = merchantItems()
 	elseif kind == "trainer" then
 		rec.trains = trainerLine()
+		rec.teaches, rec.teachesPartial = trainerServices()
 	elseif kind == "auction" then
 		rec.auction = true
 	end
 	if not rec.map then
+		-- not stored (no position), but the open window still answers "does this trainer teach it"
+		if rec.teaches then
+			open.npc = {
+				id = rec.id,
+				name = rec.name,
+				trains = rec.trains,
+				teaches = G.teachesSet(rec.teaches),
+				teachesPartial = rec.teachesPartial or nil,
+			}
+		end
 		status.lastLearn = { kind = kind, name = rec.name, why = why }
 		return
 	end
 	local npc = gdb and G.learn(gdb.npcs, rec, time())
 	if npc then
+		knownList = nil
 		open.npc = npc
 		status.lastLearn = { kind = kind, name = npc.name, id = npc.id, map = npc.map }
 		countLearned()
@@ -242,6 +331,7 @@ local function trim(step)
 		from = step.from,
 		source = step.source,
 		name = step.name,
+		rank = step.rank,
 		at = step.at,
 		color = step.color,
 		buy = buy,
@@ -277,12 +367,24 @@ local function onModel(model)
 		return
 	end
 	local key = G.stepKey(step)
-	local base = {}
+	local same = cur and cur.key == key
+	-- the bags at the step's first scan: a rescan of the same step keeps it, or what was bought would vanish
+	local base = same and cur.base or {}
 	for _, b in ipairs(step.buy or {}) do
-		base[b.item] = have(b.item)
+		if base[b.item] == nil then
+			base[b.item] = have(b.item)
+		end
 	end
-	local color = (step.kind == "train" or step.kind == "buyRecipe") and "gold" or step.color or "grey"
-	local hadNeeds = cur and cur.key == key and cur.hadNeeds or nil
+	if not same then
+		-- a stop is for one step: a new step forgets the old ones
+		for k in pairs(gdb.stopped) do
+			if k ~= key then
+				gdb.stopped[k] = nil
+			end
+		end
+	end
+	local color = (tostring(step.kind):find("^train") or step.kind == "buyRecipe") and "gold" or step.color or "grey"
+	local hadNeeds = same and cur.hadNeeds or nil
 	cur = { key = key, step = trim(step), profession = model.profession, color = color, base = base }
 	cur.hadNeeds = hadNeeds
 	gdb.last = cur
@@ -397,7 +499,8 @@ local function placeSecure()
 		status.combatQueued = true
 		return
 	end
-	if chip:IsShown() and not fadingOut and row:IsShown() and armedName then
+	-- never over a chip that is fading, faded (ghost) or being dragged: the click would land on nothing
+	if chip:IsShown() and not fadingOut and not ghost and not dragging and row:IsShown() and armedName then
 		local l, b, w, h = row:GetRect()
 		if l then
 			local s = row:GetEffectiveScale() / UIParent:GetEffectiveScale()
@@ -415,24 +518,26 @@ local function placeSecure()
 end
 
 -- Show, hide, resize and arm: out of combat only; in combat the change waits for PLAYER_REGEN_ENABLED.
+local function shownNow()
+	return chip:IsShown() and not fadingOut and not ghost
+end
+
 local function structure()
+	-- the star only when the NPC is close: a /targetexact that finds nobody keeps the old target, and the star
+	-- would land on that
+	local star = not IsInGroup() and want.star
 	if InCombatLockdown() then
-		if
-			want.visible ~= (chip:IsShown() and not fadingOut)
-			or want.row ~= row:IsShown()
-			or want.name ~= armedName
-		then
+		if want.visible ~= shownNow() or want.row ~= row:IsShown() or want.name ~= armedName or star ~= sb.star then
 			status.combatQueued = true
 		end
 		return
 	end
 	local queued = status.combatQueued
 	status.combatQueued = false
-	local changed = queued or want.row ~= row:IsShown() or want.visible ~= (chip:IsShown() and not fadingOut)
-	local solo = not IsInGroup()
-	if want.name ~= armedName or solo ~= sb.solo then
-		armedName, sb.solo, changed = want.name, solo, true
-		sb:SetAttribute("macrotext", G.macro(armedName, solo))
+	local changed = queued or want.row ~= row:IsShown() or want.visible ~= shownNow()
+	if want.name ~= armedName or star ~= sb.star then
+		armedName, sb.star, changed = want.name, star, true
+		sb:SetAttribute("macrotext", G.macro(armedName, star))
 	end
 	if not changed then
 		return
@@ -440,12 +545,17 @@ local function structure()
 	row:SetShown(want.row)
 	chip:SetHeight(BODY + (want.row and ROW or 0))
 	if want.visible then
-		if not chip:IsShown() or fadingOut then
+		if not shownNow() then
 			chip.fadeOut:Stop()
-			fadingOut = false
+			fadingOut, ghost = false, false
+			chip:SetAlpha(0)
 			chip:Show()
 			chip.fadeIn:Play()
 		end
+	elseif ghost then
+		ghost = false
+		chip:Hide()
+		chip:SetAlpha(1)
 	elseif chip:IsShown() and not fadingOut then
 		fadingOut = true
 		chip.fadeOut:Play()
@@ -474,6 +584,9 @@ local function clearPin()
 		pcall(C_Map.ClearUserWaypoint)
 	end
 	waypointOurs = nil
+	if gdb then
+		gdb.pin = nil
+	end
 	status.waypoint = false
 end
 
@@ -506,6 +619,7 @@ local function togglePin()
 	end
 	pcall(C_SuperTrack.SetSuperTrackedUserWaypoint, true)
 	waypointOurs = { map = npc.map, x = npc.x / 100, y = npc.y / 100 }
+	gdb.pin = waypointOurs
 	status.waypoint = true
 	flash("Pinned on your map", 2)
 end
@@ -517,7 +631,7 @@ function evaluate()
 		return
 	end
 	local now = GetTime()
-	local phase, need, pick, why
+	local phase, need, pick, why, excluded, certain
 	if not gdb or not cur then
 		phase, why = "none", "no plan step yet (open a profession once)"
 	elseif gdb.stopped[cur.key] then
@@ -531,18 +645,26 @@ function evaluate()
 			cur.hadNeeds, cur.lastNeed = true, need
 			local h, hwhy = here()
 			local servers
-			pick, servers = G.nearest(G.known(seeds, gdb.npcs), need, h, world)
-			status.servers = servers
+			knownList = knownList or G.known(seeds, gdb.npcs)
+			pick, servers, excluded = G.nearest(knownList, need, h, world)
+			status.servers, status.excluded = servers, excluded
+			certain = pick and pick.certain
+			-- the open window counts when its NPC serves the need: a trainer only when its list has the name (or
+			-- was read in part); an NPC that could not be recorded, or a vendor without a position, is given the
+			-- benefit of the doubt
+			local openScore = open and open.kind == need.kind and open.npc and G.serves(open.npc, need)
 			local openServes = open
 				and open.kind == need.kind
-				and (not open.npc or not open.npc.map or G.serves(open.npc, need) > 0)
+				and (not open.npc or (need.kind ~= "trainer" and not open.npc.map) or openScore > 0)
 			if openServes then
 				phase = "here"
+				certain = need.kind ~= "trainer" or not need.name or (openScore or 0) >= 2
 			elseif not h then
 				phase, why = "notnow", hwhy
 			elseif not pick then
 				phase = "unknown"
 				why = (#seeds == 0 and status.learned == 0) and "no seed and nothing learned"
+					or (excluded or 0) > 0 and G.unknownText(need, itemName, excluded)
 					or ("no known NPC serves this %s need"):format(need.kind)
 			else
 				local name = targetName()
@@ -561,6 +683,7 @@ function evaluate()
 	status.need = need and need.kind
 	status.npc = pick and pick.npc.name
 	status.distance = pick and pick.distance and math.floor(pick.distance + 0.5)
+	status.certain = certain and true or false
 	local f = facing()
 	local thing = need and need.items and need.items[1] and itemName(need.items[1].item)
 	view.d = G.describe({
@@ -575,6 +698,8 @@ function evaluate()
 		marked = not IsInGroup(),
 		color = cur and cur.color,
 		why = why,
+		certain = certain and true or false,
+		excluded = excluded,
 	})
 	angleGoal = (f and pick and pick.bearing) and G.arrowAngle(pick.bearing, f) or nil
 	local held = now - (view.since or now)
@@ -583,6 +708,7 @@ function evaluate()
 		and not (phase == "notnow" and held > NOTNOW_HOLD)
 	want.row = want.visible and view.d.action ~= nil
 	want.name = want.row and pick and pick.npc.name or nil
+	want.star = phase == "near" or phase == "arrived" or phase == "targeted"
 	if want.visible then
 		draw()
 	end
@@ -819,7 +945,11 @@ local function create()
 	chip.fadeOut:SetToFinalAlpha(true)
 	chip.fadeOut:SetScript("OnFinished", function()
 		fadingOut = false
-		if not InCombatLockdown() then
+		if InCombatLockdown() then
+			-- shown at alpha 0 until combat ends: structure() hides it, or fades it back in when wanted again
+			ghost = true
+			status.combatQueued = true
+		else
 			chip:Hide()
 			chip:SetAlpha(1)
 		end
@@ -842,6 +972,7 @@ local function create()
 		end
 		dragging = true
 		chip:StartMoving()
+		placeSecure() -- out of combat here: the secure button leaves the row while it moves
 		draw()
 	end)
 	body:SetScript("OnDragStop", function()
@@ -908,8 +1039,15 @@ local function init()
 	end
 	g.npcs = type(g.npcs) == "table" and g.npcs or {}
 	g.stopped = type(g.stopped) == "table" and g.stopped or {}
+	local p = g.pin
+	if type(p) == "table" and type(p.map) == "number" and type(p.x) == "number" and type(p.y) == "number" then
+		waypointOurs = p -- the pin set before the /reload: still ours to remove
+	else
+		g.pin = nil
+	end
 	gdb = g
 	seeds = G.seedRecords(ns.Data.npcs)
+	knownList = nil
 	status.seeds = #seeds
 	if not ns.Data.npcs then
 		status.lastError = "Data/Npcs.lua not loaded: no seeds"
@@ -918,6 +1056,12 @@ local function init()
 	if type(g.last) == "table" and type(g.last.step) == "table" and g.last.key then
 		cur = g.last
 		cur.base = type(cur.base) == "table" and cur.base or {}
+	end
+	-- stops of steps other than the current one are stale (older saves kept every one)
+	for k in pairs(g.stopped) do
+		if not cur or k ~= cur.key then
+			g.stopped[k] = nil
+		end
 	end
 	create()
 	hooksecurefunc(ns.UI, "show", function(model)

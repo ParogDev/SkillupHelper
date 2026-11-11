@@ -27,6 +27,7 @@ else
 		-- the guide (GuideUI.lua)
 		"C_Map", "C_SuperTrack", "C_Texture", "IsInInstance", "GetPlayerFacing", "UnitName", "UnitGUID", "IsInGroup",
 		"InCombatLockdown", "GetNumTrainerServices", "GetTrainerServiceSkillLine", "hooksecurefunc",
+		"GetTrainerServiceInfo", "GetTrainerServiceTypeFilter", "SetTrainerServiceTypeFilter",
 	}
 end
 -- FrameXML globals for the vendor buy: the merchant window and bag constants.

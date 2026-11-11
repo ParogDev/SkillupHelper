@@ -35,8 +35,9 @@ function G.needsOf(step, profession)
 	if type(step) ~= "table" then
 		return out
 	end
-	if step.kind == "train" then
-		out[1] = { kind = "trainer", profession = profession, name = step.name, at = step.at }
+	if type(step.kind) == "string" and step.kind:find("^train") then
+		-- "train" (a recipe) and any later train step (a rank-up): the service to learn is step.name, else step.rank
+		out[1] = { kind = "trainer", profession = profession, name = step.name or step.rank, at = step.at }
 		return out
 	elseif step.kind == "buyRecipe" then
 		out[1] = { kind = "auction", items = { { item = step.item, count = 1 } } }
@@ -76,8 +77,34 @@ function G.pending(needs, have)
 	return out
 end
 
--- How well an NPC serves a need: the number of the need's items it sells (vendor), 1 when it trains the profession
--- or is an auctioneer, 0 when it does not serve it.
+-- A trainer service name as the teaches set keys it: lowercased, trimmed. nil for anything but a non-empty string.
+function G.norm(s)
+	if type(s) ~= "string" then
+		return nil
+	end
+	s = s:lower():match("^%s*(.-)%s*$")
+	return s ~= "" and s or nil
+end
+
+-- Whether a trainer's line and a profession name are the same profession: equal, or one is the other behind a
+-- prefix word ("Classic Leatherworking" and "Leatherworking"). Empty names match nothing.
+function G.sameProfession(a, b)
+	if type(a) ~= "string" or type(b) ~= "string" or a == "" or b == "" then
+		return false
+	end
+	if a == b then
+		return true
+	end
+	local long, short = a, b
+	if #short > #long then
+		long, short = short, long
+	end
+	return long:sub(-#short - 1) == " " .. short
+end
+
+-- How well an NPC serves a need: the number of the need's items it sells (vendor); 1 for an auctioneer; for a trainer
+-- of the profession 2 when its learned service list has the need's name (certain), 1 when that is not known (a seed,
+-- a trainer never opened, a list read in part, or a need without a name), 0 when its full list lacks the name.
 function G.serves(npc, need)
 	if need.kind == "vendor" then
 		local n = 0
@@ -88,28 +115,56 @@ function G.serves(npc, need)
 		end
 		return n
 	elseif need.kind == "trainer" then
-		local p = need.profession
-		local t = npc.trains
-		if type(p) == "string" and type(t) == "string" and (p:find(t, 1, true) or t:find(p, 1, true)) then
+		if not G.sameProfession(need.profession, npc.trains) then
+			return 0
+		end
+		local name = G.norm(need.name)
+		if not name or type(npc.teaches) ~= "table" then
 			return 1
 		end
-		return 0
+		-- a rank-up may be listed as the profession with the rank before it ("Expert Cooking")
+		local prof = G.norm(npc.trains)
+		if npc.teaches[name] or (prof and npc.teaches[name .. " " .. prof]) then
+			return 2
+		end
+		return npc.teachesPartial and 1 or 0
 	elseif need.kind == "auction" then
 		return npc.auction and 1 or 0
 	end
 	return 0
 end
 
--- Every known NPC, learned over seeded (same id).
+-- A learned record over the seed of the same id, as a new table (the learned one is SavedVariables): the visit's
+-- position, name and service list win; the seed fills what the visit left empty (role, place); sells is the union.
+local function merge(seed, npc)
+	local m = {}
+	for k, v in pairs(npc) do
+		m[k] = v
+	end
+	m.trains = npc.trains or seed.trains
+	m.auction = npc.auction or seed.auction
+	m.place = npc.place or seed.place
+	if seed.sells or npc.sells then
+		m.sells = {}
+		for item in pairs(seed.sells or {}) do
+			m.sells[item] = true
+		end
+		for item in pairs(npc.sells or {}) do
+			m.sells[item] = true
+		end
+	end
+	return m
+end
+
+-- Every known NPC, learned merged over seeded (same id).
 function G.known(seeds, learned)
 	local byId, out = {}, {}
 	for id, npc in pairs(learned or {}) do
 		byId[id] = npc
 	end
 	for _, npc in ipairs(seeds or {}) do
-		if not byId[npc.id] then
-			byId[npc.id] = npc
-		end
+		local l = byId[npc.id]
+		byId[npc.id] = l and merge(npc, l) or npc
 	end
 	for _, npc in pairs(byId) do
 		out[#out + 1] = npc
@@ -134,14 +189,20 @@ function G.arrowAngle(bearing, facing)
 end
 
 -- The nearest NPC serving `need`. here = { continent, x, y } (world yards) or nil when the position is unknown.
--- world(map, x, y) -> continent, wx, wy or nil. Picks the best server first (a vendor selling every item beats one
--- selling some), then the shortest distance on the player's continent; other continents last, without a distance.
--- Returns { npc, distance, bearing, wx, wy, continent, sameContinent, partial } or nil, and how many serve it.
+-- world(map, x, y) -> continent, wx, wy or nil. Picks the best server first (the higher G.serves score: a vendor
+-- selling every item beats one selling some, a trainer known to teach the name beats one that may), then the
+-- shortest distance on the player's continent; other continents last, without a distance.
+-- Returns { npc, distance, bearing, wx, wy, continent, sameContinent, partial, certain } or nil, how many serve it,
+-- and how many trainers of the profession were left out because their full service list lacks the name.
 function G.nearest(npcs, need, here, world)
-	local best, bestKey, servers = nil, nil, 0
+	local best, bestKey, servers, excluded = nil, nil, 0, 0
+	local named = need.kind == "trainer" and G.norm(need.name) ~= nil
 	local want = need.kind == "vendor" and #need.items or 1
 	for _, npc in ipairs(npcs) do
 		local s = G.serves(npc, need)
+		if s == 0 and named and G.sameProfession(need.profession, npc.trains) then
+			excluded = excluded + 1
+		end
 		if s > 0 then
 			servers = servers + 1
 			local cont, wx, wy = world(npc.map, npc.x, npc.y)
@@ -151,8 +212,8 @@ function G.nearest(npcs, need, here, world)
 				local dx, dy = wx - here.x, wy - here.y
 				dist = math.sqrt(dx * dx + dy * dy)
 			end
-			-- lower is better: missing items, then other continent, then distance
-			local key = (want - s) * 1e9 + (same and 0 or 1e8) + (dist or 0)
+			-- lower is better: a higher serve score, then the same continent, then distance
+			local key = -s * 1e9 + (same and 0 or 1e8) + (dist or 0)
 			-- ids are numbers, or "name:<Name>" for an NPC learned without a readable GUID: compare as strings
 			if not bestKey or key < bestKey or (key == bestKey and tostring(npc.id) < tostring(best.npc.id)) then
 				bestKey = key
@@ -163,7 +224,9 @@ function G.nearest(npcs, need, here, world)
 					wy = wy,
 					continent = cont,
 					sameContinent = same,
-					partial = s < want,
+					partial = need.kind == "vendor" and s < want,
+					-- false only for a named trainer need whose trainer may or may not teach it
+					certain = not named or s >= 2,
 				}
 				if same then
 					best.bearing = G.bearing(here.x, here.y, wx, wy)
@@ -171,7 +234,7 @@ function G.nearest(npcs, need, here, world)
 			end
 		end
 	end
-	return best, servers
+	return best, servers, excluded
 end
 
 -- The guide's state for the chip and the card: "none" (no known NPC), "away" (another continent or no position),
@@ -236,9 +299,14 @@ function G.needLabel(need, nameOf)
 	return table.concat(names, ", ")
 end
 
--- The honest line when no NPC is known for a need.
-function G.unknownText(need, nameOf)
-	if need.kind == "trainer" then
+-- The honest line when no NPC is known for a need. excluded: trainers of the profession whose full list lacks the
+-- need's name (Guide.nearest's third value).
+function G.unknownText(need, nameOf, excluded)
+	if need.kind == "trainer" and need.name and (excluded or 0) > 0 then
+		return ("No trainer you've opened teaches %s. It may come from a special NPC or a recipe item."):format(
+			need.name
+		)
+	elseif need.kind == "trainer" then
 		return ("No %s trainer known yet. Guards in any city point the way; I note trainers you open."):format(
 			need.profession or "profession"
 		)
@@ -250,8 +318,21 @@ function G.unknownText(need, nameOf)
 	)
 end
 
+-- A list of trainer service names as the set G.serves looks names up in.
+function G.teachesSet(list)
+	local set = {}
+	for _, name in ipairs(list or {}) do
+		local k = G.norm(name)
+		if k then
+			set[k] = true
+		end
+	end
+	return set
+end
+
 -- Merges what a window just showed into the learned records. rec = { id, name, map, x, y, sells (list of item ids),
--- trains, auction }. Keeps what an earlier visit learned that this one cannot see (a trainer that also sells).
+-- trains, auction, teaches (list of service names), teachesPartial }. Keeps what an earlier visit learned that this
+-- one cannot see (a trainer that also sells). A trainer's service list is replaced, not merged: it is the whole list.
 function G.learn(learned, rec, now)
 	if not rec.id or not rec.map or not rec.x then
 		return nil
@@ -264,6 +345,10 @@ function G.learn(learned, rec, now)
 		for _, item in ipairs(rec.sells) do
 			npc.sells[item] = true
 		end
+	end
+	if rec.teaches then
+		npc.teaches = G.teachesSet(rec.teaches)
+		npc.teachesPartial = rec.teachesPartial and true or nil
 	end
 	npc.trains = rec.trains or npc.trains
 	npc.auction = rec.auction or npc.auction
@@ -328,12 +413,13 @@ end
 
 -- The Target button's macro. "/tm !1" puts the star on without toggling it off when it is already there (Blizzard's
 -- own check, so no secret raid-target index is read here); solo only, since a group would see it too. The target is
--- cleared first so a /targetexact that finds nobody leaves nothing for the star to land on.
+-- not cleared first: a click from too far away keeps the player's target (the star may then land on it, as Blizzard's
+-- /tm does for any target).
 function G.macro(name, solo)
 	if type(name) ~= "string" or name == "" then
 		return nil
 	end
-	local m = "/cleartarget\n/targetexact " .. name
+	local m = "/targetexact " .. name
 	if solo then
 		m = m .. "\n/tm !1"
 	end
@@ -356,11 +442,13 @@ end
 
 -- The chip's copy for a guide state. s = { phase, need, name, distance, place, thing (first item's name),
 -- profession, compass (a word, when the facing is unknown and the arrow is hidden), marked (solo: the star goes on),
--- color (the step's), why }. Phases: Guide.phase's, plus "done", "unknown" (no NPC known) and "notnow" (no position).
+-- color (the step's), why, certain (false: a trainer that may not teach need.name), excluded (Guide.nearest's) }.
+-- Phases: Guide.phase's, plus "done", "unknown" (no NPC known) and "notnow" (no position).
 -- Returns { l1, r1, l2, action, style ("quiet" | "primary"), icon ("arrow" | "star" | "dot"), tint, why }.
 function G.describe(s)
 	local p, need = s.phase, s.need or {}
 	local d = { l1 = s.name, r1 = G.distanceText(s.distance) or "", why = s.why }
+	local maybe = need.kind == "trainer" and need.name and s.certain == false
 	if p == "far" or p == "near" or p == "arrived" or p == "away" then
 		d.action, d.style, d.icon = "Target " .. tostring(s.name), "quiet", "arrow"
 		d.tint = "bone"
@@ -368,9 +456,16 @@ function G.describe(s)
 		if p == "near" or p == "arrived" then
 			d.style, d.tint = "primary", s.color or "bone"
 			d.l2 = p == "near" and "Close. Target them to see who it is" or "Right here. Target them to find them"
-		elseif p == "away" then
-			d.icon = nil
-			d.l2 = withPlace(role(s), s.place or "another continent")
+		else
+			-- /targetexact finds a unit only about G.NEAR yards away: say so before the click
+			d.action = d.action .. " (when in sight)"
+			if p == "away" then
+				d.icon = nil
+				d.l2 = withPlace(role(s), s.place or "another continent")
+			end
+		end
+		if maybe then
+			d.l2 = ("May teach %s: not checked yet"):format(need.name)
 		end
 		if s.compass and d.icon then
 			d.icon = nil
@@ -381,7 +476,9 @@ function G.describe(s)
 		d.l2 = s.marked and "Marked with a star. Right-click them to talk" or "Right-click them to talk"
 	elseif p == "here" then
 		d.l1, d.r1, d.icon, d.tint = "You are here", "", "dot", "green"
-		if need.kind == "trainer" then
+		if need.kind == "trainer" and need.name then
+			d.l2 = maybe and ("Look for %s in the list"):format(need.name) or ("Learn %s here"):format(need.name)
+		elseif need.kind == "trainer" then
 			d.l2 = "Learn the next rank here"
 		elseif need.kind == "auction" then
 			d.l2 = "Buy the materials on the list"
@@ -394,7 +491,10 @@ function G.describe(s)
 		d.l2 = ("Open %s to craft"):format(s.profession or "the profession")
 	elseif p == "unknown" then
 		d.r1 = ""
-		if need.kind == "trainer" then
+		if need.kind == "trainer" and need.name and (s.excluded or 0) > 0 then
+			d.l1 = "No trainer found"
+			d.l2 = ("None you've opened teaches %s"):format(need.name)
+		elseif need.kind == "trainer" then
 			d.l1 = "No known trainer yet"
 			d.l2 = ("Ask a city guard for the %s trainer"):format(s.profession or need.profession or "profession")
 		elseif need.kind == "auction" then

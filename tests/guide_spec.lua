@@ -129,6 +129,140 @@ describe("Guide", function()
 		assert.equal(1, G.serves(t, { kind = "trainer", profession = "Classic Leatherworking" }))
 		assert.equal(0, G.serves(t, { kind = "trainer", profession = "Cooking" }))
 		assert.equal(0, G.serves({}, { kind = "trainer", profession = "Cooking" }))
+		-- an empty or partial name matches nothing
+		assert.equal(0, G.serves({ trains = "" }, { kind = "trainer", profession = "Cooking" }))
+		assert.equal(0, G.serves({ trains = "Cooking" }, { kind = "trainer", profession = "" }))
+		assert.equal(0, G.serves({ trains = "Leather" }, { kind = "trainer", profession = "Leatherworking" }))
+	end)
+
+	describe("which trainer teaches a named recipe", function()
+		local TEA = "Goldthorn Tea"
+		local need = { kind = "trainer", profession = "Cooking", name = TEA }
+
+		it("ranks a trainer known to teach it over a nearer one that only may", function()
+			local npcs = G.seedRecords({
+				{ id = 1, name = "Zamja", map = 1, x = 51, y = 50, role = "cooktrainer" },
+				{ id = 2, name = "Far Cook", map = 1, x = 90, y = 50, role = "cooktrainer" },
+			})
+			local learned = {}
+			G.learn(learned, { id = 2, name = "Far Cook", map = 1, x = 90, y = 50, teaches = { " goldthorn TEA " } }, 1)
+			local all = G.known(npcs, learned)
+			local pick = G.nearest(all, need, here(1, 50, 50), world)
+			assert.equal(2, pick.npc.id)
+			assert.is_true(pick.certain)
+			-- without the learned list both may: the nearer one, not certain
+			local maybe = G.nearest(npcs, need, here(1, 50, 50), world)
+			assert.equal(1, maybe.npc.id)
+			assert.is_false(maybe.certain)
+		end)
+
+		it("leaves out a trainer whose full list lacks it and keeps one read in part", function()
+			local learned = {}
+			G.learn(learned, { id = 1, name = "Zamja", map = 1, x = 51, y = 50, teaches = { "Spiced Wolf Meat" } }, 1)
+			G.learn(learned, {
+				id = 2,
+				name = "Partial",
+				map = 1,
+				x = 90,
+				y = 50,
+				teaches = { "Spiced Wolf Meat" },
+				teachesPartial = true,
+			}, 1)
+			local seeds = G.seedRecords({
+				{ id = 1, name = "Zamja", map = 1, x = 51, y = 50, role = "cooktrainer" },
+				{ id = 2, name = "Partial", map = 1, x = 90, y = 50, role = "cooktrainer" },
+			})
+			local all = G.known(seeds, learned)
+			local pick, servers, excluded = G.nearest(all, need, here(1, 50, 50), world)
+			assert.equal(2, pick.npc.id)
+			assert.is_false(pick.certain)
+			assert.same({ 1, 1 }, { servers, excluded })
+			-- the partial one read in full later, still without it: nobody left
+			G.learn(learned, { id = 2, name = "Partial", map = 1, x = 90, y = 50, teaches = { "Herb Baked Egg" } }, 2)
+			local none, n, ex = G.nearest(G.known(seeds, learned), need, here(1, 50, 50), world)
+			assert.is_nil(none)
+			assert.same({ 0, 2 }, { n, ex })
+			-- a need without a name still goes to any trainer of the profession
+			local any = G.nearest(G.known(seeds, learned), { kind = "trainer", profession = "Cooking" }, nil, world)
+			assert.is_true(any.certain)
+		end)
+
+		it("replaces the service list on each visit and keeps the trainer line", function()
+			local learned = {}
+			G.learn(learned, { id = 3, map = 1, x = 1, y = 1, trains = "Cooking", teaches = { "A", "B" } }, 1)
+			G.learn(learned, { id = 3, map = 1, x = 1, y = 1, teaches = { "C" }, teachesPartial = true }, 2)
+			assert.same({ c = true }, learned[3].teaches)
+			assert.is_true(learned[3].teachesPartial)
+			assert.equal("Cooking", learned[3].trains)
+			G.learn(learned, { id = 3, map = 1, x = 1, y = 1, teaches = { "D" } }, 3)
+			assert.is_nil(learned[3].teachesPartial)
+			-- a vendor visit leaves the trainer's list alone
+			G.learn(learned, { id = 3, map = 1, x = 1, y = 1, sells = { THREAD } }, 4)
+			assert.same({ d = true }, learned[3].teaches)
+		end)
+
+		it("finds a rank-up listed with the rank before the profession", function()
+			local t = { trains = "Cooking", teaches = G.teachesSet({ "Expert Cooking" }) }
+			assert.equal(2, G.serves(t, { kind = "trainer", profession = "Cooking", name = "Expert" }))
+			assert.equal(2, G.serves(t, { kind = "trainer", profession = "Cooking", name = "Expert Cooking" }))
+			assert.equal(0, G.serves(t, { kind = "trainer", profession = "Cooking", name = "Artisan" }))
+		end)
+
+		it("reads a train-rank step's name, falling back to its rank", function()
+			local r = G.needsOf({ kind = "trainRank", rank = "Expert", at = 125 }, "Cooking")
+			assert.same({ "trainer", "Cooking", "Expert", 125 }, { r[1].kind, r[1].profession, r[1].name, r[1].at })
+			local n = G.needsOf({ kind = "trainRank", name = "Expert Cooking", rank = "Expert" }, "Cooking")
+			assert.equal("Expert Cooking", n[1].name)
+			assert.equal(TEA, G.needsOf({ kind = "train", name = TEA, at = 215 }, "Cooking")[1].name)
+		end)
+
+		it("says a trainer only may teach it, and when no trainer opened does", function()
+			local far = G.describe({ phase = "far", need = need, name = "Zamja", distance = 140, certain = false })
+			assert.equal("May teach Goldthorn Tea: not checked yet", far.l2)
+			assert.equal("Target Zamja (when in sight)", far.action)
+			local near = G.describe({ phase = "near", need = need, name = "Zamja", distance = 40, certain = false })
+			assert.same({ "May teach Goldthorn Tea: not checked yet", "arrow" }, { near.l2, near.icon })
+			local sure =
+				G.describe({ phase = "far", need = need, name = "Zamja", certain = true, profession = "Cooking" })
+			assert.equal("Cooking trainer", sure.l2)
+			assert.equal("Learn Goldthorn Tea here", G.describe({ phase = "here", need = need, certain = true }).l2)
+			assert.equal(
+				"Look for Goldthorn Tea in the list",
+				G.describe({ phase = "here", need = need, certain = false }).l2
+			)
+			local none = G.describe({ phase = "unknown", need = need, excluded = 2 })
+			assert.same({ "No trainer found", "None you've opened teaches Goldthorn Tea" }, { none.l1, none.l2 })
+			assert.equal("No known trainer yet", G.describe({ phase = "unknown", need = need, excluded = 0 }).l1)
+			assert.equal(
+				"No trainer you've opened teaches Goldthorn Tea. It may come from a special NPC or a recipe item.",
+				G.unknownText(need, nil, 2)
+			)
+			assert.truthy(G.unknownText(need, nil, 0):find("No Cooking trainer known yet", 1, true))
+		end)
+	end)
+
+	it("merges a learned NPC over its seed: role and place kept, sells joined", function()
+		local seeds = G.seedRecords({
+			{
+				id = 8,
+				name = "Seed",
+				map = 1,
+				x = 1,
+				y = 1,
+				role = "cooktrainer",
+				place = "Orgrimmar",
+				sells = { SALT },
+			},
+		})
+		local learned = {}
+		G.learn(learned, { id = 8, name = "Learned", map = 1, x = 2, y = 2, sells = { THREAD } }, 1)
+		local m = G.known(seeds, learned)[1]
+		assert.same({ "Learned", 2, "Cooking", "Orgrimmar" }, { m.name, m.x, m.trains, m.place })
+		assert.is_true(m.sells[SALT] and m.sells[THREAD])
+		assert.is_nil(m.seed)
+		-- the saved record is not changed by the merge
+		assert.is_nil(learned[8].trains)
+		assert.is_nil(learned[8].sells[SALT])
 	end)
 
 	it("goes far, near, arrived, targeted, here", function()
@@ -203,8 +337,8 @@ describe("Guide", function()
 		assert.is_nil(G.stepKey(nil))
 		assert.equal("Cooking", G.mostCommon({ "Cooking", nil, "Riding", "Cooking" }))
 		assert.is_nil(G.mostCommon({}))
-		assert.equal("/cleartarget\n/targetexact Tamar\n/tm !1", G.macro("Tamar", true))
-		assert.equal("/cleartarget\n/targetexact Tamar", G.macro("Tamar", false))
+		assert.equal("/targetexact Tamar\n/tm !1", G.macro("Tamar", true))
+		assert.equal("/targetexact Tamar", G.macro("Tamar", false))
 		assert.is_nil(G.macro("", true))
 	end)
 
@@ -223,9 +357,12 @@ describe("Guide", function()
 		end
 		local far = with({ phase = "far", distance = 140 })
 		assert.same({ "Tamar", "140 yd", "Sells Fine Thread, Orgrimmar" }, { far.l1, far.r1, far.l2 })
-		assert.same({ "Target Tamar", "quiet", "arrow", "bone" }, { far.action, far.style, far.icon, far.tint })
+		assert.same(
+			{ "Target Tamar (when in sight)", "quiet", "arrow", "bone" },
+			{ far.action, far.style, far.icon, far.tint }
+		)
 		local near = with({ phase = "near", distance = 42 })
-		assert.same({ "primary", "yellow" }, { near.style, near.tint })
+		assert.same({ "primary", "yellow", "Target Tamar" }, { near.style, near.tint, near.action })
 		local blind = with({ phase = "far", distance = 140, compass = "west" })
 		assert.same({ "140 yd west", nil }, { blind.r1, blind.icon })
 		local away = with({ phase = "away", place = false })
