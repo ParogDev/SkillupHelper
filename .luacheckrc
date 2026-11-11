@@ -21,6 +21,7 @@ end
 -- FrameXML globals the generated list doesn't carry (it is built from the C API lists).
 read_globals[#read_globals + 1] = "ProfessionsFrame"
 read_globals[#read_globals + 1] = "UIParent"
+read_globals[#read_globals + 1] = "debugstack"
 -- TradeSkillMaster's public API (a required dependency).
 read_globals[#read_globals + 1] = "TSM_API"
 

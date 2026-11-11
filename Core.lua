@@ -69,6 +69,7 @@ local function refreshSelftest()
 	st.tsmAgeHours = age and math.floor(age * 10 + 0.5) / 10
 	st.tsmStale = age == nil or age > ns.TSM.STALE_HOURS
 	st.lastError = ns.lastError
+	st.panelErrors = ns.panelErrors
 	local ui = ns.UI.stats
 	st.ui = {
 		layout = ui.layout,
@@ -78,6 +79,24 @@ local function refreshSelftest()
 		docks = ui.docks,
 	}
 	db.selftest = st
+end
+
+-- Runs a panel step and keeps its error: chat once per step, selftest.lastError and panelErrors always. Without
+-- BugGrabber a frame error is otherwise invisible and the panel just does not appear.
+ns.panelErrors = {}
+function ns.guard(where, fn, ...)
+	local ok, err = xpcall(fn, function(e)
+		local stack = debugstack and debugstack(2, 6, 0) or ""
+		return tostring(e) .. "\n" .. stack
+	end, ...)
+	if not ok then
+		ns.lastError = where .. ": " .. tostring(err)
+		if not ns.panelErrors[where] then
+			print("|cffff6060SkillupHelper " .. where .. " failed:|r " .. tostring(err):match("^[^\n]*"))
+		end
+		ns.panelErrors[where] = ns.lastError
+	end
+	return ok
 end
 
 local pending = false
@@ -93,7 +112,7 @@ function ns.refresh()
 			ns.lastError = tostring(model)
 			model = { why = "scan failed: " .. tostring(model) }
 		end
-		ns.UI.show(model)
+		ns.guard("draw", ns.UI.show, model)
 		ns.lastScan = ns.scanSummary(model)
 		ns.lastScan.dock = ns.dockKind
 		ns.lastScan.tsm = ns.TSM.status()
@@ -199,8 +218,10 @@ local function redock()
 end
 
 local function open()
-	ns.UI.create()
 	ns.tradeSkillOpen = true
+	if not ns.guard("create", ns.UI.create) then
+		return
+	end
 	ns.UI.frame:SetShown(db == nil or db.shown)
 	redock()
 	stopTicker()
