@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4
+
+- `/skillup recipes off` plans only with recipes you know or can train, no recipe items to buy. `/skillup recipes on`
+  brings them back.
+- A bag change that moves none of the plan's materials no longer reruns the plan.
+
 ## 0.2.3
 
 - The Next card no longer vanishes when two skill-ups come close together.
