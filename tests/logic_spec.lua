@@ -1,6 +1,6 @@
 -- Logic, the panel text and the scan against a fake C_TradeSkillUI. Frames are checked in game.
 local function load(ns)
-	for _, f in ipairs({ "Logic.lua", "Scan.lua", "TSM.lua", "UI.lua" }) do
+	for _, f in ipairs({ "Logic.lua", "Planner.lua", "Scan.lua", "TSM.lua", "UI.lua" }) do
 		assert(loadfile(f))("SkillupHelper", ns)
 	end
 	return ns
@@ -247,6 +247,102 @@ describe("Scan and panel", function()
 	end)
 end)
 
+describe("Planner in the scan and the panel", function()
+	local F = dofile("tests/fixtures.lua")
+	local I = F.ITEM
+	local ns, have, live, plan2
+	before_each(function()
+		have = { [I.LION] = 7, [I.BEAR] = 1 }
+		live = nil
+		_G.time = os.time
+		_G.issecretvalue = function()
+			return false
+		end
+		_G.TSM_API = {
+			GetCustomPriceValue = function(source, itemString)
+				return live and live(source, tonumber(itemString:match("%d+")))
+			end,
+		}
+		_G.C_Item = {
+			GetItemCount = function(i)
+				return have[i] or 0
+			end,
+			GetItemNameByID = function()
+				return nil
+			end,
+		}
+		local _, items = F.prices()
+		plan2 = {
+			version = 2,
+			generatedAt = "2026-11-11 12:00:00",
+			pricesAt = os.time() - 30 * 3600,
+			effort = 20,
+			sellShare = 0.5,
+			vendor = { [I.SPICES] = 40, [I.WATER] = 25 },
+			items = items,
+			professions = { [185] = { name = "Cooking", from = 173, to = 225, rows = {}, recipes = F.COOKING } },
+		}
+		_G.C_TradeSkillUI = {
+			GetBaseProfessionInfo = function()
+				return { professionID = 185, professionName = "Cooking", skillLevel = 173, maxSkillLevel = 225 }
+			end,
+			GetAllRecipeIDs = function()
+				return { 3397, 3398, 6418, 6501, 7828, 13028 }
+			end,
+			GetRecipeInfo = function(id)
+				local r = F.COOKING[id]
+				return { name = r.name, learned = F.COOKING_LEARNED[id] or false, maxTrivialLevel = r.g }
+			end,
+			GetRecipeSchematic = function()
+				return { reagentSlotSchematics = {} }
+			end,
+		}
+		ns = load({})
+		ns.Scan.resetCaches()
+	end)
+
+	it("plans from export prices when TSM has none, and says so", function()
+		local m = ns.Scan.build(plan2)
+		assert.is_nil(m.why)
+		assert.is_nil(m.plannerWhy)
+		local p = m.planner
+		assert.equal("Big Bear Steak", p.steps[1].name)
+		assert.equal("Hot Lion Chops", p.steps[2].name)
+		assert.is_true(p.prices.export > 0 and p.prices.live == 0)
+		assert.is_true(p.ageHours > 24)
+		assert.equal(4, #m.greyCheck)
+		assert.same({ spell = 3397, client = 190, plan = 190 }, m.greyCheck[1])
+		local text = table.concat(ns.UI.lines(m), "\n")
+		assert.matches("NOW |r Craft 1x", text, 1, true)
+		assert.matches("Big Bear Steak", text)
+		assert.matches("NEXT|r Craft 7x", text, 1, true)
+		assert.matches("Buy Recipe: Rockscale Cod %(AH 28s 11c%)", text)
+		assert.matches("TSM data is 30 h old", text)
+		assert.matches("prices from the export", text)
+		assert.matches("Train Goldthorn Tea", text)
+	end)
+
+	it("takes live TSM prices first and keeps pass 1 cached across bag updates", function()
+		live = function(source, item)
+			if source == "dbmarket" and item == I.LION then
+				return 5000 -- lion meat is dear now: the plan keeps the stock but no longer counts it cheap
+			end
+		end
+		local m = ns.Scan.build(plan2)
+		assert.equal(1, m.planner.prices.live)
+		have[I.LION] = 0
+		local m2 = ns.Scan.build(plan2)
+		assert.equal("Big Bear Steak", m2.planner.steps[1].name)
+		assert.is_not.equal("Hot Lion Chops", m2.planner.steps[2].name)
+	end)
+
+	it("names a version 1 plan", function()
+		local m = ns.Scan.build(plan)
+		assert.matches("version 1", m.plannerWhy)
+		assert.matches("version 1", table.concat(ns.UI.lines(m), "\n"))
+	end)
+end)
+
 describe("TSM docking", function()
 	local function fakeFrame(visible, left, top)
 		return {
@@ -354,5 +450,16 @@ describe("Core", function()
 		local s = ns.selftest.planSummary(plan)
 		assert.same({ "Cooking(185) 173-225, 2 steps" }, s.professions)
 		assert.is_nil(ns.selftest.planSummary(nil))
+		local F = dofile("tests/fixtures.lua")
+		_G.date = os.date
+		local p = ns.Planner.run(F.cooking())
+		p.ms, p.prices, p.ageHours = 0.5, { live = 3, export = 1, none = 0 }, 30
+		local sum = ns.scanSummary({ profession = "Cooking", skill = 173, planner = p })
+		assert.equal(6, sum.planner.steps)
+		assert.is_true(sum.planner.tsmStale)
+		assert.equal(3, sum.planner.priceSources.live)
+		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
+		assert.is_false(ns.command("toggle"))
+		assert.equal(ns.CODE_VERSION, "0.2.0")
 	end)
 end)
