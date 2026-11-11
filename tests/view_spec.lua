@@ -743,3 +743,54 @@ describe("AH buy rows", function()
 		assert.truthy(ns.View.ahPanel({}, {}, env).empty)
 	end)
 end)
+
+describe("Shopping by city", function()
+	local function blocks(where)
+		local ns = load()
+		local env = envOf(ns, {})
+		env.where = where
+		local shopping = {
+			order = { "trainer", "vendor", "ah" },
+			trainer = { { kind = "trainRank", name = "Expert", skill = 125, cost = 100, step = 2 } },
+			vendor = {
+				{ item = 2320, name = "Thread", count = 4, price = 10, merchant = "Tamar", step = 1 },
+				{ item = 2678, name = "Spice", count = 2, price = 5, merchant = "Innkeeper", step = 1 },
+			},
+			ah = { { item = 2318, name = "Light Leather", count = 6, price = 20, kind = "reagent", step = 1 } },
+		}
+		local out = {}
+		for _, b in ipairs(ns.View.shoppingBlocks(shopping, env)) do
+			out[#out + 1] = b.title
+		end
+		return out
+	end
+
+	it("keeps one block per place in travel order when no city is known", function()
+		assert.same({ "Trainer: 1s 0c", "Vendor: 50c", "Auction House: 1s 20c" }, blocks(nil))
+	end)
+
+	it("splits the vendor block by city and puts the nearest city first, travel order inside it", function()
+		local where = function(place, r)
+			if place == "vendor" and r.item == 2678 then
+				return "Crossroads", 300
+			end
+			return "Orgrimmar", 2000
+		end
+		assert.same({
+			"Vendor, Crossroads: 10c",
+			"Trainer, Orgrimmar: 1s 0c",
+			"Vendor, Orgrimmar: 40c",
+			"Auction House, Orgrimmar: 1s 20c",
+		}, blocks(where))
+	end)
+
+	it("puts blocks of no known city last", function()
+		local where = function(place)
+			if place == "ah" then
+				return "Orgrimmar", nil
+			end
+			return nil
+		end
+		assert.same({ "Auction House, Orgrimmar: 1s 20c", "Trainer: 1s 0c", "Vendor: 50c" }, blocks(where))
+	end)
+end)
