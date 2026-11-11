@@ -548,7 +548,7 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal(ns.CODE_VERSION, "0.2.7")
+		assert.equal(ns.CODE_VERSION, "0.2.8")
 	end)
 end)
 

@@ -48,8 +48,10 @@ These rules hold for every plan, every replan and every alternative the panel of
    profession trainer (Forever's client carries no rank table), "unknown" until then. A rank-up goes between its
    unlock skill and the cap, next to a trainer visit already planned when there is one, and never splits a craft
    run. A rank your character level can't train yet is a hard stop.
-7. **Shopping by place.** One trainer, one vendor and one auction house block per stretch, in travel order; never
-   vendor, AH, vendor.
+7. **Shopping by place.** Blocks are grouped by city: the city whose nearest stop is closest comes first, and inside a
+   city the order is trainer, vendor, auction house. A city is the town of the nearest known NPC serving the row
+   (a seed's place, or for an NPC you opened, the seed town nearby or the map's name); rows with no known town come
+   last. Never vendor, AH, vendor in one city.
 8. **Taught where?** A recipe or rank taught by a special NPC (a dungeon teacher) is never a trainer step, and is
    left out unless enabled. A trainer recipe the addon hasn't yet seen at a trainer is "not checked" and loses near
    ties.
@@ -57,5 +59,10 @@ These rules hold for every plan, every replan and every alternative the panel of
 ## Limits
 
 - Bank counts are what the client remembers from your last bank visit.
+- A rank's cap is known only when the trainer's text names it. A trainer line that gives the rank without its skill
+  cap leaves that cap "unknown" in the plan until another trainer's text says it.
+- Special teachers (a dungeon NPC, a faction vendor that teaches) come from the `SPECIAL_TEACHERS` list of the
+  plan generator that writes `Data/Plan.lua`. It is curated by hand: when a recipe turns
+  up that a special NPC teaches, add it there, or the planner treats it as a trainer recipe.
 - Points per craft use the vanilla formula (chance falls from 1 at yellow to 0 at grey); the client's own colour wins
   where it gives one.

@@ -308,6 +308,10 @@ local function learn(kind)
 		status.lastLearn = { kind = kind, name = rec.name, why = why }
 		return
 	end
+	-- the town, for ordering the shopping list by city: a seed's place nearby, else the map's name
+	local okInfo, info = pcall(C_Map.GetMapInfo, rec.map)
+	local mapName = okInfo and type(info) == "table" and not secret(info.name) and info.name or nil
+	rec.place = G.placeNear(rec.map, rec.x, rec.y, seeds, mapName)
 	local npc = gdb and G.learn(gdb.npcs, rec, time())
 	if npc then
 		knownList = nil
@@ -622,6 +626,7 @@ local function togglePin()
 	gdb.pin = waypointOurs
 	status.waypoint = true
 	flash("Pinned on your map", 2)
+	return true
 end
 
 ------------------------------------------------------------------------------------------------------------ the state
@@ -701,6 +706,34 @@ function evaluate()
 		certain = certain and true or false,
 		excluded = excluded,
 	})
+	-- the strip on the Next card: the second pending need is its "Then:" line
+	-- (`need` is the first pending need, so the second is the next place to go)
+	local thenNeed
+	if cur and need and phase ~= "done" and phase ~= "none" then
+		thenNeed = G.pending(G.needsOf(cur.step, cur.profession), bought)[2]
+	end
+	view.strip = phase ~= "none"
+			and G.strip({
+				phase = phase,
+				need = need,
+				name = pick and pick.npc.name,
+				distance = pick and pick.distance,
+				place = pick and pick.npc.place,
+				thing = thing,
+				profession = cur and cur.profession,
+				marked = not IsInGroup(),
+				color = cur and cur.color,
+				why = why,
+				certain = certain and true or false,
+				excluded = excluded,
+				thenNeed = thenNeed,
+				instance = why == "in an instance",
+			})
+		or nil
+	status.strip = view.strip and view.strip.a or nil
+	if ns.UI.guideStrip then
+		ns.guard("guide strip", ns.UI.guideStrip, view.strip)
+	end
 	angleGoal = (f and pick and pick.bearing) and G.arrowAngle(pick.bearing, f) or nil
 	local held = now - (view.since or now)
 	want.visible = view.d ~= nil
@@ -816,6 +849,9 @@ local function onUpdate(_, elapsed)
 		angleShown = angleShown or angleGoal
 		angleShown = (angleShown + shortArc(angleGoal - angleShown) * math.min(1, elapsed * 12)) % TWO_PI
 		chip.arrow:SetRotation(angleShown)
+		if ns.UI.guideStripAngle then
+			ns.UI.guideStripAngle(angleShown)
+		end
 	end
 end
 
@@ -844,6 +880,39 @@ local function create()
 			t:SetPoint("BOTTOM" .. side)
 		end
 	end
+
+	-- the ping: a second edge in bone that grows and fades, twice, so the eye finds the chip (a click on the strip)
+	local ping = CreateFrame("Frame", nil, chip)
+	ping:SetAllPoints()
+	ping:SetAlpha(0)
+	for k, side in ipairs({ "TOP", "BOTTOM", "LEFT", "RIGHT" }) do
+		local t = ping:CreateTexture(nil, "OVERLAY")
+		t:SetColorTexture(rgb("bone"))
+		if k <= 2 then
+			t:SetHeight(1)
+			t:SetPoint(side .. "LEFT")
+			t:SetPoint(side .. "RIGHT")
+		else
+			t:SetWidth(1)
+			t:SetPoint("TOP" .. side)
+			t:SetPoint("BOTTOM" .. side)
+		end
+	end
+	local pg = ping:CreateAnimationGroup()
+	for order = 1, 2 do
+		local fade = pg:CreateAnimation("Alpha")
+		fade:SetFromAlpha(1)
+		fade:SetToAlpha(0)
+		fade:SetDuration(0.4)
+		fade:SetOrder(order)
+		local grow = pg:CreateAnimation("Scale")
+		grow:SetScaleFrom(1, 1)
+		grow:SetScaleTo(1.08, 1.08)
+		grow:SetDuration(0.4)
+		grow:SetOrder(order)
+	end
+	pg:SetToFinalAlpha(true)
+	chip.ping = pg
 
 	local body = CreateFrame("Button", nil, chip)
 	body:SetPoint("TOPLEFT")
@@ -1049,6 +1118,16 @@ local function init()
 	seeds = G.seedRecords(ns.Data.npcs)
 	knownList = nil
 	status.seeds = #seeds
+	-- records learned before 0.2.8 have no town: give them one (a seed's nearby, else the map's name)
+	ns.guard("guide towns", function()
+		for _, npc in pairs(g.npcs) do
+			if type(npc) == "table" and npc.place == nil and npc.map then
+				local okInfo, info = pcall(C_Map.GetMapInfo, npc.map)
+				local mapName = okInfo and type(info) == "table" and not secret(info.name) and info.name or nil
+				npc.place = G.placeNear(npc.map, npc.x, npc.y, seeds, mapName)
+			end
+		end
+	end)
 	if not ns.Data.npcs then
 		status.lastError = "Data/Npcs.lua not loaded: no seeds"
 	end
@@ -1121,6 +1200,76 @@ events:SetScript("OnEvent", function(_, event)
 	end
 	ns.guard("guide " .. event, evaluate)
 end)
+
+-- A click on the guide strip of the Next card: the chip body's click (pin on the map), then the ping so the player
+-- sees where the chip and its Target row are.
+function GUI.stripClick()
+	if not chip then
+		return
+	end
+	status.stripClicks = (status.stripClicks or 0) + 1
+	-- the ping only when a pin was set: a click that removed the pin, or found no place, has nothing to point at
+	if togglePin() and chip:IsShown() then
+		chip.ping:Stop()
+		chip.ping:Play()
+		status.pings = (status.pings or 0) + 1
+	end
+end
+
+-- The city of the nearest known NPC that serves a shopping row, and how far it is (nil when unknown): orders the
+-- card's shopping blocks by city. place = "trainer" | "vendor" | "ah" (plan.shopping's keys). A vendor row no known
+-- NPC sells falls back to the record of its merchant's name (TSM's vendor name), when one is known.
+local NEED_KIND = { trainer = "trainer", vendor = "vendor", ah = "auction" }
+local whereCache, whereAt, whereList, whereOf = {}, -1, nil, nil
+function GUI.where(place, r)
+	if not gdb or type(r) ~= "table" or not NEED_KIND[place] then
+		return nil
+	end
+	knownList = knownList or G.known(seeds, gdb.npcs)
+	-- one answer per row a second (a card build asks for every row, and the strip can trigger redraws), and only
+	-- NPCs with a town count: the nearest one without a town would hide a farther one that names it
+	local now = GetTime()
+	if now - whereAt > 1 or whereOf ~= knownList then
+		whereCache, whereAt, whereOf = {}, now, knownList
+		whereList = {}
+		for _, npc in ipairs(knownList) do
+			if npc.place then
+				whereList[#whereList + 1] = npc
+			end
+		end
+	end
+	local key = table.concat({ place, tostring(r.item), tostring(r.name), tostring(r.merchant) }, ":")
+	local hit = whereCache[key]
+	if hit then
+		return hit[1], hit[2]
+	end
+	local need = { kind = NEED_KIND[place] }
+	if place == "vendor" then
+		need.items = { { item = r.item, count = 1 } }
+	elseif place == "trainer" then
+		need.profession = cur and cur.profession
+		need.name = r.kind == "train" and r.name or nil
+	end
+	local city, dist
+	local pick = G.nearest(whereList, need, here(), world)
+	if pick then
+		city, dist = pick.npc.place, pick.distance
+	elseif place == "vendor" and type(r.merchant) == "string" then
+		for _, npc in ipairs(whereList) do
+			if npc.name == r.merchant then
+				city = npc.place
+				break
+			end
+		end
+	end
+	whereCache[key] = { city, dist }
+	return city, dist
+end
+
+-- The strip's state now (Guide.strip), for a card filled before the next tick.
+function GUI.strip()
+	return view.strip
+end
 
 -- For the selftest: what the guide shows and why, and the links it depends on.
 function GUI.status()

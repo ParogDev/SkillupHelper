@@ -352,9 +352,35 @@ function G.learn(learned, rec, now)
 	end
 	npc.trains = rec.trains or npc.trains
 	npc.auction = rec.auction or npc.auction
+	npc.place = rec.place or npc.place
 	npc.seen = now
 	learned[rec.id] = npc
 	return npc
+end
+
+-- The town a learned NPC stands in: the place of the nearest seed on the same map within G.TOWN (percent of the map),
+-- else the map's name (mapName, from C_Map.GetMapInfo; nil when unknown). Seeds name towns ("Crossroads") where a
+-- map name would say only the zone.
+G.TOWN = 6
+function G.placeNear(map, x, y, seeds, mapName)
+	local best, bestD
+	for _, s in ipairs(seeds or {}) do
+		if
+			s.map == map
+			and s.place
+			and type(s.x) == "number"
+			and type(s.y) == "number"
+			and type(x) == "number"
+			and type(y) == "number"
+		then
+			local dx, dy = s.x - x, s.y - y
+			local d = math.sqrt(dx * dx + dy * dy)
+			if d <= G.TOWN and (not bestD or d < bestD) then
+				best, bestD = s.place, d
+			end
+		end
+	end
+	return best or mapName
 end
 
 -- Turns Data/Npcs.lua's rows ({ ..., role, sells = { ids } }) into NPC records.
@@ -509,6 +535,75 @@ function G.describe(s)
 		return nil
 	end
 	return d
+end
+
+-- What a need is called after "Then:" on the strip's second line.
+local function thenLabel(need, profession)
+	if need.kind == "trainer" then
+		return ("%s trainer"):format(profession or need.profession or "profession")
+	elseif need.kind == "auction" then
+		return "auction house"
+	end
+	return "vendor"
+end
+
+local STRIP_TIP = "Click: pin on the map. The guide chip stays with you when you close this window."
+
+-- The guide strip on the Next card: the chip's state, shorter. s is Guide.describe's input plus
+-- thenNeed (the second pending need, or nil) and instance (the "not now" is an instance). Returns
+-- { a, ar, arTint, b, icon, tint, phase, tip } or nil when the strip is gone (no guide, the need is covered).
+function G.strip(s)
+	local p, need = s.phase, s.need or {}
+	local d = G.describe(s)
+	if not d or p == "done" then
+		return nil
+	end
+	local name = tostring(s.name)
+	local out = { phase = p, icon = d.icon, tint = d.tint, ar = d.r1 or "", arTint = "ash", tip = STRIP_TIP }
+	if p == "far" then
+		out.a = ("%s, %s"):format(name, s.place or role(s):lower())
+	elseif p == "away" then
+		out.a = ("%s, %s"):format(name, s.place or "another continent")
+	elseif p == "near" or p == "arrived" then
+		out.a, out.arTint = name .. " is close", s.color or "bone"
+	elseif p == "targeted" then
+		out.a = s.marked and ("Right-click %s (the star)"):format(name) or ("Right-click %s"):format(name)
+		out.arTint = "green"
+	elseif p == "here" then
+		out.a, out.ar = "You are here", ""
+	elseif p == "unknown" then
+		out.ar = ""
+		if need.kind == "trainer" and need.name and (s.excluded or 0) > 0 then
+			out.a = ("No trainer you've opened teaches %s"):format(need.name)
+		elseif need.kind == "trainer" then
+			out.a = ("No known %s trainer yet"):format(s.profession or need.profession or "profession")
+		elseif need.kind == "auction" then
+			out.a = "No auction house known yet"
+		else
+			out.a = ("No known vendor for %s yet"):format(s.thing or "these materials")
+		end
+		out.tip = G.unknownText(need, function()
+			return s.thing or "these materials"
+		end, s.excluded)
+	elseif p == "notnow" then
+		out.a, out.ar = s.instance and "No directions inside an instance" or "No directions right now", ""
+		out.tip = s.why and ("Not now: %s"):format(s.why) or nil
+	else
+		return nil
+	end
+	if
+		(p == "far" or p == "near" or p == "arrived")
+		and need.kind == "trainer"
+		and need.name
+		and s.certain == false
+	then
+		out.b = ("May teach %s: not checked yet"):format(need.name)
+	end
+	if s.thenNeed then
+		local t = "Then: " .. thenLabel(s.thenNeed, s.profession)
+		out.b = out.b and (out.b .. ". " .. t) or t
+	end
+	return out
 end
 
 return G

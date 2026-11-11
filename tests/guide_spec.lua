@@ -381,3 +381,58 @@ describe("Guide", function()
 		assert.is_nil(with({ phase = "none" }))
 	end)
 end)
+
+describe("Guide strip and towns", function()
+	local G = load()
+	local trainer = { kind = "trainer", profession = "Leatherworking" }
+	local vendor = { kind = "vendor", items = { { item = THREAD, count = 2 } } }
+
+	it("words the strip shorter than the chip, with the next place as a Then line", function()
+		local s = G.strip({
+			phase = "far",
+			need = vendor,
+			name = "Tamar",
+			distance = 140,
+			place = "Orgrimmar",
+			thenNeed = trainer,
+			profession = "Leatherworking",
+		})
+		assert.same(
+			{ "Tamar, Orgrimmar", "140 yd", "ash", "Then: Leatherworking trainer" },
+			{ s.a, s.ar, s.arTint, s.b }
+		)
+		local near = G.strip({ phase = "near", need = vendor, name = "Tamar", distance = 42, color = "orange" })
+		assert.same({ "Tamar is close", "orange", "arrow" }, { near.a, near.arTint, near.icon })
+		local at = G.strip({ phase = "here", need = vendor, name = "Tamar" })
+		assert.same({ "You are here", "", "dot" }, { at.a, at.ar, at.icon })
+		local star = G.strip({ phase = "targeted", need = vendor, name = "Tamar", marked = true })
+		assert.equal("Right-click Tamar (the star)", star.a)
+	end)
+
+	it("is gone when the need is covered or there is no guide", function()
+		assert.is_nil(G.strip({ phase = "done", need = vendor }))
+		assert.is_nil(G.strip({ phase = "none" }))
+	end)
+
+	it("says what is missing when no NPC is known, and why there are no directions", function()
+		local u = G.strip({ phase = "unknown", need = vendor, thing = "Coarse Thread" })
+		assert.equal("No known vendor for Coarse Thread yet", u.a)
+		assert.matches("Coarse Thread", u.tip, 1, true)
+		local t = G.strip({ phase = "unknown", need = trainer, profession = "Leatherworking" })
+		assert.equal("No known Leatherworking trainer yet", t.a)
+		assert.equal("No directions inside an instance", G.strip({ phase = "notnow", instance = true }).a)
+		assert.equal("No directions right now", G.strip({ phase = "notnow" }).a)
+	end)
+
+	it("names a learned NPC's town from a seed nearby, else the map", function()
+		local seeds = {
+			{ map = 1413, x = 52, y = 30, place = "Crossroads" },
+			{ map = 1454, x = 50, y = 50, place = "Orgrimmar" },
+		}
+		assert.equal("Crossroads", G.placeNear(1413, 51.5, 31, seeds, "The Barrens"))
+		assert.equal("The Barrens", G.placeNear(1413, 20, 80, seeds, "The Barrens"))
+		assert.is_nil(G.placeNear(1, 0, 0, seeds, nil))
+		-- a record without y (an old save) falls back to the map, no error
+		assert.equal("The Barrens", G.placeNear(1413, 52, nil, seeds, "The Barrens"))
+	end)
+end)

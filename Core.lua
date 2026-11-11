@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.7"
+ns.CODE_VERSION = "0.2.8"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
