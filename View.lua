@@ -10,6 +10,7 @@ ns.View = V
 V.MAX_LATER = 6
 V.MAX_FOOTER = 6
 V.MAX_MATS = 8
+V.MIN_HEIGHT = 96
 
 -- Colours as r, g, b. The four difficulty colours are the game's own; the rest is the panel's palette.
 V.RGB = {
@@ -167,6 +168,7 @@ local function nextCard(st, env)
 	end
 	card.color = st.color or "grey"
 	card.name = st.name
+	card.crafts = st.crafts
 	card.verb = ("Craft %d"):format(st.crafts)
 	card.gain = ("about +%.1f, to %d"):format(st.points or 0, math.floor(st.to or 0))
 	if st.chance and card.color ~= "orange" then
@@ -177,8 +179,11 @@ local function nextCard(st, env)
 		card.cost = ("%s a point"):format(money(st.costPt))
 	end
 	card.mats = craftMats(st, env)
+	card.pre = {}
 	for _, p in ipairs(st.pre or {}) do
-		card.notes[#card.notes + 1] = ("Craft %d %s first"):format(p.count, env.nameOf(p.item))
+		local name = env.nameOf(p.item)
+		card.pre[#card.pre + 1] = { count = p.count, name = name }
+		card.notes[#card.notes + 1] = ("Craft %d %s first"):format(p.count, name)
 	end
 	if st.alt then
 		card.alt = ("Or use stock: %dx %s, %s more over the path"):format(
@@ -290,6 +295,7 @@ local function legacyCard(m, env)
 		spell = st.spell,
 		color = color,
 		name = st.recipe,
+		crafts = m.craftsLeft,
 		verb = ("Craft about %d"):format(m.craftsLeft or 0),
 		gain = ("%d to %d"):format(st.from, st.to),
 		cost = ("%s for the step"):format(env.money(st.cost)),
@@ -310,7 +316,76 @@ local function legacyCard(m, env)
 	return card
 end
 
--- env: nameOf(item, fallback) -> string, money(copper) -> string, have(item) -> count.
+-- What stands between the card and its first craft: the button's label and every blocker, one a line.
+local function blockers(card)
+	local list = {}
+	for _, m in ipairs(card.mats or {}) do
+		if m.buy then
+			list[#list + 1] = ("Buy %d %s first"):format(m.buy.count, m.name)
+		end
+	end
+	for _, p in ipairs(card.pre or {}) do
+		list[#list + 1] = ("Craft %d %s first"):format(p.count, p.name)
+	end
+	if #list == 0 then
+		for _, m in ipairs(card.mats or {}) do
+			if (m.have or 0) < (m.need or 0) then
+				list[#list + 1] = ("Need %d more %s"):format(m.need - (m.have or 0), m.name)
+			end
+		end
+	end
+	if #list == 0 then
+		list[1] = "Materials missing from your bags"
+	end
+	return list[1], #list > 1 and table.concat(list, "\n") or nil
+end
+
+-- The buttons of a Next card: { { id = "craft", spell, count, enabled, label, tip }, { id = "open", ... } }, or nil
+-- and why when the card gets none (not a craft, the recipe is not learned, the client gave no count).
+-- "Craft N" casts min(the step's crafts, what the bags allow now); with nothing craftable it stays, inert, and its
+-- label says what to do first. "Show recipe" selects the recipe in Blizzard's window only: TSM's window does not
+-- follow C_TradeSkillUI.OpenRecipe.
+function V.actions(card, env)
+	if not card or card.kind ~= "craft" or not card.spell then
+		return nil
+	end
+	if type(env.craftable) ~= "function" then
+		return nil, "env.craftable missing"
+	end
+	local can, why = env.craftable(card.spell)
+	if type(can) ~= "number" then
+		return nil, why
+	end
+	local want = math.max(1, math.floor(card.crafts or 1))
+	local n = math.max(0, math.min(want, math.floor(can)))
+	local craft = { id = "craft", spell = card.spell, count = n, enabled = n > 0 }
+	if n > 0 then
+		craft.label = ("Craft %d"):format(n)
+		if n < want then
+			craft.tip = ("Materials for %d of the %d crafts"):format(n, want)
+		end
+	else
+		craft.label, craft.tip = blockers(card)
+	end
+	local out = { craft }
+	if env.dock == "blizzard" then
+		out[2] = { id = "open", spell = card.spell, enabled = true, label = "Show recipe" }
+	end
+	return out
+end
+
+-- The panel's height for `content` under `chrome` (header and margins), up to `limit` (the docked window's height):
+-- as tall as what it shows, and scrolling only when that does not fit.
+function V.fit(content, chrome, limit)
+	local want = chrome + content
+	if want <= limit then
+		return { height = math.max(V.MIN_HEIGHT, want), scroll = false }
+	end
+	return { height = limit, scroll = true }
+end
+
+-- env: nameOf(item, fallback) -> string, money(copper) -> string, have(item) -> count; optional craftable(spell) ->
+-- crafts the client allows now (nil and why when the recipe is not learned) and dock ("blizzard", "tsm", "free").
 -- Returns { state, profession, skill, cap, header, runway, next, later, footer, notice, message }.
 function V.describe(m, env)
 	m = m or {}
@@ -381,6 +456,9 @@ function V.describe(m, env)
 			nx.mats[k] = nil
 		end
 	end
+	if nx then
+		nx.actions, nx.actionsWhy = V.actions(nx, env)
+	end
 	return d
 end
 
@@ -415,6 +493,9 @@ function V.text(d)
 		end
 		add(nx.alt)
 		add(nx.tags)
+		for _, a in ipairs(nx.actions or {}) do
+			add(("[%s]%s"):format(a.label, a.enabled and "" or " (not yet)"))
+		end
 	end
 	add(d.empty)
 	for _, r in ipairs(d.later) do

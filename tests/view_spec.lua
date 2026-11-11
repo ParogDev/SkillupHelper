@@ -194,8 +194,117 @@ describe("View description", function()
 		assert.matches("grey", none.empty)
 	end)
 
+	-- The cooking plan's first step (1x Big Bear Steak) with the client allowing `can` crafts, beside `dock`.
+	local function withCraftable(can, dock, why)
+		local have = { [I.LION] = 7, [I.BEAR] = 1 }
+		local p = ns.Planner.run((function()
+			local input = F.cooking()
+			input.have = have
+			return input
+		end)())
+		p.prices, p.ageHours = { live = 10, export = 0, none = 0 }, 2
+		local env = envOf(ns, have)
+		env.dock = dock
+		env.asked = {}
+		env.craftable = function(spell)
+			env.asked[#env.asked + 1] = spell
+			return can, why
+		end
+		local d = ns.View.describe({ profession = "Cooking", skill = 173, maxSkill = 225, planner = p }, env)
+		return d.next, env, d
+	end
+
+	it("gives a learned craft step a Craft button for what the bags allow, capped at the step", function()
+		local nx, env = withCraftable(5, "tsm")
+		assert.same({ nx.spell }, env.asked)
+		-- the step wants 1 craft; the bags would allow 5
+		assert.equal(1, #nx.actions)
+		local a = nx.actions[1]
+		assert.same({ "craft", nx.spell, 1, true, "Craft 1" }, { a.id, a.spell, a.count, a.enabled, a.label })
+		assert.is_nil(a.tip)
+		-- fewer than the step wants: craft those, and say so
+		local card = { kind = "craft", spell = 9, crafts = 7, mats = {} }
+		local some = ns.View.actions(card, {
+			craftable = function()
+				return 3
+			end,
+		})
+		assert.same({ 3, true, "Craft 3", "Materials for 3 of the 7 crafts" }, {
+			some[1].count,
+			some[1].enabled,
+			some[1].label,
+			some[1].tip,
+		})
+	end)
+
+	it("offers Show recipe beside Blizzard's window only", function()
+		local nx = withCraftable(1, "blizzard")
+		assert.same({ "craft", "open" }, { nx.actions[1].id, nx.actions[2].id })
+		assert.same(
+			{ "Show recipe", true, nx.spell },
+			{ nx.actions[2].label, nx.actions[2].enabled, nx.actions[2].spell }
+		)
+		assert.equal(1, #withCraftable(1, "tsm").actions)
+		assert.equal(1, #withCraftable(1, "free").actions)
+	end)
+
+	it("says what to do first when nothing is craftable", function()
+		local nx, _, d = withCraftable(0, "blizzard")
+		local a = nx.actions[1]
+		assert.same({ 0, false }, { a.count, a.enabled })
+		-- the step buys its spices at the vendor
+		assert.equal(("Buy 1 %s first"):format(nx.mats[2].name), a.label)
+		assert.is_nil(a.tip)
+		assert.equal("open", nx.actions[2].id)
+		assert.matches("[" .. a.label .. "] (not yet)", table.concat(ns.View.text(d), "\n"), 1, true)
+		local none = function()
+			return 0
+		end
+		-- several blockers: the first on the button, all of them in the tip
+		local card = {
+			kind = "craft",
+			spell = 9,
+			crafts = 4,
+			mats = {
+				{ name = "Gray Dye", have = 0, need = 7, buy = { count = 7 } },
+				{ name = "Bolt of Silk", have = 2, need = 8 },
+			},
+			pre = { { count = 2, name = "Fine Thread" } },
+		}
+		local b = ns.View.actions(card, { craftable = none })[1]
+		assert.equal("Buy 7 Gray Dye first", b.label)
+		assert.equal("Buy 7 Gray Dye first\nCraft 2 Fine Thread first", b.tip)
+		-- nothing to buy or pre-craft: the short material
+		card.mats[1].buy, card.pre = nil, nil
+		assert.equal("Need 7 more Gray Dye", ns.View.actions(card, { craftable = none })[1].label)
+		-- the plan counts it covered (bank stock) but the client cannot craft
+		card.mats = { { name = "Bolt of Silk", have = 8, need = 8 } }
+		assert.equal("Materials missing from your bags", ns.View.actions(card, { craftable = none })[1].label)
+	end)
+
+	it("gives no buttons to an unlearned recipe, a step that is not a craft, or an env without craftable", function()
+		local nx = withCraftable(nil, "blizzard", "recipe not learned")
+		assert.is_nil(nx.actions)
+		assert.equal("recipe not learned", nx.actionsWhy)
+		local have = { [I.LION] = 7, [I.BEAR] = 1 }
+		assert.is_nil(ns.View.actions({ kind = "train", spell = 1 }, { craftable = error }))
+		assert.is_nil(ns.View.actions({ kind = "craft" }, { craftable = error }))
+		local acts, why = ns.View.actions({ kind = "craft", spell = 1 }, envOf(ns, have))
+		assert.same({ nil, "env.craftable missing" }, { acts, why })
+	end)
+
+	it("sizes the panel to its content and scrolls only past the dock's height", function()
+		local V = ns.View
+		assert.same({ height = 260, scroll = false }, V.fit(200, 60, 500))
+		assert.same({ height = 500, scroll = false }, V.fit(440, 60, 500))
+		assert.same({ height = 500, scroll = true }, V.fit(441, 60, 500))
+		-- a one-line message still leaves a panel to read and grab
+		assert.same({ height = V.MIN_HEIGHT, scroll = false }, V.fit(10, 40, 500))
+	end)
+
 	it("describes a message without a skill as one line", function()
 		local d = ns.View.describe({ why = "not your own profession window: NPC crafting", state = "not now" }, {})
+		assert.is_nil(d.next)
 		assert.same({ "message", "ash" }, { d.state, d.tone })
 		assert.same({ "not your own profession window: NPC crafting" }, ns.View.text(d))
 	end)
