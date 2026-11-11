@@ -340,6 +340,105 @@ local function blockers(card)
 	return list[1], #list > 1 and table.concat(list, "\n") or nil
 end
 
+-- The vendor reagents a card is short of: { { item, name, count } }, the units its buy rows still lack (need minus
+-- have, bags and bank, as the planner counts them).
+function V.vendorShort(card)
+	local want = {}
+	for _, m in ipairs(card and card.mats or {}) do
+		if m.buy and m.buy.where == "vendor" then
+			local short = math.max(0, (m.need or 0) - (m.have or 0))
+			if short > 0 then
+				want[#want + 1] = { item = m.item, name = m.name, count = short }
+			end
+		end
+	end
+	return want
+end
+
+-- The "Buy" button for `want` (V.vendorShort) at the open merchant. env.merchant(item) -> offer (Logic.vendorLots)
+-- with its merchant `index`, or nil and why; nil env.merchant means no merchant is open. env.gold() -> copper on
+-- hand, env.bagRoom(item, offer) -> units the bags take (both optional). Returns
+-- { id = "buy", want, items = { { item, name, index, qty, cost, calls } }, cost, enabled, label, tip }, or nil when
+-- nothing is short. Disabled with the reason in its label and tip when no merchant sells it, gold is short or the bags
+-- are full.
+function V.buyAction(want, env)
+	if not want or #want == 0 then
+		return nil
+	end
+	local a = { id = "buy", want = want, items = {}, cost = 0, enabled = false }
+	local first = want[1]
+	local what = #want == 1 and ("%d %s"):format(first.count, first.name) or ("%d reagents"):format(#want)
+	if type(env.merchant) ~= "function" then
+		a.label = ("Buy %s at a vendor"):format(what)
+		a.tip = "Open a vendor that sells " .. (#want == 1 and first.name or "them") .. ", then click here to buy."
+		return a
+	end
+	local lines, problems = {}, {}
+	for _, w in ipairs(want) do
+		local offer, why = env.merchant(w.item)
+		local lots
+		if offer then
+			lots, why = ns.Logic.vendorLots(w.count, offer)
+		end
+		if lots and env.bagRoom then
+			local room = env.bagRoom(w.item, offer)
+			if room and room < lots.qty then
+				lots, why = nil, ("bags full, room for %d"):format(room)
+			end
+		end
+		if lots then
+			a.items[#a.items + 1] = {
+				item = w.item,
+				name = w.name,
+				index = offer.index,
+				qty = lots.qty,
+				cost = lots.cost,
+				calls = lots.calls,
+			}
+			a.cost = a.cost + lots.cost
+			lines[#lines + 1] = ("%d %s, %s"):format(lots.qty, w.name, env.money(lots.cost))
+		else
+			problems[#problems + 1] = ("%s: %s"):format(w.name, why or "not sold here")
+		end
+	end
+	if #a.items == 0 then
+		-- one reason for all of them (bags full, no vendor stock) goes on the button; mixed reasons go to the tip
+		local reasons, same = {}, true
+		for k, w in ipairs(want) do
+			reasons[k] = problems[k]:sub(#w.name + 3)
+			same = same and reasons[k] == reasons[1]
+		end
+		if #want == 1 then
+			a.label = ("Buy %s: %s"):format(first.name, reasons[1])
+		elseif same then
+			a.label = ("Buy %d reagents: %s"):format(#want, reasons[1])
+		else
+			a.label = "This vendor sells none of them"
+		end
+		a.tip = table.concat(problems, "\n")
+		return a
+	end
+	local gold = env.gold and env.gold()
+	if gold and gold < a.cost then
+		a.label = ("Not enough gold: %s needed"):format(env.money(a.cost))
+		a.tip = ("You have %s."):format(env.money(gold))
+		return a
+	end
+	a.enabled = true
+	if #a.items == 1 then
+		a.label = ("Buy %d %s, %s"):format(a.items[1].qty, a.items[1].name, env.money(a.cost))
+	else
+		a.label = ("Buy %d reagents, %s"):format(#a.items, env.money(a.cost))
+	end
+	for _, p in ipairs(problems) do
+		lines[#lines + 1] = "Not here: " .. p
+	end
+	if #lines > 1 or #problems > 0 then
+		a.tip = table.concat(lines, "\n")
+	end
+	return a
+end
+
 -- The buttons of a Next card: { { id = "craft", spell, count, enabled, label, tip }, { id = "open", ... } }, or nil
 -- and why when the card gets none (not a craft, the recipe is not learned, the client gave no count).
 -- "Craft N" casts min(the step's crafts, what the bags allow now); with nothing craftable it stays, inert, and its
@@ -367,9 +466,15 @@ function V.actions(card, env)
 	else
 		craft.label, craft.tip = blockers(card)
 	end
-	local out = { craft }
+	local out = {}
+	-- vendor reagents the step lacks: a Buy button above Craft, live while a merchant that sells them is open
+	local buy = V.buyAction(V.vendorShort(card), env)
+	if buy then
+		out[#out + 1] = buy
+	end
+	out[#out + 1] = craft
 	if env.dock == "blizzard" then
-		out[2] = { id = "open", spell = card.spell, enabled = true, label = "Show recipe" }
+		out[#out + 1] = { id = "open", spell = card.spell, enabled = true, label = "Show recipe" }
 	end
 	return out
 end

@@ -211,6 +211,43 @@ function L.isPlanV2(plan, prof)
 	return row == nil or row.mats ~= nil
 end
 
+-- A vendor purchase of `short` units. offer = { price (copper a lot), lot (units a lot, the merchant's stackCount),
+-- maxStack (units one BuyMerchantItem call may take), available (lots left, -1 or nil for unlimited) }.
+-- Returns { lots, qty, cost, calls = { units per call } } (qty rounds up to whole lots; every call a whole number of
+-- lots), or nil and why.
+function L.vendorLots(short, offer)
+	short = math.floor(short or 0)
+	if short < 1 then
+		return nil, "nothing to buy"
+	end
+	if type(offer) ~= "table" then
+		return nil, "no offer"
+	end
+	local lot = math.max(1, math.floor(offer.lot or 1))
+	local lots = math.ceil(short / lot)
+	local available = offer.available
+	if available and available >= 0 and lots > available then
+		return nil, ("the vendor has %d left"):format(available * lot)
+	end
+	local qty = lots * lot
+	local per = math.max(lot, math.floor((offer.maxStack or lot) / lot) * lot)
+	local calls, rem = {}, qty
+	while rem > 0 do
+		local n = math.min(per, rem)
+		calls[#calls + 1] = n
+		rem = rem - n
+	end
+	return { lots = lots, qty = qty, cost = lots * (offer.price or 0), calls = calls }
+end
+
+-- Units of an item the bags take: free slots that accept it, times its stack size, plus the top of a partial stack
+-- (counted as one stack, so a split pile makes this an overestimate by at most one stack).
+function L.bagRoom(freeSlots, stackSize, inBags)
+	stackSize = math.max(1, math.floor(stackSize or 1))
+	local partial = (inBags or 0) % stackSize
+	return (freeSlots or 0) * stackSize + (partial > 0 and (stackSize - partial) or 0)
+end
+
 -- Copper as "1g 2s 3c" (gold and silver only when present).
 function L.money(c)
 	if not c then

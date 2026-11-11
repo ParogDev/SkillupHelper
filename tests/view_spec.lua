@@ -217,9 +217,9 @@ describe("View description", function()
 	it("gives a learned craft step a Craft button for what the bags allow, capped at the step", function()
 		local nx, env = withCraftable(5, "tsm")
 		assert.same({ nx.spell }, env.asked)
-		-- the step wants 1 craft; the bags would allow 5
-		assert.equal(1, #nx.actions)
-		local a = nx.actions[1]
+		-- the step wants 1 craft; the bags would allow 5. Its Hot Spices come from a vendor: Buy sits first
+		assert.same({ "buy", "craft" }, { nx.actions[1].id, nx.actions[2].id })
+		local a = nx.actions[2]
 		assert.same({ "craft", nx.spell, 1, true, "Craft 1" }, { a.id, a.spell, a.count, a.enabled, a.label })
 		assert.is_nil(a.tip)
 		-- fewer than the step wants: craft those, and say so
@@ -239,23 +239,27 @@ describe("View description", function()
 
 	it("offers Show recipe beside Blizzard's window only", function()
 		local nx = withCraftable(1, "blizzard")
-		assert.same({ "craft", "open" }, { nx.actions[1].id, nx.actions[2].id })
+		assert.same({ "buy", "craft", "open" }, { nx.actions[1].id, nx.actions[2].id, nx.actions[3].id })
 		assert.same(
 			{ "Show recipe", true, nx.spell },
-			{ nx.actions[2].label, nx.actions[2].enabled, nx.actions[2].spell }
+			{ nx.actions[3].label, nx.actions[3].enabled, nx.actions[3].spell }
 		)
-		assert.equal(1, #withCraftable(1, "tsm").actions)
-		assert.equal(1, #withCraftable(1, "free").actions)
+		assert.equal(2, #withCraftable(1, "tsm").actions)
+		assert.equal(2, #withCraftable(1, "free").actions)
 	end)
 
 	it("says what to do first when nothing is craftable", function()
 		local nx, _, d = withCraftable(0, "blizzard")
-		local a = nx.actions[1]
-		assert.same({ 0, false }, { a.count, a.enabled })
+		local a = nx.actions[2]
+		assert.same({ "craft", 0, false }, { a.id, a.count, a.enabled })
 		-- the step buys its spices at the vendor
 		assert.equal(("Buy 1 %s first"):format(nx.mats[2].name), a.label)
 		assert.is_nil(a.tip)
-		assert.equal("open", nx.actions[2].id)
+		assert.equal("open", nx.actions[3].id)
+		-- no vendor open: Buy is there, off, and says where to go
+		local closed = nx.actions[1]
+		assert.same({ "buy", false }, { closed.id, closed.enabled })
+		assert.equal(("Buy 1 %s at a vendor"):format(nx.mats[2].name), closed.label)
 		assert.matches("[" .. a.label .. "] (not yet)", table.concat(ns.View.text(d), "\n"), 1, true)
 		local none = function()
 			return 0
@@ -280,6 +284,103 @@ describe("View description", function()
 		-- the plan counts it covered (bank stock) but the client cannot craft
 		card.mats = { { name = "Bolt of Silk", have = 8, need = 8 } }
 		assert.equal("Materials missing from your bags", ns.View.actions(card, { craftable = none })[1].label)
+	end)
+
+	it("buys a step's vendor reagents at an open merchant that sells them", function()
+		local card = {
+			kind = "craft",
+			spell = 9,
+			crafts = 7,
+			mats = {
+				{ item = 1, name = "Lion Meat", have = 7, need = 7 },
+				{ item = 2, name = "Hot Spices", have = 0, need = 7, buy = { count = 7, where = "vendor" } },
+				{ item = 3, name = "Lion Hide", have = 0, need = 2, buy = { count = 2, where = "AH" } },
+			},
+		}
+		local offers = { [2] = { index = 4, price = 40, lot = 1, maxStack = 20, available = -1 } }
+		local env = {
+			money = ns.Logic.money,
+			craftable = function()
+				return 0
+			end,
+			merchant = function(item)
+				return offers[item], "this vendor does not sell it"
+			end,
+			gold = function()
+				return 10000
+			end,
+			bagRoom = function()
+				return 100
+			end,
+		}
+		local a = ns.View.actions(card, env)[1]
+		-- only the vendor row, and only what it is short of; AH rows are not bought here
+		assert.same({ "buy", true, "Buy 7 Hot Spices, 2s 80c", 280 }, { a.id, a.enabled, a.label, a.cost })
+		assert.same({ { item = 2, name = "Hot Spices", index = 4, qty = 7, cost = 280, calls = { 7 } } }, a.items)
+		assert.is_nil(a.tip)
+		-- 3 already in the bags: buys the other 4
+		card.mats[2].have = 3
+		assert.equal(4, ns.View.actions(card, env)[1].items[1].qty)
+		-- covered: no Buy button
+		card.mats[2].have = 7
+		assert.equal("craft", ns.View.actions(card, env)[1].id)
+	end)
+
+	it("keeps Buy off with the reason when the vendor lacks it, gold is short or the bags are full", function()
+		local want = { { item = 2, name = "Hot Spices", count = 7 } }
+		local offer = { index = 1, price = 40, lot = 1, maxStack = 20 }
+		local env = {
+			money = ns.Logic.money,
+			merchant = function()
+				return offer
+			end,
+		}
+		local V = ns.View
+		-- no merchant open
+		local closed = V.buyAction(want, { money = ns.Logic.money })
+		assert.same({ false, "Buy 7 Hot Spices at a vendor" }, { closed.enabled, closed.label })
+		-- this vendor does not sell it
+		local wrong = V.buyAction(want, {
+			money = ns.Logic.money,
+			merchant = function()
+				return nil, "this vendor does not sell it"
+			end,
+		})
+		assert.same({ false, "Buy Hot Spices: this vendor does not sell it" }, { wrong.enabled, wrong.label })
+		-- gold short
+		env.gold = function()
+			return 100
+		end
+		local poor = V.buyAction(want, env)
+		assert.same(
+			{ false, "Not enough gold: 2s 80c needed", "You have 1s 0c." },
+			{ poor.enabled, poor.label, poor.tip }
+		)
+		-- bags full
+		env.gold = function()
+			return 10000
+		end
+		env.bagRoom = function()
+			return 5
+		end
+		local full = V.buyAction(want, env)
+		assert.same({ false, "Buy Hot Spices: bags full, room for 5" }, { full.enabled, full.label })
+		-- two reagents, both refused for the same reason: the reason is on the button
+		local both = V.buyAction({ want[1], { item = 9, name = "Gray Dye", count = 7 } }, env)
+		assert.same({ false, "Buy 2 reagents: bags full, room for 5" }, { both.enabled, both.label })
+		-- two reagents, one sold here: buys that one, the tip names the other
+		env.bagRoom = nil
+		local two = { want[1], { item = 9, name = "Gray Dye", count = 7 } }
+		env.merchant = function(item)
+			if item == 2 then
+				return offer
+			end
+			return nil, "this vendor does not sell it"
+		end
+		local some = V.buyAction(two, env)
+		assert.same({ true, "Buy 7 Hot Spices, 2s 80c" }, { some.enabled, some.label })
+		assert.equal("7 Hot Spices, 2s 80c\nNot here: Gray Dye: this vendor does not sell it", some.tip)
+		assert.is_nil(V.buyAction({}, env))
 	end)
 
 	it("gives no buttons to an unlearned recipe, a step that is not a craft, or an env without craftable", function()

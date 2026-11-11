@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.4"
+ns.CODE_VERSION = "0.2.5"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -86,6 +86,10 @@ local function refreshSelftest()
 		lastCraft = ui.lastCraft,
 		lastCraftError = ui.lastCraftError,
 		lastOpenError = ui.lastOpenError,
+		merchant = ui.merchant,
+		lastBuy = ui.lastBuy,
+		lastBuyError = ui.lastBuyError,
+		buysByUi = ui.buysByUi,
 	}
 	db.selftest = st
 end
@@ -271,6 +275,11 @@ end
 local okCrafted, errCrafted = pcall(f.RegisterEvent, f, "TRADE_SKILL_ITEM_CRAFTED_RESULT")
 ns.craftedEvent = okCrafted and "registered"
 	or ("TRADE_SKILL_ITEM_CRAFTED_RESULT not registered: " .. tostring(errCrafted))
+-- A vendor opening or closing turns the Next card's Buy button on or off (the same events under TSM's vendoring
+-- window, which replaces MerchantFrame but not the merchant).
+for _, e in ipairs({ "MERCHANT_SHOW", "MERCHANT_CLOSED", "MERCHANT_UPDATE" }) do
+	f:RegisterEvent(e)
+end
 -- A craft the client refuses raises no Lua error (pcall sees nothing): it fires one of these, naming the addon.
 for _, e in ipairs({ "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN" }) do
 	pcall(f.RegisterEvent, f, e)
@@ -281,6 +290,18 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 			ns.UI.stats.lastCraftError = ("%s: the client refused %s"):format(event, tostring(arg2))
 		end
 		return
+	end
+	if event == "BAG_UPDATE_DELAYED" then
+		ns.UI.noteBags()
+	end
+	if event == "MERCHANT_SHOW" or event == "MERCHANT_CLOSED" then
+		ns.merchantOpen = event == "MERCHANT_SHOW"
+		local m = ns.UI.stats.merchant
+		m.open = ns.merchantOpen
+		if ns.merchantOpen then
+			m.shows = m.shows + 1
+			m.lastShow = date("%Y-%m-%d %H:%M:%S")
+		end
 	end
 	if event == "ADDON_LOADED" then
 		if arg1 == ADDON then
