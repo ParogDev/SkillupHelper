@@ -168,8 +168,8 @@ function P.prepare(input)
 		items = input.items or {},
 		learned = input.learned or {},
 		effort = input.effort or P.EFFORT,
-		bias = input.bias or P.BIAS,
-		noRecipeBuys = input.noRecipeBuys,
+		-- true: plan only with recipes already known or trainable (the "/skillup recipes off" setting)
+		noRecipeBuys = input.noRecipeBuys == true,
 		options = {},
 		mismatch = {},
 		makers = {},
@@ -473,7 +473,7 @@ local function stockPass(ctx, base, have)
 						break
 					end
 					local c = numer / p
-					local gain = (lv and lv.c or HUGE) - c + ctx.bias
+					local gain = (lv and lv.c or HUGE) - c + P.BIAS
 					if gain > 0 then
 						local list = perLevel[s] or {}
 						perLevel[s] = list

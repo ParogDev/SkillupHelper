@@ -17,6 +17,8 @@ panel shows the from-stock list only. The panel warns when the TSM data is more 
 
 `/skillup` shows or hides the panel. `/skillup effort <copper>` sets the effort charge per craft (default 20c): the
 planner adds it to every craft so a cheap recipe with a low skill-up chance does not win on price alone.
+`/skillup recipes off` plans only with recipes you know or can train; `/skillup recipes on` lets it suggest recipe
+items to buy again.
 
 Requires TradeSkillMaster. The panel docks to TSM's crafting window, and to Blizzard's window after you press TSM's
 "WoW UI" button; it follows you when you switch. It finds TSM's window through `TSM_API` only and never changes TSM's
