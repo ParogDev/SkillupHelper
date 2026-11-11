@@ -365,7 +365,14 @@ G.TOWN = 6
 function G.placeNear(map, x, y, seeds, mapName)
 	local best, bestD
 	for _, s in ipairs(seeds or {}) do
-		if s.map == map and s.place and type(s.x) == "number" and type(x) == "number" then
+		if
+			s.map == map
+			and s.place
+			and type(s.x) == "number"
+			and type(s.y) == "number"
+			and type(x) == "number"
+			and type(y) == "number"
+		then
 			local dx, dy = s.x - x, s.y - y
 			local d = math.sqrt(dx * dx + dy * dy)
 			if d <= G.TOWN and (not bestD or d < bestD) then

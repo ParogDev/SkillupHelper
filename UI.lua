@@ -592,10 +592,26 @@ end
 
 -- Paints a strip from Guide.strip's table; collapsed = the Buy button carries the action ("You are here" alone).
 local function paintStrip(s, g, color, collapsed)
+	-- the guide ticks at 10 Hz: repaint only what changed
+	local sig = table.concat({
+		tostring(g.a),
+		tostring(g.ar),
+		tostring(g.arTint),
+		tostring(g.b),
+		tostring(g.phase),
+		tostring(g.icon),
+		tostring(g.tint),
+		tostring(color),
+		tostring(collapsed),
+	}, "|")
+	if sig == s.sig then
+		return s.b:IsShown()
+	end
+	s.sig = sig
 	s.a:SetText(g.a or "")
 	setColor(s.a, g.phase == "here" and "green" or (g.phase == "unknown" or g.phase == "notnow") and "ash" or "bone")
 	s.ar:SetText(g.ar or "")
-	setColor(s.ar, g.arTint == "ash" and "ash" or g.arTint or "ash")
+	setColor(s.ar, g.arTint or "ash")
 	local b = not collapsed and g.b or nil
 	s.b:SetText(b or "")
 	setColor(s.b, "ash")

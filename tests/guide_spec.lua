@@ -432,5 +432,7 @@ describe("Guide strip and towns", function()
 		assert.equal("Crossroads", G.placeNear(1413, 51.5, 31, seeds, "The Barrens"))
 		assert.equal("The Barrens", G.placeNear(1413, 20, 80, seeds, "The Barrens"))
 		assert.is_nil(G.placeNear(1, 0, 0, seeds, nil))
+		-- a record without y (an old save) falls back to the map, no error
+		assert.equal("The Barrens", G.placeNear(1413, 52, nil, seeds, "The Barrens"))
 	end)
 end)

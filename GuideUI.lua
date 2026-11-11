@@ -626,6 +626,7 @@ local function togglePin()
 	gdb.pin = waypointOurs
 	status.waypoint = true
 	flash("Pinned on your map", 2)
+	return true
 end
 
 ------------------------------------------------------------------------------------------------------------ the state
@@ -1118,13 +1119,15 @@ local function init()
 	knownList = nil
 	status.seeds = #seeds
 	-- records learned before 0.2.8 have no town: give them one (a seed's nearby, else the map's name)
-	for _, npc in pairs(g.npcs) do
-		if type(npc) == "table" and npc.place == nil and npc.map then
-			local okInfo, info = pcall(C_Map.GetMapInfo, npc.map)
-			local mapName = okInfo and type(info) == "table" and not secret(info.name) and info.name or nil
-			npc.place = G.placeNear(npc.map, npc.x, npc.y, seeds, mapName)
+	ns.guard("guide towns", function()
+		for _, npc in pairs(g.npcs) do
+			if type(npc) == "table" and npc.place == nil and npc.map then
+				local okInfo, info = pcall(C_Map.GetMapInfo, npc.map)
+				local mapName = okInfo and type(info) == "table" and not secret(info.name) and info.name or nil
+				npc.place = G.placeNear(npc.map, npc.x, npc.y, seeds, mapName)
+			end
 		end
-	end
+	end)
 	if not ns.Data.npcs then
 		status.lastError = "Data/Npcs.lua not loaded: no seeds"
 	end
@@ -1204,9 +1207,9 @@ function GUI.stripClick()
 	if not chip then
 		return
 	end
-	togglePin()
 	status.stripClicks = (status.stripClicks or 0) + 1
-	if chip:IsShown() then
+	-- the ping only when a pin was set: a click that removed the pin, or found no place, has nothing to point at
+	if togglePin() and chip:IsShown() then
 		chip.ping:Stop()
 		chip.ping:Play()
 		status.pings = (status.pings or 0) + 1
@@ -1217,11 +1220,29 @@ end
 -- card's shopping blocks by city. place = "trainer" | "vendor" | "ah" (plan.shopping's keys). A vendor row no known
 -- NPC sells falls back to the record of its merchant's name (TSM's vendor name), when one is known.
 local NEED_KIND = { trainer = "trainer", vendor = "vendor", ah = "auction" }
+local whereCache, whereAt, whereList, whereOf = {}, -1, nil, nil
 function GUI.where(place, r)
 	if not gdb or type(r) ~= "table" or not NEED_KIND[place] then
 		return nil
 	end
 	knownList = knownList or G.known(seeds, gdb.npcs)
+	-- one answer per row a second (a card build asks for every row, and the strip can trigger redraws), and only
+	-- NPCs with a town count: the nearest one without a town would hide a farther one that names it
+	local now = GetTime()
+	if now - whereAt > 1 or whereOf ~= knownList then
+		whereCache, whereAt, whereOf = {}, now, knownList
+		whereList = {}
+		for _, npc in ipairs(knownList) do
+			if npc.place then
+				whereList[#whereList + 1] = npc
+			end
+		end
+	end
+	local key = table.concat({ place, tostring(r.item), tostring(r.name), tostring(r.merchant) }, ":")
+	local hit = whereCache[key]
+	if hit then
+		return hit[1], hit[2]
+	end
 	local need = { kind = NEED_KIND[place] }
 	if place == "vendor" then
 		need.items = { { item = r.item, count = 1 } }
@@ -1229,18 +1250,20 @@ function GUI.where(place, r)
 		need.profession = cur and cur.profession
 		need.name = r.kind == "train" and r.name or nil
 	end
-	local pick = G.nearest(knownList, need, here(), world)
-	if pick and pick.npc.place then
-		return pick.npc.place, pick.distance
-	end
-	if place == "vendor" and type(r.merchant) == "string" then
-		for _, npc in ipairs(knownList) do
-			if npc.name == r.merchant and npc.place then
-				return npc.place, nil
+	local city, dist
+	local pick = G.nearest(whereList, need, here(), world)
+	if pick then
+		city, dist = pick.npc.place, pick.distance
+	elseif place == "vendor" and type(r.merchant) == "string" then
+		for _, npc in ipairs(whereList) do
+			if npc.name == r.merchant then
+				city = npc.place
+				break
 			end
 		end
 	end
-	return nil
+	whereCache[key] = { city, dist }
+	return city, dist
 end
 
 -- The strip's state now (Guide.strip), for a card filled before the next tick.
