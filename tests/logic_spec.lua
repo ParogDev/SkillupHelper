@@ -511,6 +511,55 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal(ns.CODE_VERSION, "0.2.3")
+		assert.equal(ns.CODE_VERSION, "0.2.4")
+	end)
+end)
+
+describe("Vendor buy math", function()
+	local L
+	before_each(function()
+		L = load({}).Logic
+	end)
+
+	it("buys exactly the short count of a single-unit item, in one call", function()
+		local b = L.vendorLots(7, { price = 40, lot = 1, maxStack = 20, available = -1 })
+		assert.same({ lots = 7, qty = 7, cost = 280, calls = { 7 } }, b)
+	end)
+
+	it("rounds up to whole vendor lots and prices per lot", function()
+		-- water sold in fives at 25c a lot: 12 short is 3 lots, 15 units
+		local b = L.vendorLots(12, { price = 25, lot = 5, maxStack = 20, available = -1 })
+		assert.same({ lots = 3, qty = 15, cost = 75, calls = { 15 } }, b)
+		-- an exact multiple buys no extra lot
+		assert.equal(10, L.vendorLots(10, { price = 25, lot = 5, maxStack = 20 }).qty)
+	end)
+
+	it("splits a buy past the per-call stack limit, each call whole lots", function()
+		local b = L.vendorLots(45, { price = 10, lot = 1, maxStack = 20 })
+		assert.same({ 20, 20, 5 }, b.calls)
+		assert.equal(450, b.cost)
+		-- lot 5, max 12 a call: calls of 10 (two lots), never a broken lot
+		local c = L.vendorLots(23, { price = 1, lot = 5, maxStack = 12 })
+		assert.same({ 25, { 10, 10, 5 } }, { c.qty, c.calls })
+		-- a max below one lot still buys a lot a call
+		assert.same({ 5, 5 }, L.vendorLots(6, { price = 1, lot = 5, maxStack = 1 }).calls)
+		-- no max from the client: one lot a call, never more than the client might take
+		assert.same({ 5, 5 }, L.vendorLots(10, { price = 1, lot = 5 }).calls)
+	end)
+
+	it("refuses nothing to buy, no offer, and more than a limited vendor has", function()
+		assert.same({ nil, "nothing to buy" }, { L.vendorLots(0, { price = 1 }) })
+		assert.same({ nil, "nothing to buy" }, { L.vendorLots(-3, { price = 1 }) })
+		assert.same({ nil, "no offer" }, { L.vendorLots(2, nil) })
+		assert.same({ nil, "the vendor has 3 left" }, { L.vendorLots(4, { price = 1, lot = 1, available = 3 }) })
+		assert.equal(3, L.vendorLots(3, { price = 1, lot = 1, available = 3 }).qty)
+	end)
+
+	it("counts bag room as free slots times the stack, plus the top of a partial stack", function()
+		assert.equal(40, L.bagRoom(2, 20, 0))
+		assert.equal(47, L.bagRoom(2, 20, 13)) -- 7 more fit on the stack of 13
+		assert.equal(40, L.bagRoom(2, 20, 40)) -- full stacks take nothing
+		assert.equal(0, L.bagRoom(0, 20, 0))
+		assert.equal(3, L.bagRoom(3, 1, 5)) -- unstackable
 	end)
 end)
