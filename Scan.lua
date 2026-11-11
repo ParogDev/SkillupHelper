@@ -111,7 +111,11 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 		learnedKey[#learnedKey + 1] = spell
 	end
 	table.sort(learnedKey)
-	local key = table.concat({ skill, cap, pc.stamp, effort, nLearned, table.concat(learnedKey, ",") }, ":")
+	local noRecipeBuys = settings.noRecipeBuys == true
+	local key = table.concat(
+		{ skill, cap, pc.stamp, effort, tostring(noRecipeBuys), nLearned, table.concat(learnedKey, ",") },
+		":"
+	)
 	local bc = baseCache[prof]
 	if not bc or bc.key ~= key then
 		local ctx = ns.Planner.prepare({
@@ -124,18 +128,29 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 			price = pc.price,
 			product = pc.product,
 			effort = effort,
+			noRecipeBuys = noRecipeBuys,
 		})
 		bc = { key = key, ctx = ctx, baseline = ns.Planner.baseline(ctx) }
 		baseCache[prof] = bc
 	end
-	local have = {}
+	local have, haveKey = {}, {}
 	for item in pairs(pc.price) do
 		local n = S.have(item)
 		if n > 0 then
 			have[item] = n
+			haveKey[#haveKey + 1] = item .. "=" .. n
 		end
 	end
-	local result = ns.Planner.finish(bc.ctx, bc.baseline, have)
+	table.sort(haveKey)
+	haveKey = table.concat(haveKey, ",")
+	-- BAG_UPDATE_DELAYED fires for every bag change, most of them not in a reagent: same counts, same plan
+	local result = bc.haveKey == haveKey and bc.result
+	S.stockRuns = S.stockRuns or 0
+	if not result then
+		result = ns.Planner.finish(bc.ctx, bc.baseline, have)
+		bc.haveKey, bc.result = haveKey, result
+		S.stockRuns = S.stockRuns + 1
+	end
 	result.ms = clock() - t0
 	result.prices = pc.counts
 	result.ageHours = ns.TSM.ageHours(plan)

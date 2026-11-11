@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.3"
+ns.CODE_VERSION = "0.2.4"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -62,7 +62,8 @@ local function refreshSelftest()
 	st.lastScan = ns.lastScan
 	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
 	st.scans = ns.scans
-	st.settings = { effort = db.effort, sellShare = db.sellShare }
+	st.settings = ns.settings()
+	st.stockRuns = ns.Scan.stockRuns or 0
 	st.tsm = ns.TSM.status()
 	st.craftedEvent = ns.craftedEvent
 	local age = ns.TSM.ageHours(ns.Data.plan)
@@ -179,7 +180,7 @@ end
 
 -- The planner settings from SavedVariables (nil fields fall back to Data/Plan.lua's defaults).
 function ns.settings()
-	return { effort = db and db.effort, sellShare = db and db.sellShare }
+	return { effort = db and db.effort, sellShare = db and db.sellShare, noRecipeBuys = db and db.noRecipeBuys }
 end
 
 -- Shows the panel or folds it to its handle (the choice is kept). byUser: a click, so the change fades in.
@@ -308,8 +309,21 @@ end)
 
 SLASH_SKILLUPHELPER1 = "/skillup"
 -- "/skillup effort 30": copper charged per craft by the planner ("/skillup effort" resets to the plan's default).
+-- "/skillup recipes off": plan without buying recipe items ("on" plans with them again, the default).
 function ns.command(msg)
 	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
+	if cmd == "recipes" then
+		local off = arg:lower() == "off"
+		if db then
+			db.noRecipeBuys = off or nil
+		end
+		print(
+			off and "SkillupHelper: planning without buying recipes."
+				or "SkillupHelper: planning with recipes to buy (/skillup recipes off to stop)."
+		)
+		ns.refresh()
+		return true
+	end
 	if cmd ~= "effort" then
 		return false
 	end

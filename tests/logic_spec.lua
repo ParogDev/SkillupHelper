@@ -349,6 +349,38 @@ describe("Planner in the scan and the panel", function()
 		assert.is_not.equal("Hot Lion Chops", m2.planner.steps[2].name)
 	end)
 
+	it("reruns the stock pass only when a reagent count changed", function()
+		local finish, runs = ns.Planner.finish, 0
+		ns.Planner.finish = function(...)
+			runs = runs + 1
+			return finish(...)
+		end
+		local m = ns.Scan.build(plan2)
+		local m2 = ns.Scan.build(plan2) -- a bag update that moved nothing the plan uses
+		assert.equal(1, runs)
+		assert.equal(m.planner, m2.planner)
+		have[I.LION] = 3
+		local m3 = ns.Scan.build(plan2)
+		assert.equal(2, runs)
+		assert.is_not.equal(m.planner, m3.planner)
+		ns.Planner.finish = finish
+	end)
+
+	it("plans without recipe buys when the setting says so", function()
+		local cooking = plan2.professions[185]
+		local p = ns.Scan.runPlanner(plan2, cooking, 173, 225, F.COOKING_LEARNED, {}, {})
+		local p2 = ns.Scan.runPlanner(plan2, cooking, 173, 225, F.COOKING_LEARNED, {}, { noRecipeBuys = true })
+		local function recipeBuys(result)
+			local n = 0
+			for _, s in ipairs(result.steps) do
+				n = n + (s.kind == "buyRecipe" and 1 or 0)
+			end
+			return n
+		end
+		assert.is_true(recipeBuys(p) > 0)
+		assert.equal(0, recipeBuys(p2))
+	end)
+
 	it("names a version 1 plan", function()
 		local m = ns.Scan.build(plan)
 		assert.matches("version 1", m.plannerWhy)
@@ -511,6 +543,6 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal(ns.CODE_VERSION, "0.2.3")
+		assert.equal(ns.CODE_VERSION, "0.2.4")
 	end)
 end)
