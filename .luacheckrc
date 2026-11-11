@@ -18,6 +18,11 @@ else
 		"issecretvalue", "date", "time", "GetTime", "debugprofilestop",
 		"C_MerchantFrame", "C_Container", "GetMerchantNumItems", "GetMerchantItemID", "GetMerchantItemMaxStack",
 		"GetMerchantFilter", "BuyMerchantItem", "GetMoney", "bit",
+		-- rank and recipe learning at the trainer (Scan.lua)
+		"UnitLevel", "GetProfessions", "GetProfessionInfo", "C_TooltipInfo", "Enum", "IsTradeskillTrainer",
+		"GetNumTrainerServices", "GetTrainerServiceInfo", "GetTrainerServiceCost", "GetTrainerServiceDescription",
+		"GetTrainerServiceLevelReq", "GetTrainerServiceSkillLine", "GetTrainerServiceSkillReq",
+		"GetTrainerTradeskillRankValues",
 	}
 end
 -- FrameXML globals for the vendor buy: the merchant window and bag constants.
