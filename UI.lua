@@ -20,7 +20,8 @@ UI.stats = {
 	animations = 0,
 	played = {},
 	docks = {},
-	clicks = { craft = 0, open = 0, hide = 0, show = 0 },
+	clicks = { craft = 0, open = 0, hide = 0, show = 0, buy = 0 },
+	merchant = { open = false, shows = 0 },
 }
 
 local function secret(v)
@@ -74,6 +75,71 @@ function UI.craftable(spell)
 	return nil, "the client gave no craftable count (GetCraftableCount, numAvailable)"
 end
 
+-- The open merchant's offer for an item: { index, price, lot, maxStack, available } (Logic.vendorLots), or nil and
+-- the link that broke. The merchant API reads the vendor, not a frame: it answers the same under Blizzard's
+-- MerchantFrame and TSM's vendoring window.
+function UI.merchantOffer(item)
+	if not ns.merchantOpen then
+		return nil, "no vendor open"
+	end
+	local okN, n = pcall(GetMerchantNumItems)
+	if not okN or secret(n) or type(n) ~= "number" then
+		return nil, "GetMerchantNumItems failed: " .. tostring(n)
+	end
+	for i = 1, n do
+		local id = GetMerchantItemID(i)
+		if id == item and not secret(id) then
+			local ok, info = pcall(C_MerchantFrame.GetItemInfo, i)
+			if not ok or type(info) ~= "table" then
+				return nil, "C_MerchantFrame.GetItemInfo failed: " .. tostring(info)
+			end
+			if info.hasExtendedCost or info.currencyID then
+				return nil, "costs more than gold here"
+			end
+			if info.isPurchasable == false then
+				return nil, "the vendor will not sell it to you"
+			end
+			local maxStack = GetMerchantItemMaxStack(i)
+			return {
+				index = i,
+				price = info.price or 0,
+				lot = math.max(1, info.stackCount or 1),
+				maxStack = type(maxStack) == "number" and maxStack or nil,
+				available = info.numAvailable,
+			}
+		end
+	end
+	if GetMerchantFilter and LE_LOOT_FILTER_ALL and GetMerchantFilter() ~= LE_LOOT_FILTER_ALL then
+		return nil, "not in this vendor's list (its filter is not All)"
+	end
+	return nil, "this vendor does not sell it"
+end
+
+-- Units of `item` the bags take now: free slots of bags that accept it (general bags, a profession bag of its
+-- family, the reagent bag for a crafting reagent) times its stack size, plus the top of a partial stack.
+function UI.bagRoom(item, offer)
+	local _, _, _, _, _, _, _, stack, _, _, _, _, _, _, _, _, isReagent = C_Item.GetItemInfo(item)
+	stack = stack or (offer and offer.maxStack) or 1
+	local family = C_Item.GetItemFamily and C_Item.GetItemFamily(item) or 0
+	local bags = NUM_BAG_SLOTS or 4
+	local free = 0
+	for bag = 0, NUM_TOTAL_EQUIPPED_BAG_SLOTS or bags do
+		local n, bagFamily = C_Container.GetContainerNumFreeSlots(bag)
+		if type(n) == "number" and n > 0 then
+			local fits
+			if bag > bags then
+				fits = isReagent == true
+			else
+				fits = (bagFamily or 0) == 0 or bit.band(bagFamily, family or 0) ~= 0
+			end
+			if fits then
+				free = free + n
+			end
+		end
+	end
+	return ns.Logic.bagRoom(free, stack, C_Item.GetItemCount(item) or 0)
+end
+
 -- The env View.describe reads the client through.
 function UI.env()
 	return {
@@ -84,13 +150,59 @@ function UI.env()
 		end,
 		craftable = UI.craftable,
 		dock = ns.dockKind,
+		merchant = ns.merchantOpen and UI.merchantOffer or nil,
+		gold = GetMoney,
+		bagRoom = UI.bagRoom,
 	}
+end
+
+-- Which merchant window is up: Blizzard's, or another (TSM's vendoring frame hides MerchantFrame).
+local function merchantUi()
+	return (MerchantFrame and MerchantFrame:IsShown()) and "blizzard" or "other"
+end
+
+-- A click on Buy: asks the merchant again (the list, prices, gold and bags may have changed since the draw) and buys
+-- what View.buyAction allows now, every call a whole number of the vendor's lots.
+local function buy(a)
+	local stats = UI.stats
+	stats.clicks.buy = (stats.clicks.buy or 0) + 1
+	local fresh = ns.View.buyAction(a.want, UI.env())
+	if not fresh or not fresh.enabled then
+		stats.lastBuyError = "refused at the click: " .. tostring(fresh and fresh.label or "nothing to buy")
+		ns.refresh()
+		return false
+	end
+	local bought, err = {}, nil
+	for _, it in ipairs(fresh.items) do
+		local done = 0
+		for _, n in ipairs(it.calls) do
+			local ok, e = pcall(BuyMerchantItem, it.index, n)
+			if not ok then
+				err = ("BuyMerchantItem(%d, %d): %s"):format(it.index, n, tostring(e))
+				break
+			end
+			done = done + n
+		end
+		bought[#bought + 1] = { item = it.item, count = done, cost = it.cost, calls = #it.calls }
+		if err then
+			break
+		end
+	end
+	local ui = merchantUi()
+	stats.buysByUi = stats.buysByUi or {}
+	stats.buysByUi[ui] = (stats.buysByUi[ui] or 0) + 1
+	stats.lastBuy = { at = date("%Y-%m-%d %H:%M:%S"), ui = ui, cost = fresh.cost, items = bought }
+	stats.lastBuyError = err
+	return err == nil
 end
 
 -- A click on a card button. Each client call runs under pcall and leaves its result in UI.stats (selftest ui).
 -- Only ever called from a button's OnClick: a craft needs the user's own click.
 function UI.act(a)
 	local stats = UI.stats
+	if type(a) == "table" and a.id == "buy" then
+		return a.enabled and buy(a) or false
+	end
 	if type(a) ~= "table" or not a.enabled or secret(a.spell) or type(a.spell) ~= "number" then
 		return false
 	end
@@ -424,7 +536,7 @@ local function newCard(parent)
 		card.lines[k] = text(card, "GameFontHighlightSmall", 11)
 		card.lines[k]:SetWidth(INNER - PAD * 2)
 	end
-	card.buttons = { craft = newButton(card), open = newButton(card) }
+	card.buttons = { buy = newButton(card), craft = newButton(card), open = newButton(card) }
 
 	-- slide: in from the right with a fade, out to the left
 	local ig = card:CreateAnimationGroup()
@@ -550,13 +662,23 @@ local function fillCard(card, c, consumed)
 		end
 	end
 
-	-- the buttons: Craft takes the row, Show recipe sits at its right when the view offers it
-	local craft, open = card.buttons.craft, card.buttons.open
+	-- the buttons: Buy (vendor reagents the step lacks) takes a row of its own above; Craft takes the next row, Show
+	-- recipe sits at its right when the view offers it
+	local craft, open, buyButton = card.buttons.craft, card.buttons.open, card.buttons.buy
 	craft:Hide()
 	open:Hide()
+	buyButton:Hide()
 	local byId = {}
 	for _, a in ipairs(c.actions or {}) do
 		byId[a.id] = a
+	end
+	if byId.buy then
+		top = top + 10
+		buyButton:ClearAllPoints()
+		buyButton:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		buyButton:SetWidth(INNER - 2 * PAD - 2)
+		setButton(buyButton, byId.buy, ns.View.RGB.gold)
+		top = top + 20 -- the Craft row adds its 10 on top: 6 px between the two buttons
 	end
 	if byId.craft then
 		top = top + 10

@@ -16,7 +16,13 @@ else
 	read_globals = {
 		"CreateFrame", "C_AddOns", "C_Timer", "C_Item", "C_TradeSkillUI", "GetBuildInfo", "WOW_PROJECT_ID",
 		"issecretvalue", "date", "time", "GetTime", "debugprofilestop",
+		"C_MerchantFrame", "C_Container", "GetMerchantNumItems", "GetMerchantItemID", "GetMerchantItemMaxStack",
+		"GetMerchantFilter", "BuyMerchantItem", "GetMoney", "bit",
 	}
+end
+-- FrameXML globals for the vendor buy: the merchant window and bag constants.
+for _, g in ipairs({ "MerchantFrame", "LE_LOOT_FILTER_ALL", "NUM_BAG_SLOTS", "NUM_TOTAL_EQUIPPED_BAG_SLOTS" }) do
+	read_globals[#read_globals + 1] = g
 end
 -- FrameXML globals the generated list doesn't carry (it is built from the C API lists).
 read_globals[#read_globals + 1] = "ProfessionsFrame"

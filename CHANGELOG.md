@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.5
+
+- The Next card buys its vendor reagents. When a step needs something a vendor sells ("buy 7 Hot Spices"), a Buy
+  button above Craft shows the count and the price. It works while a vendor that sells the item is open, in WoW's
+  merchant window and in TSM's vendoring window. It buys exactly what the step is short of, in whole vendor lots.
+  It stays off and says why when no open vendor sells the item, your gold is short or your bags are full.
+
 ## 0.2.4
 
 - `/skillup recipes off` plans only with recipes you know or can train, no recipe items to buy. `/skillup recipes on`
