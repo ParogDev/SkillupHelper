@@ -111,8 +111,12 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 		learnedKey[#learnedKey + 1] = spell
 	end
 	table.sort(learnedKey)
+	local noRecipeBuys = settings.noRecipeBuys == true
 	local luck = settings.luck or ns.Planner.LUCK
-	local key = table.concat({ skill, cap, pc.stamp, effort, luck, nLearned, table.concat(learnedKey, ",") }, ":")
+	local key = table.concat(
+		{ skill, cap, pc.stamp, effort, tostring(noRecipeBuys), luck, nLearned, table.concat(learnedKey, ",") },
+		":"
+	)
 	local bc = baseCache[prof]
 	if not bc or bc.key ~= key then
 		local ctx = ns.Planner.prepare({
@@ -125,18 +129,21 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 			price = pc.price,
 			product = pc.product,
 			effort = effort,
+			noRecipeBuys = noRecipeBuys,
 			luck = luck,
 		})
 		bc = { key = key, ctx = ctx, baseline = ns.Planner.baseline(ctx) }
 		baseCache[prof] = bc
 	end
-	local have = {}
+	local have, haveKey = {}, {}
 	for item in pairs(pc.price) do
 		local n = S.have(item)
 		if n > 0 then
 			have[item] = n
+			haveKey[#haveKey + 1] = item .. "=" .. n
 		end
 	end
+	table.sort(haveKey)
 	-- the AH trip list the user keeps for this profession: its steps are committed until their target is reached
 	-- (planner rule 3); a list saved before 0.2.6 has only route and to
 	local saved = settings.trips and settings.trips[prof.name]
@@ -154,11 +161,30 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 			end
 		end
 	end
-	local result = ns.Planner.finish(bc.ctx, bc.baseline, have, {
-		commit = commit,
-		gold = GetMoney and GetMoney() or nil,
-	})
-	result.ms = clock() - t0
+	local commitKey = {}
+	for _, cm in ipairs(commit or {}) do
+		commitKey[#commitKey + 1] = tostring(cm.spell) .. ":" .. tostring(cm.to)
+	end
+	local gold = GetMoney and GetMoney() or nil
+	-- the stock run also reruns on a changed trip list or a whole gold more or less (the trip's gold cut)
+	haveKey = table.concat({
+		table.concat(haveKey, ","),
+		commit and table.concat(commitKey, ",") or "-",
+		tostring(math.floor((gold or 0) / 10000)),
+	}, "|")
+	-- BAG_UPDATE_DELAYED fires for every bag change, most of them not in a reagent: same counts, same plan
+	S.stockRuns = S.stockRuns or 0
+	if bc.haveKey ~= haveKey or not bc.result then
+		bc.haveKey, bc.result = haveKey, ns.Planner.finish(bc.ctx, bc.baseline, have, { commit = commit, gold = gold })
+		bc.ms = clock() - t0
+		S.stockRuns = S.stockRuns + 1
+	end
+	-- a shallow copy per build, so the per-build fields below never write into the cached plan
+	local result = {}
+	for k, v in pairs(bc.result) do
+		result[k] = v
+	end
+	result.ms = bc.ms -- what the planner cost when it last ran, not the cache lookup
 	result.prices = pc.counts
 	result.ageHours = ns.TSM.ageHours(plan)
 	result.profKey = prof.name
@@ -256,7 +282,7 @@ function S.build(plan)
 		end
 	elseif prof and not ns.Logic.isPlanV2(plan, prof) then
 		model.plannerWhy =
-			"Data/Plan.lua is version 1 (no recipe reagents): rerun tools/tsm/skillup_lua.py, then /reload"
+			"Data/Plan.lua is version 1 (no recipe reagents): the price plan needs regenerating on the PC, then /reload"
 	end
 	if prof then
 		model.step, model.nextStep, model.planState = ns.Logic.planStep(prof, skill)
@@ -265,7 +291,7 @@ function S.build(plan)
 			return learned[spell] or false
 		end)
 	elseif not plan then
-		model.planWhy = "Data/Plan.lua absent: run tools/tsm/skillup_lua.py, then /reload"
+		model.planWhy = "Data/Plan.lua absent: the price plan was not generated for this copy of the addon"
 	else
 		model.planWhy = ("Data/Plan.lua has no plan for %s (id %s)"):format(
 			tostring(info.professionName),

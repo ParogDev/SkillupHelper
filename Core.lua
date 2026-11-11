@@ -62,7 +62,8 @@ local function refreshSelftest()
 	st.lastScan = ns.lastScan
 	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
 	st.scans = ns.scans
-	st.settings = { effort = db.effort, sellShare = db.sellShare, luck = db.luck }
+	st.settings = ns.settings()
+	st.stockRuns = ns.Scan.stockRuns or 0
 	st.trips = db.trips
 	st.tsm = ns.TSM.status()
 	st.craftedEvent = ns.craftedEvent
@@ -187,6 +188,7 @@ function ns.settings()
 	return {
 		effort = db and db.effort,
 		sellShare = db and db.sellShare,
+		noRecipeBuys = db and db.noRecipeBuys,
 		luck = db and db.luck,
 		trips = db and db.trips,
 	}
@@ -332,6 +334,9 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 		end
 		return
 	end
+	if event == "BAG_UPDATE_DELAYED" then
+		ns.UI.noteBags()
+	end
 	if event == "MERCHANT_SHOW" or event == "MERCHANT_CLOSED" then
 		ns.merchantOpen = event == "MERCHANT_SHOW"
 		local m = ns.UI.stats.merchant
@@ -368,6 +373,7 @@ end)
 
 SLASH_SKILLUPHELPER1 = "/skillup"
 -- "/skillup effort 30": copper charged per craft by the planner ("/skillup effort" resets to the plan's default).
+-- "/skillup recipes off": plan without buying recipe items ("on" plans with them again, the default).
 function ns.command(msg)
 	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
 	if cmd == "luck" then
@@ -381,6 +387,25 @@ function ns.command(msg)
 				db and db.luck or ns.Planner.LUCK,
 				(arg ~= "" and not ns.Planner.zOf(n)) and " (use 50, 75, 80, 90, 95 or 99)" or ""
 			)
+		)
+		ns.refresh()
+		return true
+	end
+	if cmd == "recipes" then
+		local word = arg:lower()
+		if word ~= "on" and word ~= "off" then
+			print(("SkillupHelper: /skillup recipes on|off (now %s)."):format(db and db.noRecipeBuys and "off" or "on"))
+			return true
+		end
+		if not db then
+			print("SkillupHelper: SavedVariables not loaded yet, setting not changed.")
+			return true
+		end
+		local off = word == "off"
+		db.noRecipeBuys = off or nil
+		print(
+			off and "SkillupHelper: planning without buying recipes."
+				or "SkillupHelper: planning with recipes to buy (/skillup recipes off to stop)."
 		)
 		ns.refresh()
 		return true

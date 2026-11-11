@@ -365,6 +365,9 @@ describe("View description", function()
 		end
 		local full = V.buyAction(want, env)
 		assert.same({ false, "Buy Hot Spices: bags full, room for 5" }, { full.enabled, full.label })
+		-- two reagents, both refused for the same reason: the reason is on the button
+		local both = V.buyAction({ want[1], { item = 9, name = "Gray Dye", count = 7 } }, env)
+		assert.same({ false, "Buy 2 reagents: bags full, room for 5" }, { both.enabled, both.label })
 		-- two reagents, one sold here: buys that one, the tip names the other
 		env.bagRoom = nil
 		local two = { want[1], { item = 9, name = "Gray Dye", count = 7 } }

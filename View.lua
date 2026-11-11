@@ -412,8 +412,19 @@ function V.buyAction(want, env)
 		end
 	end
 	if #a.items == 0 then
-		a.label = #want == 1 and ("Buy %s: %s"):format(first.name, (problems[1]:gsub("^[^:]*: ", "")))
-			or "This vendor sells none of them"
+		-- one reason for all of them (bags full, no vendor stock) goes on the button; mixed reasons go to the tip
+		local reasons, same = {}, true
+		for k, w in ipairs(want) do
+			reasons[k] = problems[k]:sub(#w.name + 3)
+			same = same and reasons[k] == reasons[1]
+		end
+		if #want == 1 then
+			a.label = ("Buy %s: %s"):format(first.name, reasons[1])
+		elseif same then
+			a.label = ("Buy %d reagents: %s"):format(#want, reasons[1])
+		else
+			a.label = "This vendor sells none of them"
+		end
 		a.tip = table.concat(problems, "\n")
 		return a
 	end
@@ -489,7 +500,7 @@ function V.tripAction(block)
 	}
 end
 
--- The buttons of a Next card:{ { id = "craft", spell, count, enabled, label, tip }, { id = "open", ... } }, or nil
+-- The buttons of a Next card: { { id = "craft", spell, count, enabled, label, tip }, { id = "open", ... } }, or nil
 -- and why when the card gets none (not a craft, the recipe is not learned, the client gave no count).
 -- "Craft N" casts min(the step's crafts, what the bags allow now); with nothing craftable it stays, inert, and its
 -- label says what to do first. "Show recipe" selects the recipe in Blizzard's window only: TSM's window does not
