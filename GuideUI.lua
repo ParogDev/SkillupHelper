@@ -262,7 +262,16 @@ local function onModel(model)
 		return
 	end
 	local step = model.planner.steps and model.planner.steps[1]
+	status.lastModel = {
+		profession = model.profession,
+		steps = model.planner.steps and #model.planner.steps or 0,
+		first = step and step.kind,
+	}
 	if not step then
+		-- another profession with nothing to do keeps this one's guide
+		if cur and cur.profession ~= model.profession then
+			return
+		end
 		cur, gdb.last = nil, nil
 		evaluate()
 		return
@@ -452,7 +461,11 @@ local function isOurPin()
 	if not p or p.uiMapID ~= waypointOurs.map or not p.position then
 		return false
 	end
-	local x, y = p.position:GetXY()
+	-- GetUserWaypoint gives a plain { x, y } table on this client, not a Vector2D (no GetXY)
+	local x, y = p.position.x, p.position.y
+	if type(x) ~= "number" or type(y) ~= "number" then
+		return false
+	end
 	return math.abs(x - waypointOurs.x) < 1e-3 and math.abs(y - waypointOurs.y) < 1e-3
 end
 
