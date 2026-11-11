@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3
+
+- The Next card no longer vanishes when two skill-ups come close together.
+- A step never claims stock you no longer have: once an earlier step has used it up, the step says to buy instead.
+- The Craft button counts every material of a recipe, also those past the eighth row the card shows.
+- A product that sells for less on the auction house than at a vendor is always planned as vendored.
+- A changed `sellShare` setting takes effect at once instead of after the five-minute price refresh.
+- Switching between the TSM and WoW profession windows redraws the card for the window now in front.
+
 ## 0.2.2
 
 - The Next card can act on a recipe you know. "Craft 3" casts the step's crafts, as many as your bags allow now; when
