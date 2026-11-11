@@ -10,7 +10,13 @@ ignore = {
 
 local ok, wow = pcall(dofile, "../../tools/luacheck-wow-globals.lua")
 if ok and type(wow) == "table" then
-	read_globals = wow.read_globals
+	-- SlashCmdList is written (the /skillup handler): it is in `globals` below, so not read-only here
+	read_globals = {}
+	for _, g in ipairs(wow.read_globals) do
+		if g ~= "SlashCmdList" then
+			read_globals[#read_globals + 1] = g
+		end
+	end
 else
 	-- CI in this repo runs standalone: every global the addon touches must be here.
 	read_globals = {
