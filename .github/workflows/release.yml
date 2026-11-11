@@ -1,0 +1,26 @@
+# Package a tagged release with the BigWigs packager for the Forever flavor and attach it to a GitHub
+# Release. CurseForge / Wago uploads happen only when the secrets exist. This is the one workflow allowed on a
+# GitHub-hosted runner (a few seconds per tag; see tools/ci/check-runners.sh in the scaffolding repo).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: BigWigsMods/packager@v2
+        with:
+          args: -g forever
+        env:
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}

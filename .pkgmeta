@@ -1,0 +1,15 @@
+package-as: SkillupHelper
+
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
+ignore:
+  - tests
+  - .github
+  - .luacheckrc
+  - .stylua.toml
+  - .busted
+  # Written on this PC from your own prices; the example documents the shape.
+  - Data/Plan.lua
+  - Data/Plan.example.lua

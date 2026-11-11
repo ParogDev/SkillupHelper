@@ -1,0 +1,16 @@
+## Interface: 16001
+## Title: Skillup Helper
+## Notes: In the profession window: what you can craft for skill from bags and bank, and the cheapest next step.
+## Author: ParogDev
+## Version: @project-version@
+## SavedVariables: SkillupHelperDB
+## X-Game: forever
+## X-Website: https://github.com/ParogDev/SkillupHelper
+## X-License: MIT
+## IconTexture: Interface\Icons\Trade_LeatherWorking
+
+Data\Plan.lua
+Logic.lua
+Scan.lua
+UI.lua
+Core.lua
