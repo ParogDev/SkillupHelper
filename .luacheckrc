@@ -18,12 +18,19 @@ else
 		"issecretvalue", "date", "time", "GetTime", "debugprofilestop",
 		"C_MerchantFrame", "C_Container", "GetMerchantNumItems", "GetMerchantItemID", "GetMerchantItemMaxStack",
 		"GetMerchantFilter", "BuyMerchantItem", "GetMoney", "bit",
+		-- the guide (GuideUI.lua)
+		"C_Map", "C_SuperTrack", "C_Texture", "IsInInstance", "GetPlayerFacing", "UnitName", "UnitGUID", "IsInGroup",
+		"InCombatLockdown", "GetNumTrainerServices", "GetTrainerServiceSkillLine", "hooksecurefunc",
 	}
 end
 -- FrameXML globals for the vendor buy: the merchant window and bag constants.
 for _, g in ipairs({ "MerchantFrame", "LE_LOOT_FILTER_ALL", "NUM_BAG_SLOTS", "NUM_TOTAL_EQUIPPED_BAG_SLOTS" }) do
 	read_globals[#read_globals + 1] = g
 end
+-- FrameXML helpers of the guide (Lua mixins, not C API).
+read_globals[#read_globals + 1] = "CreateVector2D"
+read_globals[#read_globals + 1] = "UiMapPoint"
+read_globals[#read_globals + 1] = "MenuUtil"
 -- FrameXML globals the generated list doesn't carry (it is built from the C API lists).
 read_globals[#read_globals + 1] = "ProfessionsFrame"
 read_globals[#read_globals + 1] = "UIParent"

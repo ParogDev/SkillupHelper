@@ -11,6 +11,7 @@ ns.Guide = G
 
 G.NEAR = 60 -- yards: within this the Target button is offered (the client finds a unit by name about this far)
 G.ARRIVED = 12 -- yards: "it is here, look around"
+G.FAR = 75 -- yards: "near" is left only past this (hysteresis)
 
 local TWO_PI = 2 * math.pi
 
@@ -152,7 +153,8 @@ function G.nearest(npcs, need, here, world)
 			end
 			-- lower is better: missing items, then other continent, then distance
 			local key = (want - s) * 1e9 + (same and 0 or 1e8) + (dist or 0)
-			if not bestKey or key < bestKey or (key == bestKey and npc.id < best.npc.id) then
+			-- ids are numbers, or "name:<Name>" for an NPC learned without a readable GUID: compare as strings
+			if not bestKey or key < bestKey or (key == bestKey and tostring(npc.id) < tostring(best.npc.id)) then
 				bestKey = key
 				best = {
 					npc = npc,
@@ -173,8 +175,9 @@ function G.nearest(npcs, need, here, world)
 end
 
 -- The guide's state for the chip and the card: "none" (no known NPC), "away" (another continent or no position),
--- "far", "near", "arrived", "here" (its window is open). targeted: the NPC is the player's target.
-function G.phase(pick, open, targeted)
+-- "far", "near", "arrived", "here" (its window is open). targeted: the NPC is the player's target. prev: the phase
+-- before, so "near" holds out to G.FAR yards and the chip does not flicker at the edge.
+function G.phase(pick, open, targeted, prev)
 	if not pick then
 		return "none"
 	end
@@ -189,7 +192,7 @@ function G.phase(pick, open, targeted)
 		return "away"
 	elseif d <= G.ARRIVED then
 		return "arrived"
-	elseif d <= G.NEAR then
+	elseif d <= G.NEAR or (d <= G.FAR and (prev == "near" or prev == "arrived" or prev == "targeted")) then
 		return "near"
 	end
 	return "far"
@@ -295,6 +298,117 @@ function G.seedRecords(rows)
 		}
 	end
 	return out
+end
+
+-- A step's identity, for "Stop guiding this step" (the same shape as View's card key).
+function G.stepKey(step)
+	if type(step) ~= "table" then
+		return nil
+	end
+	return table.concat(
+		{ tostring(step.kind), tostring(step.spell or step.item or step.from), tostring(step.source or "") },
+		":"
+	)
+end
+
+-- The value seen most often in a list (nil entries skipped; ties go to the one seen first), or nil.
+function G.mostCommon(list)
+	local n, best, bestN = {}, nil, 0
+	for i = 1, #list do
+		local v = list[i]
+		if v ~= nil then
+			n[v] = (n[v] or 0) + 1
+			if n[v] > bestN then
+				best, bestN = v, n[v]
+			end
+		end
+	end
+	return best
+end
+
+-- The Target button's macro. "/tm !1" puts the star on without toggling it off when it is already there (Blizzard's
+-- own check, so no secret raid-target index is read here); solo only, since a group would see it too. The target is
+-- cleared first so a /targetexact that finds nobody leaves nothing for the star to land on.
+function G.macro(name, solo)
+	if type(name) ~= "string" or name == "" then
+		return nil
+	end
+	local m = "/cleartarget\n/targetexact " .. name
+	if solo then
+		m = m .. "\n/tm !1"
+	end
+	return m
+end
+
+local function role(s)
+	local need = s.need or {}
+	if need.kind == "trainer" then
+		return ("%s trainer"):format(s.profession or need.profession or "Profession")
+	elseif need.kind == "auction" then
+		return "Auctioneer"
+	end
+	return s.thing and ("Sells " .. s.thing) or "Vendor"
+end
+
+local function withPlace(text, place)
+	return place and (text .. ", " .. place) or text
+end
+
+-- The chip's copy for a guide state. s = { phase, need, name, distance, place, thing (first item's name),
+-- profession, compass (a word, when the facing is unknown and the arrow is hidden), marked (solo: the star goes on),
+-- color (the step's), why }. Phases: Guide.phase's, plus "done", "unknown" (no NPC known) and "notnow" (no position).
+-- Returns { l1, r1, l2, action, style ("quiet" | "primary"), icon ("arrow" | "star" | "dot"), tint, why }.
+function G.describe(s)
+	local p, need = s.phase, s.need or {}
+	local d = { l1 = s.name, r1 = G.distanceText(s.distance) or "", why = s.why }
+	if p == "far" or p == "near" or p == "arrived" or p == "away" then
+		d.action, d.style, d.icon = "Target " .. tostring(s.name), "quiet", "arrow"
+		d.tint = "bone"
+		d.l2 = withPlace(role(s), s.place)
+		if p == "near" or p == "arrived" then
+			d.style, d.tint = "primary", s.color or "bone"
+			d.l2 = p == "near" and "Close. Target them to see who it is" or "Right here. Target them to find them"
+		elseif p == "away" then
+			d.icon = nil
+			d.l2 = withPlace(role(s), s.place or "another continent")
+		end
+		if s.compass and d.icon then
+			d.icon = nil
+			d.r1 = d.r1 ~= "" and (d.r1 .. " " .. s.compass) or s.compass
+		end
+	elseif p == "targeted" then
+		d.action, d.style, d.icon, d.tint = "Target " .. tostring(s.name), "quiet", "star", "green"
+		d.l2 = s.marked and "Marked with a star. Right-click them to talk" or "Right-click them to talk"
+	elseif p == "here" then
+		d.l1, d.r1, d.icon, d.tint = "You are here", "", "dot", "green"
+		if need.kind == "trainer" then
+			d.l2 = "Learn the next rank here"
+		elseif need.kind == "auction" then
+			d.l2 = "Buy the materials on the list"
+		else
+			d.l2 = ("Buy %s from this window"):format(s.thing or "the materials")
+		end
+	elseif p == "done" then
+		d.l1 = need.kind == "trainer" and "Trained" or "All bought"
+		d.r1, d.icon, d.tint = "", "dot", "green"
+		d.l2 = ("Open %s to craft"):format(s.profession or "the profession")
+	elseif p == "unknown" then
+		d.r1 = ""
+		if need.kind == "trainer" then
+			d.l1 = "No known trainer yet"
+			d.l2 = ("Ask a city guard for the %s trainer"):format(s.profession or need.profession or "profession")
+		elseif need.kind == "auction" then
+			d.l1, d.l2 = "No auction house known", "The nearest is in a capital city"
+		else
+			d.l1 = "No known vendor yet"
+			d.l2 = ("Trade supplies vendors sell %s"):format(s.thing or "most materials")
+		end
+	elseif p == "notnow" then
+		d.l1, d.r1, d.l2 = "No directions in here", "", "They come back when you leave"
+	else
+		return nil
+	end
+	return d
 end
 
 return G

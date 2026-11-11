@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.5"
+ns.CODE_VERSION = "0.2.6"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -71,6 +71,7 @@ local function refreshSelftest()
 	st.tsmStale = age == nil or age > ns.TSM.STALE_HOURS
 	st.lastError = ns.lastError
 	st.panelErrors = ns.panelErrors
+	st.guide = ns.GuideUI and ns.GuideUI.status()
 	local ui = ns.UI.stats
 	st.ui = {
 		layout = ui.layout,

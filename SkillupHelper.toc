@@ -11,10 +11,13 @@
 ## IconTexture: Interface\Icons\Trade_LeatherWorking
 
 Data\Plan.lua
+Data\Npcs.lua
 Logic.lua
+Guide.lua
 Planner.lua
 Scan.lua
 TSM.lua
 View.lua
 UI.lua
+GuideUI.lua
 Core.lua

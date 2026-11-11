@@ -180,4 +180,67 @@ describe("Guide", function()
 		assert.truthy(G.unknownText(need, nameOf):find("No known vendor for Fine Thread", 1, true))
 		assert.truthy(G.unknownText({ kind = "trainer", profession = "Cooking" }, nameOf):find("Cooking trainer"))
 	end)
+
+	it("holds near out to G.FAR so the chip does not flicker at the edge", function()
+		assert.equal("far", G.phase({ distance = 70 }))
+		assert.equal("near", G.phase({ distance = 70 }, false, false, "near"))
+		assert.equal("near", G.phase({ distance = 70 }, false, false, "targeted"))
+		assert.equal("far", G.phase({ distance = G.FAR + 1 }, false, false, "near"))
+		assert.equal("far", G.phase({ distance = 70 }, false, false, "far"))
+	end)
+
+	it("picks between a learned name-keyed NPC and a seed at the same spot without an error", function()
+		local npcs = G.seedRecords({ { id = 7, name = "Seed", map = 1, x = 50, y = 50, role = "auction" } })
+		npcs[2] = { id = "name:Learned", name = "Learned", map = 1, x = 50, y = 50, auction = true }
+		local pick, servers = G.nearest(npcs, { kind = "auction" }, here(1, 40, 50), world)
+		assert.equal(2, servers)
+		assert.equal(7, pick.npc.id)
+	end)
+
+	it("keys a step, finds the most common trainer line and builds the Target macro", function()
+		assert.equal("craft:3:", G.stepKey({ kind = "craft", spell = 3 }))
+		assert.equal("train:130:", G.stepKey({ kind = "train", from = 130 }))
+		assert.is_nil(G.stepKey(nil))
+		assert.equal("Cooking", G.mostCommon({ "Cooking", nil, "Riding", "Cooking" }))
+		assert.is_nil(G.mostCommon({}))
+		assert.equal("/cleartarget\n/targetexact Tamar\n/tm !1", G.macro("Tamar", true))
+		assert.equal("/cleartarget\n/targetexact Tamar", G.macro("Tamar", false))
+		assert.is_nil(G.macro("", true))
+	end)
+
+	it("writes the chip's copy for every state", function()
+		local vendor = { kind = "vendor", items = { { item = THREAD, count = 1 } } }
+		local base = { need = vendor, name = "Tamar", place = "Orgrimmar", thing = "Fine Thread", color = "yellow" }
+		local function with(t)
+			local s = {}
+			for k, v in pairs(base) do
+				s[k] = v
+			end
+			for k, v in pairs(t) do
+				s[k] = v
+			end
+			return G.describe(s)
+		end
+		local far = with({ phase = "far", distance = 140 })
+		assert.same({ "Tamar", "140 yd", "Sells Fine Thread, Orgrimmar" }, { far.l1, far.r1, far.l2 })
+		assert.same({ "Target Tamar", "quiet", "arrow", "bone" }, { far.action, far.style, far.icon, far.tint })
+		local near = with({ phase = "near", distance = 42 })
+		assert.same({ "primary", "yellow" }, { near.style, near.tint })
+		local blind = with({ phase = "far", distance = 140, compass = "west" })
+		assert.same({ "140 yd west", nil }, { blind.r1, blind.icon })
+		local away = with({ phase = "away", place = false })
+		assert.equal("Sells Fine Thread, another continent", away.l2)
+		assert.equal("star", with({ phase = "targeted", marked = true }).icon)
+		local atVendor = with({ phase = "here" })
+		assert.same(
+			{ "You are here", "Buy Fine Thread from this window", nil },
+			{ atVendor.l1, atVendor.l2, atVendor.action }
+		)
+		local trainer = { kind = "trainer", profession = "Cooking" }
+		assert.equal("Trained", with({ phase = "done", need = trainer, profession = "Cooking" }).l1)
+		local unknown = with({ phase = "unknown", need = trainer, profession = "Cooking", why = "no seed" })
+		assert.same({ "No known trainer yet", "no seed" }, { unknown.l1, unknown.why })
+		assert.equal("No directions in here", with({ phase = "notnow" }).l1)
+		assert.is_nil(with({ phase = "none" }))
+	end)
 end)
