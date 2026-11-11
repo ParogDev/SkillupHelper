@@ -8,6 +8,14 @@ local function secret(v)
 	return issecretvalue ~= nil and v ~= nil and issecretvalue(v)
 end
 
+-- v, or nil when it is a secret value
+local function clean(v)
+	if secret(v) then
+		return nil
+	end
+	return v
+end
+
 -- The open profession: the info that carries a skill (Forever fills the base profession; Mainline the child).
 function S.professionInfo()
 	local TS = C_TradeSkillUI
@@ -90,10 +98,79 @@ local function clock()
 	return debugprofilestop and debugprofilestop() or os.clock() * 1000
 end
 
+-- Cache-key text of the ranks array (input.ranks) and of the exclude table (input.exclude).
+function S.ranksKey(ranks)
+	local parts = {}
+	for _, r in ipairs(ranks or {}) do
+		parts[#parts + 1] = table.concat({
+			tostring(r.cap),
+			tostring(r.skill),
+			tostring(r.level),
+			tostring(r.cost),
+			tostring(r.where),
+		}, "/")
+	end
+	return table.concat(parts, ",")
+end
+
+function S.excludeKey(exclude)
+	exclude = exclude or {}
+	local spells = {}
+	for spell, on in pairs(exclude.notNow or {}) do
+		if on then
+			spells[#spells + 1] = tostring(spell)
+		end
+	end
+	table.sort(spells)
+	return ("%s/%s/%s/%s"):format(
+		tostring(exclude.dungeon == true),
+		tostring(exclude.ahPatterns == true),
+		-- special teachers are excluded unless set to false
+		tostring(exclude.special ~= false),
+		table.concat(spells, ",")
+	)
+end
+
+-- Cache-key text of input.trainerSeen ({ [spellID or lowercased name] = true }), "-" when nil.
+function S.seenKey(seen)
+	if not seen then
+		return "-"
+	end
+	local keys = {}
+	for k, on in pairs(seen) do
+		if on then
+			keys[#keys + 1] = tostring(k)
+		end
+	end
+	table.sort(keys)
+	return table.concat(keys, ",")
+end
+
+-- The skill the plan aims for: the highest saved rank cap, else Data/Plan.lua's `to`, else the live cap; never
+-- below the live cap (a stale rank or an old export must not shorten the plan the client allows).
+function S.target(ranks, prof, cap)
+	local t
+	for _, r in ipairs(ranks or {}) do
+		if r.cap and (not t or r.cap > t) then
+			t = r.cap
+		end
+	end
+	t = t or (prof and tonumber(prof.to)) or cap
+	if cap and (not t or cap > t) then
+		t = cap
+	end
+	return t
+end
+
 -- Runs the planner for one profession entry of a v2 Data/Plan.lua. learned[spell] = true, difficulty[spell] = the
 -- client's relativeDifficulty. Returns the plan (steps, hold, leftovers, fromStock) plus price diagnostics.
-function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
+-- caps (optional) = { target, level, ranks, exclude } for the cap model: target defaults to cap (the live cap).
+function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, caps)
 	settings = settings or {}
+	caps = caps or {}
+	local target = caps.target or cap
+	local ranks = caps.ranks or {}
+	local exclude = caps.exclude or {}
 	local t0 = clock()
 	local now = GetTime and GetTime() or 0
 	local pc = priceCache[prof]
@@ -112,15 +189,32 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 	end
 	table.sort(learnedKey)
 	local noRecipeBuys = settings.noRecipeBuys == true
-	local key = table.concat(
-		{ skill, cap, pc.stamp, effort, tostring(noRecipeBuys), nLearned, table.concat(learnedKey, ",") },
-		":"
-	)
+	local luck = settings.luck or ns.Planner.LUCK
+	local key = table.concat({
+		skill,
+		cap,
+		pc.stamp,
+		effort,
+		tostring(noRecipeBuys),
+		luck,
+		nLearned,
+		table.concat(learnedKey, ","),
+		target,
+		tostring(caps.level),
+		S.ranksKey(ranks),
+		S.excludeKey(exclude),
+		S.seenKey(caps.trainerSeen),
+	}, ":")
 	local bc = baseCache[prof]
 	if not bc or bc.key ~= key then
 		local ctx = ns.Planner.prepare({
 			skill = skill,
 			cap = cap,
+			target = target,
+			level = caps.level,
+			ranks = ranks,
+			exclude = exclude,
+			trainerSeen = caps.trainerSeen,
 			recipes = prof.recipes,
 			items = plan.items,
 			learned = learned,
@@ -129,6 +223,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 			product = pc.product,
 			effort = effort,
 			noRecipeBuys = noRecipeBuys,
+			luck = luck,
 		})
 		bc = { key = key, ctx = ctx, baseline = ns.Planner.baseline(ctx) }
 		baseCache[prof] = bc
@@ -142,11 +237,38 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 		end
 	end
 	table.sort(haveKey)
-	haveKey = table.concat(haveKey, ",")
+	-- the AH trip list the user keeps for this profession: its steps are committed until their target is reached
+	-- (planner rule 3); a list saved before 0.2.6 has only route and to
+	local saved = settings.trips and settings.trips[prof.name]
+	local commit
+	if saved and skill < (saved.to or 0) then
+		commit = {}
+		for _, cm in ipairs(saved.commit or {}) do
+			if skill < (cm.to or 0) then
+				commit[#commit + 1] = { spell = cm.spell, to = cm.to }
+			end
+		end
+		if not saved.commit then
+			for _, spell in ipairs(saved.route or {}) do
+				commit[#commit + 1] = { spell = spell, to = saved.to }
+			end
+		end
+	end
+	local commitKey = {}
+	for _, cm in ipairs(commit or {}) do
+		commitKey[#commitKey + 1] = tostring(cm.spell) .. ":" .. tostring(cm.to)
+	end
+	local gold = GetMoney and GetMoney() or nil
+	-- the stock run also reruns on a changed trip list or a whole gold more or less (the trip's gold cut)
+	haveKey = table.concat({
+		table.concat(haveKey, ","),
+		commit and table.concat(commitKey, ",") or "-",
+		tostring(math.floor((gold or 0) / 10000)),
+	}, "|")
 	-- BAG_UPDATE_DELAYED fires for every bag change, most of them not in a reagent: same counts, same plan
 	S.stockRuns = S.stockRuns or 0
 	if bc.haveKey ~= haveKey or not bc.result then
-		bc.haveKey, bc.result = haveKey, ns.Planner.finish(bc.ctx, bc.baseline, have)
+		bc.haveKey, bc.result = haveKey, ns.Planner.finish(bc.ctx, bc.baseline, have, { commit = commit, gold = gold })
 		bc.ms = clock() - t0
 		S.stockRuns = S.stockRuns + 1
 	end
@@ -158,6 +280,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 	result.ms = bc.ms -- what the planner cost when it last ran, not the cache lookup
 	result.prices = pc.counts
 	result.ageHours = ns.TSM.ageHours(plan)
+	result.profKey = prof.name
 	return result
 end
 
@@ -234,17 +357,25 @@ function S.build(plan)
 		fromStock = ns.Logic.fromStock(recipes, skill, S.have, vendor),
 		greyCheck = greyCheck,
 	}
-	if prof and ns.Logic.isPlanV2(plan, prof) and info.maxSkillLevel and info.maxSkillLevel > skill then
-		local ok, result = pcall(
-			S.runPlanner,
-			plan,
-			prof,
-			skill,
-			info.maxSkillLevel,
-			learned,
-			difficulties,
-			ns.settings and ns.settings()
-		)
+	-- the cap model: ranks learned at the trainer (SkillupHelperDB.ranks), the character level and the exclusions
+	local settings = ns.settings and ns.settings() or {}
+	local function lookup(fn)
+		return fn and (fn(info.professionID) or (base and fn(base.professionID)) or fn(info.parentProfessionID)) or nil
+	end
+	local ranks = S.ranksArray(lookup(ns.savedRanks))
+	-- recipes seen in this profession's trainer list (nil when no trainer was ever read)
+	local trainerSeen = lookup(ns.savedTrainerSeen)
+	local level = UnitLevel and clean(UnitLevel("player")) or nil
+	local target = S.target(ranks, prof, info.maxSkillLevel)
+	model.target, model.ranks = target, ranks
+	if prof and ns.Logic.isPlanV2(plan, prof) and target and target > skill then
+		local ok, result = pcall(S.runPlanner, plan, prof, skill, info.maxSkillLevel, learned, difficulties, settings, {
+			target = target,
+			level = level,
+			ranks = ranks,
+			exclude = settings.exclude,
+			trainerSeen = trainerSeen,
+		})
 		if ok then
 			model.planner = result
 		else
@@ -272,4 +403,307 @@ function S.build(plan)
 		model.why = "C_TradeSkillUI listed no recipes (" .. idSource .. ")"
 	end
 	return model
+end
+
+-- Profession ranks, learned at the trainer -----------------------------------------------------------------------
+-- Forever has no rank table: nothing in the client data or UI code holds 75/150/225/300, so the ranks are read live
+-- at a profession trainer and kept in SkillupHelperDB.ranks[skillLineID][cap]. A field the trainer does not give
+-- stays nil ("unknown"), never guessed.
+
+-- Rank names, in rank order: the client's GlobalStrings (vendored enUS.lua: APPRENTICE "Apprentice", JOURNEYMAN,
+-- EXPERT, ARTISAN, MASTER, GRAND_MASTER "Grand Master", ILLUSTRIOUS, ZEN_MASTER), read at run time so a localized
+-- client matches its own trainer; the enUS text is the fallback.
+S.RANK_KEYS = { "APPRENTICE", "JOURNEYMAN", "EXPERT", "ARTISAN", "MASTER", "GRAND_MASTER", "ILLUSTRIOUS", "ZEN_MASTER" }
+local RANK_EN =
+	{ "Apprentice", "Journeyman", "Expert", "Artisan", "Master", "Grand Master", "Illustrious", "Zen Master" }
+
+function S.rankNames()
+	local out = {}
+	for i, k in ipairs(S.RANK_KEYS) do
+		local v = clean(_G[k])
+		out[i] = (type(v) == "string" and v ~= "") and v or RANK_EN[i]
+	end
+	return out
+end
+
+-- The rank order of a trainer service, or nil: its sub text is a rank name, or its name is one or starts with one and
+-- a space ("Expert Leatherworker"). The longest name wins, so "Grand Master" is never read as "Master".
+function S.rankOrder(service, names)
+	local best, bestLen
+	local name, sub = service.name, service.subText
+	for order, n in ipairs(names or S.rankNames()) do
+		local hit = sub == n or name == n or (type(name) == "string" and name:sub(1, #n + 1) == n .. " ")
+		if hit and (not bestLen or #n > bestLen) then
+			best, bestLen = order, #n
+		end
+	end
+	return best
+end
+
+-- Parses the services of one profession trainer into ranks. `services` is a list of
+-- { name, type, subText, reqLevel, levelReq, cost, skillName, skillRank, description, skillLine } as the trainer
+-- getters return them (nil where a getter gave nothing or a secret); `values` = { rank, maxRank, modifier } from
+-- GetTrainerTradeskillRankValues().
+--
+-- Where a rank's cap comes from: the trainer has no per-service cap getter. GetTrainerTradeskillRankValues() is the
+-- rank bar of the trainer window (Blizzard_TrainerUI.lua, "rank status bar"): the player's current skill and cap in
+-- the trainer's profession, not a service's. So
+--   1. the highest rank the player already knows (service type "used") has cap = that live maxRank;
+--   2. any other rank takes the largest number in its description (GetTrainerServiceDescription, the rank spell's
+--      text) that is above its skill requirement and, for a rank not yet known, above the live cap;
+--   3. else the cap is unknown: the rank goes to `noCap` (it cannot be saved, the store is keyed by cap).
+-- Caps must rise with rank order; a description cap that breaks the order is dropped to `noCap`.
+-- Returns { ranks = { {name, order, cap, capFrom, skill, level, cost, where = "trainer", skillLine} }, noCap = {names} }.
+function S.parseRankServices(services, values, names)
+	names = names or S.rankNames()
+	values = values or {}
+	local maxRank = tonumber(values.maxRank)
+	local found, highestUsed = {}, nil
+	for _, sv in ipairs(services or {}) do
+		local order = S.rankOrder(sv, names)
+		if order then
+			local level = tonumber(sv.levelReq) or tonumber(sv.reqLevel)
+			local r = {
+				name = names[order],
+				order = order,
+				skill = sv.skillName and tonumber(sv.skillRank) or nil,
+				level = level,
+				cost = tonumber(sv.cost),
+				where = "trainer",
+				skillLine = sv.skillLine,
+				used = sv.type == "used",
+				description = sv.description,
+			}
+			-- the same rank listed twice (a filter header, a second skill line): keep the first
+			local dupe = false
+			for _, f in ipairs(found) do
+				dupe = dupe or f.order == order
+			end
+			if not dupe then
+				found[#found + 1] = r
+				if r.used and (not highestUsed or order > highestUsed.order) then
+					highestUsed = r
+				end
+			end
+		end
+	end
+	table.sort(found, function(a, b)
+		return a.order < b.order
+	end)
+	for _, r in ipairs(found) do
+		if r == highestUsed and maxRank and maxRank > 0 then
+			r.cap, r.capFrom = maxRank, "GetTrainerTradeskillRankValues"
+		elseif type(r.description) == "string" then
+			local floor = r.skill or 0
+			if not r.used and maxRank then
+				floor = math.max(floor, maxRank)
+			end
+			local best
+			for n in r.description:gmatch("%d+") do
+				n = tonumber(n)
+				if n > floor and (not best or n > best) then
+					best = n
+				end
+			end
+			if best then
+				r.cap, r.capFrom = best, "description"
+			end
+		end
+	end
+	local out = { ranks = {}, noCap = {} }
+	local lastCap = 0
+	for _, r in ipairs(found) do
+		if r.cap and r.capFrom == "description" and r.cap <= lastCap then
+			r.cap, r.capFrom = nil, nil
+		end
+		if r.cap then
+			lastCap = r.cap
+			r.used, r.description = nil, nil
+			out.ranks[#out.ranks + 1] = r
+		else
+			out.noCap[#out.noCap + 1] = r.name
+		end
+	end
+	return out
+end
+
+-- Writes parsed ranks into the store (SkillupHelperDB.ranks), contract shape. Returns the number written.
+function S.saveRanks(store, skillLineID, ranks, now)
+	store[skillLineID] = store[skillLineID] or {}
+	local n = 0
+	for _, r in ipairs(ranks) do
+		store[skillLineID][r.cap] = {
+			name = r.name,
+			cap = r.cap,
+			skill = r.skill,
+			level = r.level,
+			cost = r.cost,
+			where = r.where,
+			seen = now,
+		}
+		n = n + 1
+	end
+	return n
+end
+
+-- The saved ranks of one profession as the planner's sorted array (input.ranks).
+function S.ranksArray(saved)
+	local out = {}
+	for cap, r in pairs(type(saved) == "table" and saved or {}) do
+		if type(r) == "table" then
+			out[#out + 1] = {
+				name = r.name,
+				cap = r.cap or cap,
+				skill = r.skill,
+				level = r.level,
+				cost = r.cost,
+				where = r.where,
+			}
+		end
+	end
+	table.sort(out, function(a, b)
+		return a.cap < b.cap
+	end)
+	return out
+end
+
+-- The skill line id of the player's profession named `name`, or of the one whose skill and cap match the trainer's
+-- rank bar when the name is missing (nil when none or several match).
+function S.playerSkillLine(name, values)
+	if not GetProfessions or not GetProfessionInfo then
+		return nil, "GetProfessions/GetProfessionInfo absent"
+	end
+	-- prof1, prof2, first aid, fishing, cooking (Camelot ProfessionsBook.lua); nil holes, so walk by count
+	local function pack(...)
+		return { n = select("#", ...), ... }
+	end
+	local list = pack(GetProfessions())
+	local byValues, nValues = nil, 0
+	for i = 1, list.n do
+		local index = list[i]
+		if index then
+			local pname, _, rank, maxRank, _, _, skillLine = GetProfessionInfo(index)
+			pname, rank, maxRank, skillLine = clean(pname), clean(rank), clean(maxRank), clean(skillLine)
+			if type(name) == "string" and type(pname) == "string" and pname:lower() == name:lower() then
+				return skillLine
+			end
+			if values and rank == values.rank and maxRank == values.maxRank then
+				byValues, nValues = skillLine, nValues + 1
+			end
+		end
+	end
+	if not name and nValues == 1 then
+		return byValues
+	end
+	return nil, ("trainer's profession %s is not one of yours (GetProfessions)"):format(tostring(name or "unnamed"))
+end
+
+-- The trainerSeen key of a recipe service: its spell ID when the trainer gave one, else its lowercased name (the same
+-- key the vendor guide keeps in SkillupHelperDB.guide.npcs[id].teaches). The planner matches either.
+function S.trainerKey(sv)
+	if type(sv.spellID) == "number" then
+		return sv.spellID
+	end
+	if type(sv.name) == "string" and sv.name ~= "" then
+		return sv.name:lower()
+	end
+	return nil
+end
+
+-- The recipe services of a trainer list (no rank services, no headers) as a set of trainerKey()s, and how many were
+-- keyed by name only.
+function S.trainerSeenSet(services, names)
+	local seen, byName = {}, 0
+	for _, sv in ipairs(services or {}) do
+		if sv.type ~= "header" and not S.rankOrder(sv, names) then
+			local key = S.trainerKey(sv)
+			if key then
+				seen[key] = true
+				if type(key) == "string" then
+					byName = byName + 1
+				end
+			end
+		end
+	end
+	return seen, byName
+end
+
+-- The spell ID of a trainer service: C_TooltipInfo.GetTrainerService(i) is TooltipData whose `id` is the spell ID
+-- when its `type` is Enum.TooltipDataType.Spell (TooltipUtil.lua reads tooltipData.id the same way). The legacy
+-- GetTrainerService* getters give no spell ID; anything else is nil (the service is then keyed by name).
+local function serviceSpellID(i)
+	if not (C_TooltipInfo and C_TooltipInfo.GetTrainerService and Enum and Enum.TooltipDataType) then
+		return nil
+	end
+	local ok, data = pcall(C_TooltipInfo.GetTrainerService, i)
+	if not ok or type(data) ~= "table" or secret(data.type) or data.type ~= Enum.TooltipDataType.Spell then
+		return nil
+	end
+	local id = clean(data.id)
+	return type(id) == "number" and id or nil
+end
+
+-- Reads the open trainer. Returns { skillLine, ranks, noCap, seen, seenByName } (ranks may be empty: a trainer
+-- without rank services still lists the recipes it teaches) or nil, and the broken link ("not now" when the trainer
+-- is not a profession trainer).
+function S.readTrainer()
+	if IsTradeskillTrainer and not IsTradeskillTrainer() then
+		return nil, "not a profession trainer", "not now"
+	end
+	if not GetNumTrainerServices or not GetTrainerServiceInfo then
+		return nil, "GetNumTrainerServices/GetTrainerServiceInfo absent"
+	end
+	local n = clean(GetNumTrainerServices())
+	if type(n) ~= "number" or n < 1 then
+		return nil, "GetNumTrainerServices returned nothing (the filter hides every service?)"
+	end
+	local values = {}
+	if GetTrainerTradeskillRankValues then
+		local rank, maxRank, modifier = GetTrainerTradeskillRankValues()
+		values = { rank = clean(rank), maxRank = clean(maxRank), modifier = clean(modifier) }
+	end
+	local names = S.rankNames()
+	local services, all = {}, {}
+	local profName
+	for i = 1, n do
+		local name, kind, _, reqLevel, subText = GetTrainerServiceInfo(i)
+		local sv = { name = clean(name), type = clean(kind), reqLevel = clean(reqLevel), subText = clean(subText) }
+		all[#all + 1] = sv
+		if sv.type ~= "header" then
+			sv.skillLine = GetTrainerServiceSkillLine and clean(GetTrainerServiceSkillLine(i))
+			profName = profName or sv.skillLine
+		end
+		if S.rankOrder(sv, names) then
+			sv.levelReq = GetTrainerServiceLevelReq and clean(GetTrainerServiceLevelReq(i))
+			sv.cost = GetTrainerServiceCost and clean((GetTrainerServiceCost(i)))
+			if GetTrainerServiceSkillReq then
+				local skillName, skillRank = GetTrainerServiceSkillReq(i)
+				sv.skillName, sv.skillRank = clean(skillName), clean(skillRank)
+			end
+			sv.description = GetTrainerServiceDescription and clean(GetTrainerServiceDescription(i))
+			services[#services + 1] = sv
+		elseif sv.type ~= "header" then
+			sv.spellID = serviceSpellID(i)
+		end
+	end
+	local parsed = S.parseRankServices(services, values, names)
+	parsed.seen, parsed.seenByName = S.trainerSeenSet(all, names)
+	local skillLine, why = S.playerSkillLine(profName, values.maxRank and values or nil)
+	if not skillLine then
+		return nil, why
+	end
+	parsed.skillLine = skillLine
+	if #services == 0 then
+		return parsed, ("no rank service among %d (names %s)"):format(n, table.concat(names, "/"))
+	end
+	if #parsed.ranks == 0 then
+		local how = (values.maxRank and values.maxRank > 0) and "no known rank listed (filter hides used services?)"
+			or "GetTrainerTradeskillRankValues returned nothing"
+		return parsed,
+			("cap unknown for %s: %s, no cap in the descriptions"):format(table.concat(parsed.noCap, ", "), how)
+	end
+	if #parsed.noCap > 0 then
+		return parsed, ("cap unknown for %s (no cap in the descriptions)"):format(table.concat(parsed.noCap, ", "))
+	end
+	return parsed
 end

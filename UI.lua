@@ -13,6 +13,7 @@ local DOCK_GAP, TAB_GAP = 2, 4
 local WHITE = "Interface\\Buttons\\WHITE8X8"
 local QUESTION = 134400 -- INV_Misc_QuestionMark
 local HANDLE_ICON = "Interface\\Icons\\INV_Misc_Note_01"
+local CARD_LINES = 6 -- note lines under a card (notes, other ways, the stock option, tags); the rest join the last
 
 -- Panel diagnostics for the selftest.
 UI.stats = {
@@ -155,6 +156,7 @@ function UI.env()
 		merchant = ns.merchantOpen and UI.merchantOffer or nil,
 		gold = GetMoney,
 		bagRoom = UI.bagRoom,
+		savedTrip = ns.savedTrip,
 	}
 end
 
@@ -227,8 +229,18 @@ end
 -- Only ever called from a button's OnClick: a craft needs the user's own click.
 function UI.act(a)
 	local stats = UI.stats
+	if type(a) == "table" and type(a.id) == "string" and a.id:sub(1, 2) == "ah" then
+		return UI.ahAct(a)
+	end
 	if type(a) == "table" and a.id == "buy" then
 		return a.enabled and buy(a) or false
+	end
+	if type(a) == "table" and (a.id == "trip" or a.id == "untrip") then
+		stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
+		if a.id == "trip" then
+			return ns.saveTrip(a.block)
+		end
+		return ns.clearTrip(a.block and a.block.prof)
 	end
 	if type(a) ~= "table" or not a.enabled or secret(a.spell) or type(a.spell) ~= "number" then
 		return false
@@ -559,11 +571,13 @@ local function newCard(parent)
 	card.cost:SetWidth(INNER - PAD * 2 - 46)
 	card.mats = {}
 	card.lines = {}
-	for k = 1, 3 do
+	for k = 1, CARD_LINES do
 		card.lines[k] = text(card, "GameFontHighlightSmall", 11)
 		card.lines[k]:SetWidth(INNER - PAD * 2)
 	end
-	card.buttons = { buy = newButton(card), craft = newButton(card), open = newButton(card) }
+	card.blockTitles = {}
+	card.tripRows = {}
+	card.buttons = { trip = newButton(card), buy = newButton(card), craft = newButton(card), open = newButton(card) }
 
 	-- slide: in from the right with a fade, out to the left
 	local ig = card:CreateAnimationGroup()
@@ -656,9 +670,51 @@ local function fillCard(card, c, consumed)
 		card.mats[i]:Hide()
 	end
 
+	-- the shopping list: one block per place in travel order (or the AH trip alone), spares for bad luck included
+	local nTrip, nTitle = 0, 0
+	for _, blk in ipairs(c.blocks or {}) do
+		nTitle = nTitle + 1
+		local title = card.blockTitles[nTitle]
+		if not title then
+			title = text(card, "GameFontHighlightSmall", 11)
+			title:SetWidth(INNER - PAD * 2)
+			card.blockTitles[nTitle] = title
+		end
+		top = top + 8
+		title:ClearAllPoints()
+		title:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		title:SetText(blk.title)
+		setColor(title, "gold")
+		title:Show()
+		top = top + title:GetStringHeight() + 4
+		for _, tr in ipairs(blk.rows) do
+			nTrip = nTrip + 1
+			local row = card.tripRows[nTrip] or newMatRow(card)
+			card.tripRows[nTrip] = row
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 10, -top)
+			row.name:SetText(tr.name)
+			setColor(row.name, "bone")
+			row.right:SetText(tr.right)
+			setColor(row.right, "bone")
+			fill(row.mark, "gold")
+			row:Show()
+			top = top + 16
+		end
+	end
+	for i = nTitle + 1, #card.blockTitles do
+		card.blockTitles[i]:Hide()
+	end
+	for i = nTrip + 1, #card.tripRows do
+		card.tripRows[i]:Hide()
+	end
+
 	local extra = {}
 	for _, n in ipairs(c.notes) do
 		extra[#extra + 1] = { n, "bone" }
+	end
+	for _, o in ipairs(c.others or {}) do
+		extra[#extra + 1] = { o, "ash" }
 	end
 	if c.alt then
 		extra[#extra + 1] = { c.alt, "bone" }
@@ -667,11 +723,11 @@ local function fillCard(card, c, consumed)
 		extra[#extra + 1] = { c.tags, "ash" }
 	end
 	local joined = {}
-	for k = 1, 3 do
+	for k = 1, CARD_LINES do
 		local fs = card.lines[k]
 		local e = extra[k]
-		if k == 3 and #extra > 3 then
-			for j = 3, #extra do
+		if k == CARD_LINES and #extra > CARD_LINES then
+			for j = CARD_LINES, #extra do
 				joined[#joined + 1] = extra[j][1]
 			end
 			e = { table.concat(joined, "; "), "ash" }
@@ -692,12 +748,23 @@ local function fillCard(card, c, consumed)
 	-- the buttons: Buy (vendor reagents the step lacks) takes a row of its own above; Craft takes the next row, Show
 	-- recipe sits at its right when the view offers it
 	local craft, open, buyButton = card.buttons.craft, card.buttons.open, card.buttons.buy
+	local tripButton = card.buttons.trip
 	craft:Hide()
 	open:Hide()
 	buyButton:Hide()
+	tripButton:Hide()
 	local byId = {}
 	for _, a in ipairs(c.actions or {}) do
 		byId[a.id] = a
+	end
+	local ta = byId.trip or byId.untrip
+	if ta then
+		top = top + 10
+		tripButton:ClearAllPoints()
+		tripButton:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		tripButton:SetWidth(INNER - 2 * PAD - 2)
+		setButton(tripButton, ta, ta.id == "trip" and ns.View.RGB.gold or ns.View.RGB.ash)
+		top = top + 20
 	end
 	if byId.buy then
 		top = top + 10
@@ -745,6 +812,10 @@ local function newLaterRow(parent)
 	row.right:SetPoint("RIGHT", -2, 0)
 	row.right:SetJustifyH("RIGHT")
 	row.right:SetJustifyV("MIDDLE")
+	-- "Show recipe" for a learned craft step beside Blizzard's window (View.rowOpen); hidden otherwise
+	row.open = newButton(row)
+	row.open:SetSize(52, 16)
+	row.open:SetPoint("RIGHT", -2, 0)
 	row.text = text(row, "GameFontHighlight", 12)
 	row.text:SetPoint("LEFT", 34, 0)
 	row.text:SetPoint("RIGHT", row.right, "LEFT", -8, 0)
@@ -1188,6 +1259,14 @@ function UI.draw(d, prev)
 		setColor(row.text, r.n and "bone" or "ash")
 		row.right:SetText(r.right or "")
 		setColor(row.right, "ash")
+		row.right:ClearAllPoints()
+		if r.open then
+			setButton(row.open, r.open, ns.View.RGB.bone)
+			row.right:SetPoint("RIGHT", row.open, "LEFT", -6, 0)
+		else
+			row.open:Hide()
+			row.right:SetPoint("RIGHT", -2, 0)
+		end
 		row:Show()
 		y = y + 18
 	end
@@ -1233,4 +1312,389 @@ function UI.show(model)
 	local d = ns.View.describe(model, UI.env())
 	UI.draw(d, UI.last)
 	UI.last = d
+end
+
+------------------------------------------------------------------------------------------------------- the AH list
+-- At the auction house the saved AH list (SkillupHelperDB.trips) becomes buy rows in a small frame beside
+-- Blizzard's AuctionHouseFrame (or on the right of the screen under TSM's AH UI). C_AuctionHouse only. Every purchase
+-- step (StartCommoditiesPurchase, ConfirmCommoditiesPurchase, PlaceBid) runs from the user's click on a row; only
+-- the price searches run on their own, one at a time, when the AH opens.
+
+-- FrameXML's AH frame and the AH API (the standalone CI globals list in .luacheckrc does not carry them)
+-- luacheck: read globals AuctionHouseFrame C_AuctionHouse Enum
+
+UI.ah = { open = false, live = {}, list = {} }
+UI.stats.ah = { open = false, shows = 0, searches = 0, rows = 0 }
+
+local AH_SEARCH_TIMEOUT, AH_QUOTE_TIMEOUT = 5, 30
+
+local function ahSorts()
+	local order = Enum and Enum.AuctionHouseSortOrder and Enum.AuctionHouseSortOrder.Price or 0
+	return { { sortOrder = order, reverseSort = false } }
+end
+
+local function ahError(msg)
+	UI.stats.lastAhError = { at = date("%Y-%m-%d %H:%M:%S"), err = msg }
+end
+
+function UI.ahEnv()
+	local busy = UI.ah.busy
+	return { nameOf = itemName, money = ns.Logic.money, gold = GetMoney, busy = busy and busy.item or nil }
+end
+
+-- Sends the next price search: one in flight at a time (100 a minute is the client's limit).
+local function ahNextSearch()
+	local ah = UI.ah
+	if not ah.open or ah.searching then
+		return
+	end
+	for _, r in ipairs(ah.list) do
+		if not ah.live[r.item] then
+			local lv = { state = "searching", kind = r.pattern and "item" or "commodity" }
+			ah.live[r.item] = lv
+			local ok, err = pcall(function()
+				local key = C_AuctionHouse.MakeItemKey(r.item)
+				C_AuctionHouse.SendSearchQuery(key, ahSorts(), true)
+			end)
+			if not ok then
+				lv.state, lv.err = "failed", "C_AuctionHouse.SendSearchQuery: " .. tostring(err)
+				ahError(lv.err)
+			else
+				ah.searching = r.item
+				UI.stats.ah.searches = UI.stats.ah.searches + 1
+				local item = r.item
+				C_Timer.After(AH_SEARCH_TIMEOUT, function()
+					if ah.searching == item and lv.state == "searching" then
+						-- no results event: the search was throttled or dropped. The row offers "Search again".
+						lv.state, lv.err = "unavailable", "no search results after 5 s (throttled?)"
+						ah.searching = nil
+						UI.ahDraw()
+						ahNextSearch()
+					end
+				end)
+				return
+			end
+		end
+	end
+end
+
+local function commodityResults(item)
+	local list = {}
+	local n = C_AuctionHouse.GetNumCommoditySearchResults(item) or 0
+	for i = 1, n do
+		local r = C_AuctionHouse.GetCommoditySearchResultInfo(item, i)
+		if type(r) == "table" and not secret(r.unitPrice) and not secret(r.quantity) then
+			list[#list + 1] = { unitPrice = r.unitPrice, quantity = r.quantity }
+		end
+	end
+	return list
+end
+
+local function itemResults(key)
+	local list = {}
+	local n = C_AuctionHouse.GetNumItemSearchResults(key) or 0
+	for i = 1, n do
+		local r = C_AuctionHouse.GetItemSearchResultInfo(key, i)
+		if type(r) == "table" and not secret(r.buyoutAmount) then
+			list[#list + 1] = {
+				auctionID = r.auctionID,
+				buyoutAmount = r.buyoutAmount,
+				quantity = r.quantity,
+				containsOwnerItem = r.containsOwnerItem,
+			}
+		end
+	end
+	return list
+end
+
+local function ahResults(item, kind, results)
+	local ah = UI.ah
+	local lv = ah.live[item]
+	if not lv then
+		return
+	end
+	lv.kind, lv.results = kind, results
+	if lv.state == "searching" or lv.state == "unavailable" or lv.state == "failed" then
+		lv.state = "listed"
+	end
+	if ah.searching == item then
+		ah.searching = nil
+		ahNextSearch()
+	end
+end
+
+local function ahDone(lv, ok, err)
+	local ah, busy = UI.ah, UI.ah.busy
+	ah.busy = nil
+	local last = UI.stats.lastAhBuy
+	if ok then
+		lv.state = "bought"
+		if busy then
+			ns.noteAhBought(busy.item, busy.qty or 1)
+			ns.setAhSkip(busy.item, nil)
+		end
+		if last then
+			last.done = true
+		end
+	else
+		lv.state, lv.err = "failed", err
+		ahError(err)
+		if last then
+			last.failed = err
+		end
+	end
+	ns.refresh()
+end
+
+-- AH events (Core.lua wires them). Returns nothing; draws the frame when it is up.
+function UI.ahEvent(event, a1, a2)
+	local ah = UI.ah
+	local st = UI.stats.ah
+	if event == "AUCTION_HOUSE_SHOW" then
+		ah.open, st.open = true, true
+		st.shows = st.shows + 1
+		ah.live, ah.busy, ah.searching = {}, nil, nil
+		ah.list = ns.Logic.ahList(ns.savedTrips())
+		st.rows = #ah.list
+		UI.ahDraw()
+		ahNextSearch()
+		return
+	elseif event == "AUCTION_HOUSE_CLOSED" then
+		if ah.busy and ah.busy.kind == "commodity" then
+			pcall(C_AuctionHouse.CancelCommoditiesPurchase)
+		end
+		ah.open, st.open, ah.busy, ah.searching = false, false, nil, nil
+		if UI.ahFrame then
+			UI.ahFrame:Hide()
+		end
+		return
+	end
+	if not ah.open then
+		return
+	end
+	local busy = ah.busy
+	local blv = busy and ah.live[busy.item]
+	if event == "COMMODITY_SEARCH_RESULTS_UPDATED" then
+		if not secret(a1) and ah.live[a1] then
+			ahResults(a1, "commodity", commodityResults(a1))
+		end
+	elseif event == "ITEM_SEARCH_RESULTS_UPDATED" then
+		local id = type(a1) == "table" and a1.itemID
+		if id and not secret(id) and ah.live[id] then
+			ahResults(id, "item", itemResults(a1))
+		end
+	elseif event == "COMMODITY_PRICE_UPDATED" then
+		-- no item in the payload: it answers the one purchase this panel started, if any
+		if blv and busy.kind == "commodity" and blv.state == "quoting" and not secret(a1) and not secret(a2) then
+			blv.state, blv.quote, blv.qty = "quoted", { unit = a1, total = a2 }, busy.qty
+			busy.quotedAt = GetTime()
+			local item = busy.item
+			C_Timer.After(AH_QUOTE_TIMEOUT, function()
+				local b = UI.ah.busy
+				if b and b.item == item and blv.state == "quoted" then
+					pcall(C_AuctionHouse.CancelCommoditiesPurchase)
+					UI.ah.busy = nil
+					blv.state, blv.quote = "listed", nil
+					UI.ahDraw()
+				end
+			end)
+		end
+	elseif event == "COMMODITY_PRICE_UNAVAILABLE" then
+		if blv and busy.kind == "commodity" then
+			ah.busy = nil
+			blv.state = "unavailable"
+			ahError("COMMODITY_PRICE_UNAVAILABLE for item " .. tostring(busy.item))
+		end
+	elseif event == "COMMODITY_PURCHASE_SUCCEEDED" then
+		if blv and busy.kind == "commodity" then
+			ahDone(blv, true)
+		end
+	elseif event == "COMMODITY_PURCHASE_FAILED" then
+		if blv and busy.kind == "commodity" then
+			ahDone(blv, false, "COMMODITY_PURCHASE_FAILED: the client refused the purchase")
+		end
+	elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" then
+		if blv and busy.kind == "item" and busy.auctionID == a1 then
+			ahDone(blv, true)
+		end
+	elseif event == "AUCTION_HOUSE_SHOW_ERROR" then
+		if blv and blv.state == "buying" then
+			ahDone(blv, false, "AUCTION_HOUSE_SHOW_ERROR " .. tostring(a1))
+		end
+	end
+	UI.ahDraw()
+end
+
+-- A click on an AH row's button. One client call per click; nothing is queued or chained.
+function UI.ahAct(a)
+	local ah, stats = UI.ah, UI.stats
+	stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
+	if not ah.open then
+		ahError("refused at the click: the auction house is closed")
+		return false
+	end
+	local lv = ah.live[a.item]
+	if a.id == "ahSearch" then
+		ah.live[a.item] = nil
+		ahNextSearch()
+		UI.ahDraw()
+		return true
+	end
+	if not a.enabled or not lv then
+		return false
+	end
+	if ah.busy and ah.busy.item ~= a.item then
+		ahError("refused at the click: another buy is in progress")
+		return false
+	end
+	local now = date("%Y-%m-%d %H:%M:%S")
+	local ok, err
+	if a.id == "ahStart" then
+		ok, err = pcall(C_AuctionHouse.StartCommoditiesPurchase, a.item, a.qty)
+		if ok then
+			ah.busy = { item = a.item, qty = a.qty, kind = "commodity" }
+			lv.state = "quoting"
+			stats.lastAhBuy = { at = now, item = a.item, qty = a.qty, kind = "commodity", expect = a.cost }
+		else
+			err = "C_AuctionHouse.StartCommoditiesPurchase: " .. tostring(err)
+		end
+	elseif a.id == "ahConfirm" then
+		ok, err = pcall(C_AuctionHouse.ConfirmCommoditiesPurchase, a.item, a.qty)
+		if ok then
+			lv.state = "buying"
+			if stats.lastAhBuy then
+				stats.lastAhBuy.quote = a.cost
+				stats.lastAhBuy.confirmedAt = now
+			end
+		else
+			err = "C_AuctionHouse.ConfirmCommoditiesPurchase: " .. tostring(err)
+		end
+	elseif a.id == "ahBid" then
+		ok, err = pcall(C_AuctionHouse.PlaceBid, a.auctionID, a.buyout)
+		if ok then
+			ah.busy = { item = a.item, qty = a.qty or 1, kind = "item", auctionID = a.auctionID }
+			lv.state = "buying"
+			stats.lastAhBuy = { at = now, item = a.item, qty = a.qty or 1, kind = "item", expect = a.buyout }
+		else
+			err = "C_AuctionHouse.PlaceBid: " .. tostring(err)
+		end
+	else
+		return false
+	end
+	if not ok then
+		lv.state, lv.err = "failed", err
+		ah.busy = nil
+		ahError(err)
+	end
+	UI.ahDraw()
+	return ok
+end
+
+local AH_WIDTH = 300
+
+local function ahRowFrame(parent)
+	local row = CreateFrame("Frame", nil, parent)
+	row:SetWidth(AH_WIDTH - 2 * PAD)
+	row.name = text(row, "GameFontHighlight", 12)
+	row.name:SetPoint("TOPLEFT", 0, 0)
+	row.name:SetWidth(AH_WIDTH - 2 * PAD)
+	row.name:SetWordWrap(false)
+	row.right = text(row, "GameFontHighlightSmall", 11)
+	row.right:SetWidth(AH_WIDTH - 2 * PAD)
+	row.note = text(row, "GameFontHighlightSmall", 11)
+	row.note:SetWidth(AH_WIDTH - 2 * PAD)
+	row.button = newButton(row)
+	row.button:SetWidth(AH_WIDTH - 2 * PAD)
+	return row
+end
+
+local function ahFrame()
+	if UI.ahFrame then
+		return UI.ahFrame
+	end
+	local f = CreateFrame("Frame", "SkillupHelperAHList", UIParent)
+	f:SetWidth(AH_WIDTH)
+	f:SetFrameStrata("HIGH")
+	f.bg = f:CreateTexture(nil, "BACKGROUND")
+	f.bg:SetAllPoints()
+	fill(f.bg, "ink", 0.96)
+	f.edge = edges(f)
+	paintEdges(f.edge, rgb("line"))
+	f.title = text(f, "GameFontNormal", 13)
+	f.title:SetPoint("TOPLEFT", PAD, -PAD)
+	f.title:SetWidth(AH_WIDTH - 2 * PAD)
+	f.rows = {}
+	UI.ahFrame = f
+	return f
+end
+
+-- Draws the AH list frame from View.ahPanel, and keeps SkillupHelperDB.ahSkip in step with the rows.
+function UI.ahDraw()
+	if not UI.ah.open then
+		return
+	end
+	local d = ns.View.ahPanel(UI.ah.list, UI.ah.live, UI.ahEnv())
+	for _, r in ipairs(d.rows) do
+		if r.skip then
+			ns.setAhSkip(r.item, r.skip)
+		end
+	end
+	local f = ahFrame()
+	f:ClearAllPoints()
+	if AuctionHouseFrame and AuctionHouseFrame:IsShown() then
+		f:SetPoint("TOPLEFT", AuctionHouseFrame, "TOPRIGHT", 4, 0)
+	else
+		-- TSM's AH UI hides AuctionHouseFrame: sit on the right of the screen
+		f:SetPoint("RIGHT", UIParent, "RIGHT", -40, 0)
+	end
+	f.title:SetText(d.title)
+	local y = PAD + f.title:GetStringHeight() + 8
+	if d.empty then
+		f.empty = f.empty or text(f, "GameFontHighlightSmall", 11)
+		f.empty:SetWidth(AH_WIDTH - 2 * PAD)
+		f.empty:ClearAllPoints()
+		f.empty:SetPoint("TOPLEFT", PAD, -y)
+		f.empty:SetText(d.empty)
+		setColor(f.empty, "ash")
+		f.empty:Show()
+		y = y + f.empty:GetStringHeight() + 6
+	elseif f.empty then
+		f.empty:Hide()
+	end
+	for i, r in ipairs(d.rows) do
+		local row = f.rows[i] or ahRowFrame(f)
+		f.rows[i] = row
+		row:ClearAllPoints()
+		row:SetPoint("TOPLEFT", PAD, -y)
+		row.name:SetText(r.name)
+		setColor(row.name, "bone")
+		local h = row.name:GetStringHeight() + 2
+		row.right:ClearAllPoints()
+		row.right:SetPoint("TOPLEFT", 0, -h)
+		row.right:SetText(r.warn and (r.right .. ", " .. r.warn) or r.right)
+		setColor(row.right, r.warn and "warn" or "ash")
+		h = h + row.right:GetStringHeight() + 2
+		if r.note then
+			row.note:ClearAllPoints()
+			row.note:SetPoint("TOPLEFT", 0, -h)
+			row.note:SetText(r.note)
+			setColor(row.note, "warn")
+			row.note:Show()
+			h = h + row.note:GetStringHeight() + 2
+		else
+			row.note:Hide()
+		end
+		row.button:ClearAllPoints()
+		row.button:SetPoint("TOPLEFT", 0, -(h + 2))
+		setButton(row.button, r.action, ns.View.RGB.gold)
+		h = h + 2 + 24
+		row:SetHeight(h)
+		row:Show()
+		y = y + h + 10
+	end
+	for i = #d.rows + 1, #f.rows do
+		f.rows[i]:Hide()
+	end
+	f:SetHeight(y + PAD - 6)
+	f:Show()
 end

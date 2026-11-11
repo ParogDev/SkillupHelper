@@ -26,7 +26,9 @@ ns.Data.plan = {
 		[185] = {
 			name = "Cooking",
 			from = 173,
-			to = 225,
+			-- the skill the recipes below cover (the generator's --to, by default the top rank cap): the plan's target
+			-- until a trainer visit saves the ranks (SkillupHelperDB.ranks, /skillup ranks)
+			to = 300,
 			total = -14902,
 			-- the offline plan (tools/tsm/skillup.py), kept for comparison
 			rows = {

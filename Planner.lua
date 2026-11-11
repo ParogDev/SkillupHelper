@@ -17,6 +17,23 @@ P.CRAFT_SAVING = 0.2 -- craft an intermediate only when that saves this share of
 P.MAX_RECIPE_BUYS = 3
 P.WASTEFUL = 1.1 -- a from-stock recipe more than 10% over the plan's cost per point is "wasteful"
 P.CANDS_PER_LEVEL = 6 -- stock candidates kept per level for the greedy fill
+-- a trainer recipe no ordinary trainer was seen to teach (input.trainerSeen) costs this share more per point, so a
+-- route that does not depend on it wins a near tie
+P.UNCHECKED_PENALTY = 0.1
+-- Planner rules (README "Planner rules"):
+-- 1. Buy for bad luck: every step that buys sizes its crafts and buys at a percentile of the crafts it takes to reach
+--    its target (default p90, a setting: SkillupHelperDB.luck), never at the mean.
+-- 2. Earmarks are hard: a material a later step uses is never spent by a stock alternative, a from-stock verdict or
+--    a replan. Only true spares are offered.
+-- 3. A bought step is committed: its recipe and target hold until the target is reached or the recipe greys.
+P.LUCK = 90 -- percentile of crafts every buy covers
+P.TRIP_Z = 1.2816 -- z of the default percentile (normal approximation)
+local Z_OF = { [50] = 0, [75] = 0.6745, [80] = 0.8416, [90] = 1.2816, [95] = 1.6449, [99] = 2.3263 }
+
+-- z for a luck percentile (50, 75, 80, 90, 95, 99); nil for any other value.
+function P.zOf(pct)
+	return Z_OF[tonumber(pct) or -1]
+end
 local HUGE = 1e7 -- cost per point of a level nothing covers
 local EPS = 1e-6
 
@@ -157,12 +174,108 @@ local function newOption(ctx, base, mats, pre, variant)
 	return o
 end
 
+-- Whether input.exclude drops recipe r (spell) from the plan: a "not now" spell, an AH pattern, a dungeon pattern.
+-- A recipe already learned is never dropped as a pattern: the pattern is no longer needed.
+local function excluded(exclude, spell, r, learned)
+	if not exclude then
+		return false
+	elseif exclude.notNow and exclude.notNow[spell] then
+		return true
+	elseif learned then
+		return false
+	elseif exclude.ahPatterns and r.src == "item" then
+		return true
+	end
+	return exclude.dungeon == true and r.patternSrc == "dungeon"
+end
+
+-- The cap model: the skill the plan reaches and the ranks it trains on the way. Walks input.ranks above the live
+-- cap: a rank whose character level is known and above the player's stops there (ctx.capBlock), any other raises
+-- the effective cap and is trained between its unlock skill (at; nil = unknown, placed as by) and the cap before it
+-- (by). The plan never goes past input.target, nor past the top skill its recipes cover (ctx.coverage).
+local function capModel(ctx, input)
+	local live = input.cap
+	ctx.liveCap = live
+	ctx.rankUps = {}
+	local ranks = input.ranks or {}
+	local target = input.target or live
+	if #ranks == 0 or not live then
+		ctx.cap = live and math.min(live, target) or live
+		return
+	end
+	local list = {}
+	for _, rk in ipairs(ranks) do
+		list[#list + 1] = rk
+	end
+	table.sort(list, function(a, b)
+		return a.cap < b.cap
+	end)
+	local eff = live
+	for _, rk in ipairs(list) do
+		if eff >= target then
+			break
+		end
+		if rk.cap > eff then
+			local reason
+			if rk.level and input.level and rk.level > input.level then
+				reason = "level"
+			elseif rk.where == "special" and not (input.exclude and input.exclude.special == false) then
+				-- taught by a special teacher (dungeon NPC, ...): not an ordinary trainer visit
+				reason = "special"
+			end
+			if reason then
+				ctx.capBlock =
+					{ name = rk.name, level = rk.level, have = input.level, cap = rk.cap, reason = reason, by = eff }
+				break
+			end
+			ctx.rankUps[#ctx.rankUps + 1] = {
+				name = rk.name,
+				cap = rk.cap,
+				by = eff,
+				at = rk.skill,
+				level = rk.level,
+				cost = rk.cost,
+				where = rk.where,
+			}
+			eff = rk.cap
+		end
+	end
+	ctx.cap = math.min(eff, target)
+	-- coverage: the top skill any recipe gives (its grey); the plan stops there, never below the live cap
+	local top
+	for _, r in pairs(input.recipes or {}) do
+		if r.g and (not top or r.g > top) then
+			top = r.g
+		end
+	end
+	if top and top < target then
+		ctx.coverage = { to = top }
+	end
+	if top and top < ctx.cap then
+		ctx.cap = math.max(live, top)
+	end
+	-- ranks the plan no longer reaches: not trained, and a blocked rank past the recipes' end is no stop
+	local kept = {}
+	for _, up in ipairs(ctx.rankUps) do
+		if up.by < ctx.cap then
+			kept[#kept + 1] = up
+		end
+	end
+	ctx.rankUps = kept
+	if ctx.capBlock and eff ~= ctx.cap then
+		ctx.capBlock = nil
+	end
+end
+
 -- Options (recipe variants) the planner can use: learned recipes, trainer recipes from their learn rank, recipe items
 -- with a price as candidates to buy. The client's colour at the current skill wins over the exported thresholds.
+-- input.exclude (dungeon, ahPatterns, notNow[spell]) drops recipes; input.ranks, level and target set the cap model.
 function P.prepare(input)
 	local ctx = {
 		skill = input.skill,
 		cap = input.cap,
+		level = input.level,
+		exclude = input.exclude,
 		price = input.price or {},
 		product = input.product or {},
 		items = input.items or {},
@@ -170,15 +283,23 @@ function P.prepare(input)
 		effort = input.effort or P.EFFORT,
 		-- true: plan only with recipes already known or trainable (the "/skillup recipes off" setting)
 		noRecipeBuys = input.noRecipeBuys == true,
+		z = P.zOf(input.luck) or P.TRIP_Z,
 		options = {},
+		hidden = {}, -- options the plan never picks (special teachers by default), listed in step.others
 		mismatch = {},
 		makers = {},
 	}
+	capModel(ctx, input)
 	local recipes = input.recipes or {}
 	local spells = sortedKeys(recipes)
 	for _, spell in ipairs(spells) do
 		local r = recipes[spell]
-		if r.makes and ctx.learned[spell] and not ctx.makers[r.makes] then
+		if
+			r.makes
+			and ctx.learned[spell]
+			and not ctx.makers[r.makes]
+			and not excluded(input.exclude, spell, r, true)
+		then
 			ctx.makers[r.makes] = { spell = spell, mats = pairsOf(r.mats), n = r.n or 1 }
 		end
 	end
@@ -187,9 +308,9 @@ function P.prepare(input)
 		local r = recipes[spell]
 		local y, g = r.y, r.g
 		local learned = ctx.learned[spell] == true
-		local out = false
+		local out = excluded(input.exclude, spell, r, learned)
 		local diff = input.difficulty and input.difficulty[spell]
-		if learned and diff ~= nil and y and g then
+		if not out and learned and diff ~= nil and y and g then
 			local cc, tc = CLIENT_COLOR[diff], colorOf(skill, y, g)
 			if cc and cc ~= tc then
 				ctx.mismatch[#ctx.mismatch + 1] = { spell = spell, client = cc, data = tc }
@@ -209,7 +330,15 @@ function P.prepare(input)
 			end
 		end
 		if not out and y and g and g > skill then
-			local src = learned and "known" or (r.src == "item" and "item" or (r.src == "auto" and "auto" or "trainer"))
+			local src = "known"
+			if not learned then
+				src = (r.src == "item" or r.src == "auto" or r.src == "special") and r.src or "trainer"
+			end
+			-- a trainer recipe no ordinary trainer was seen to teach is "not checked": allowed, at a penalty
+			local unchecked = src == "trainer"
+				and input.trainerSeen ~= nil
+				and not input.trainerSeen[spell]
+				and not (r.name and input.trainerSeen[string.lower(r.name)])
 			local at = -math.huge
 			if not learned then
 				at = r.learn or (src == "item" and 0 or y)
@@ -228,7 +357,9 @@ function P.prepare(input)
 				src = src,
 				learned = learned,
 				at = at,
-				train = not learned and src ~= "item",
+				train = src == "trainer",
+				unchecked = unchecked or nil,
+				teacher = src == "special" and r.teacher or nil,
 				recipeItem = r.item,
 				recipePrice = src == "item" and buyOf(ctx, r.item or -1) or nil,
 				vendor = prod.vendor or 0,
@@ -255,8 +386,14 @@ function P.prepare(input)
 			if ok and differs then
 				list[#list + 1] = newOption(ctx, base, mats, pre, 2)
 			end
+			-- a special teacher (dungeon NPC, ...) only when input.exclude.special == false; else it is only shown
+			-- as an alternative (ctx.hidden)
+			local into = ctx.options
+			if src == "special" and not (input.exclude and input.exclude.special == false) then
+				into = ctx.hidden
+			end
 			for _, o in ipairs(list) do
-				ctx.options[#ctx.options + 1] = o
+				into[#into + 1] = o
 			end
 		end
 	end
@@ -303,7 +440,11 @@ local function costPt(ctx, o, s, cum, cheap, chance)
 		return nil
 	end
 	local net = mat - backOf(o, cum)
-	return ((net > 0 and net or 0) + ctx.effort * (1 + o.precrafts)) / p, p, net
+	local c = ((net > 0 and net or 0) + ctx.effort * (1 + o.precrafts)) / p
+	if o.unchecked then
+		c = c * (1 + P.UNCHECKED_PENALTY)
+	end
+	return c, p, net
 end
 P.costPt = costPt
 
@@ -323,24 +464,97 @@ local function better(c, p, net, bc, bp, bnet)
 	return net < bnet
 end
 
+-- No one-craft interleaving: a run of recipe B of at most P.ISLAND points between two runs of recipe A becomes A,
+-- unless B saves at least P.INTERLEAVE_SAVING of the cost left from there, or A gives no skill there.
+P.ISLAND = 1
+P.INTERLEAVE_SAVING = 0.1
+
+local function smooth(ctx, levels, chance)
+	local changed = true
+	while changed do
+		changed = false
+		local runs = {}
+		for s = ctx.skill, ctx.cap - 1 do
+			local o = levels[s] and levels[s].o or false
+			local last = runs[#runs]
+			if last and last.o == o then
+				last.to = s
+			else
+				runs[#runs + 1] = { o = o, from = s, to = s }
+			end
+		end
+		for r = 2, #runs - 1 do
+			local a, b = runs[r - 1].o, runs[r]
+			if a and b.o and runs[r + 1].o == a and b.to - b.from + 1 <= P.ISLAND then
+				-- A's crafts so far count for its AH sales
+				local cum = 0
+				for s = ctx.skill, b.from - 1 do
+					if levels[s] and levels[s].o == a then
+						cum = cum + 1 / levels[s].p
+					end
+				end
+				local save, repl = 0, {}
+				for s = b.from, b.to do
+					local c, p = costPt(ctx, a, s, cum, nil, chance)
+					if not c then
+						repl = nil
+						break
+					end
+					cum = cum + 1 / p
+					repl[s] = { o = a, c = c, p = p, costs = levels[s].costs }
+					save = save + c - levels[s].c
+				end
+				if repl then
+					local remaining = 0
+					for s = b.from, ctx.cap - 1 do
+						remaining = remaining + (levels[s] and levels[s].c or 0)
+					end
+					if save < P.INTERLEAVE_SAVING * remaining then
+						for s, lv in pairs(repl) do
+							levels[s] = lv
+						end
+						changed = true
+						break
+					end
+				end
+			end
+		end
+	end
+	return levels
+end
+
+-- Cheapest option per level. Each level also keeps every spell's cost there (costs[spell], its cheapest variant):
+-- the alternatives (step.others) come from it.
 local function forward(ctx, opts, chance)
 	local levels, cum = {}, {}
 	for s = ctx.skill, ctx.cap - 1 do
 		local best, bc, bp, bnet
+		local costs = {}
 		for _, o in ipairs(opts) do
 			local c, p, net = costPt(ctx, o, s, cum[o], nil, chance)
-			if c and better(c, p, net, bc, bp, bnet) then
-				best, bc, bp, bnet = o, c, p, net
+			if c then
+				if not costs[o.spell] or c < costs[o.spell] then
+					costs[o.spell] = c
+				end
+				if better(c, p, net, bc, bp, bnet) then
+					best, bc, bp, bnet = o, c, p, net
+				end
+			end
+		end
+		for _, o in ipairs(ctx.hidden or {}) do
+			local c = costPt(ctx, o, s, 0, nil, chance)
+			if c and (not costs[o.spell] or c < costs[o.spell]) then
+				costs[o.spell] = c
 			end
 		end
 		if best then
 			cum[best] = (cum[best] or 0) + 1 / bp
-			levels[s] = { o = best, c = bc, p = bp }
+			levels[s] = { o = best, c = bc, p = bp, costs = costs }
 		else
 			levels[s] = false
 		end
 	end
-	return levels
+	return smooth(ctx, levels, chance)
 end
 
 -- Pass 1 for one chance model: cheapest option per level, recipe items bought while one saves more than it costs.
@@ -415,15 +629,29 @@ function P.baseline(ctx, chance)
 end
 
 -- Pass 2: owned units the baseline does not use, given to the levels where they save most per unit.
-local function stockPass(ctx, base, have)
+-- route: spells of committed steps (rule 3); their levels, and every level forced by a commit, keep the bought recipe.
+local function stockPass(ctx, base, have, route)
 	local chance = base.chance
-	local demand = {}
+	local demand, var, users = {}, {}, {}
 	for s = ctx.skill, ctx.cap - 1 do
 		local lv = base.levels[s]
 		if lv then
 			for i, n in pairs(lv.o.mats) do
 				demand[i] = (demand[i] or 0) + n / lv.p
 			end
+			local p = math.min(lv.p, 1)
+			if not var[lv.o] then
+				users[#users + 1] = lv.o
+			end
+			var[lv.o] = (var[lv.o] or 0) + (1 - p) / (p * p)
+		end
+	end
+	-- rule 1: buys cover the luck percentile of crafts, so those spares are not surplus while their recipe still runs,
+	-- or a replan after a bad-luck run would spend them elsewhere (rule 2)
+	for _, o in ipairs(users) do
+		local spare = ctx.z * math.sqrt(var[o])
+		for i, n in pairs(o.mats) do
+			demand[i] = demand[i] + n * spare
 		end
 	end
 	local rem = {}
@@ -467,7 +695,7 @@ local function stockPass(ctx, base, have)
 			local numer = (net > 0 and net or 0) + ctx.effort * (1 + o.precrafts)
 			for s = math.max(ctx.skill, o.at == -math.huge and ctx.skill or math.ceil(o.at)), ctx.cap - 1 do
 				local lv = base.levels[s]
-				if not lv or o ~= lv.o then
+				if (not lv or o ~= lv.o) and not (lv and (lv.committed or (route and route[lv.o.spell]))) then
 					local p = chance(s, o.y, o.g) * o.k
 					if p <= 0 then
 						break
@@ -647,7 +875,13 @@ local function segmentsOf(parts)
 	local segs = {}
 	for _, part in ipairs(parts) do
 		local last = segs[#segs]
-		if last and ((part.gap and last.gap) or (not part.gap and last.o == part.o and last.source == part.source)) then
+		-- one recipe over one contiguous range is one step: stock against buy is a materials line, not a boundary
+		if last and ((part.gap and last.gap) or (not part.gap and last.o == part.o)) then
+			if part.source == "buy" or last.source == "buy" then
+				last.source = "buy"
+			elseif part.source ~= last.source then
+				last.source = "mixed"
+			end
 			last.to = part.s + 1
 			last.alloc = last.alloc + (part.gap and 0 or part.f / part.p)
 			last.pts = last.pts + part.f
@@ -721,12 +955,224 @@ local function stockAlternative(ctx, s, pool, skip, st, have, chance)
 	return best, bc, bcrafts, bp
 end
 
+-- Crafts it takes to go from skill `from` to `to` with o: mean and variance. Each point at level s takes a geometric
+-- number of crafts with success p(s) (mean 1/p, variance (1-p)/p^2); a part of a level counts by its share.
+function P.craftSpread(from, to, o, chance)
+	chance = chance or P.chance
+	local mean, var = 0, 0
+	local s = math.floor(from)
+	while s < to - EPS do
+		local f = math.min(to, s + 1) - math.max(from, s)
+		local p = chance(s, o.y, o.g) * (o.k or 1)
+		if p <= 0 then
+			break
+		end
+		p = math.min(p, 1)
+		mean = mean + f / p
+		var = var + f * (1 - p) / (p * p)
+		s = s + 1
+	end
+	return mean, var
+end
+
+-- The option each step crafts and the option of its stock alternative (internal; plans stay plain data).
+local optOf = setmetatable({}, { __mode = "k" })
+local altOf = setmetatable({}, { __mode = "k" })
+
+-- Rule 3: the levels of committed steps ({ spell, to }: a saved AH trip) keep their recipe until `to` is reached or
+-- the recipe greys, whatever the baseline picks now. Returns a copy of base (the cached baseline is never changed),
+-- the set of committed spells, and the set of forced levels.
+local function commitLevels(ctx, base, commits, chance)
+	local committed = {}
+	if not commits or #commits == 0 then
+		return base, committed
+	end
+	local levels = {}
+	for s, lv in pairs(base.levels) do
+		levels[s] = lv
+	end
+	local opts = {}
+	for _, o in ipairs(base.opts) do
+		opts[#opts + 1] = o
+	end
+	for _, cm in ipairs(commits) do
+		-- the option the baseline used for this spell, else its plain variant
+		local pick
+		for s = ctx.skill, ctx.cap - 1 do
+			local lv = base.levels[s]
+			if lv and lv.o.spell == cm.spell then
+				pick = lv.o
+				break
+			end
+		end
+		if not pick then
+			for _, o in ipairs(ctx.options) do
+				if o.spell == cm.spell and o.variant == 1 and (o.learned or o.src ~= "item") then
+					pick = o
+				end
+			end
+		end
+		local to = math.min(math.ceil((cm.to or ctx.skill) - EPS), ctx.cap)
+		if pick and ctx.skill < to then
+			local any = false
+			for s = ctx.skill, to - 1 do
+				local c, p = costPt(ctx, pick, s, 0, nil, chance)
+				if c then
+					local lv0 = base.levels[s]
+					levels[s] = { o = pick, c = c, p = p, committed = true, costs = lv0 and lv0.costs or nil }
+					any = true
+				end
+			end
+			if any then
+				committed[pick.spell] = true
+				local seen = false
+				for _, o in ipairs(opts) do
+					seen = seen or o == pick
+				end
+				if not seen then
+					opts[#opts + 1] = pick
+				end
+			end
+		end
+	end
+	return setmetatable({ levels = levels, opts = opts }, { __index = base }), committed
+end
+
+P.OTHERS = 3 -- alternatives kept per step
+
+-- Other ways to cover a craft step: every spell the baseline priced at each of the step's levels, its extra cost over
+-- the step's points (each level weighted by the share of it the step covers), cheapest first, at most P.OTHERS.
+local function othersOf(ctx, base, step, info)
+	if step.to <= step.from + EPS then
+		return nil
+	end
+	local lo = math.floor(step.from)
+	local hi = math.min(math.max(lo, math.ceil(step.to - EPS) - 1), ctx.cap - 1)
+	local extra
+	for s = lo, hi do
+		local lv = base.levels[s]
+		if not lv or not lv.costs then
+			return nil
+		end
+		local f = math.max(0, math.min(step.to, s + 1) - math.max(step.from, s))
+		local now = {}
+		for spell, c in pairs(lv.costs) do
+			-- an alternative covers the whole step: a spell missing at any level drops out
+			if spell ~= step.spell and (not extra or extra[spell]) then
+				now[spell] = (extra and extra[spell] or 0) + f * (c - lv.c)
+			end
+		end
+		extra = now
+	end
+	local out = {}
+	for spell, x in pairs(extra or {}) do
+		local o = info[spell]
+		out[#out + 1] = { spell = spell, name = o and o.name, extra = math.max(0, x), src = o and o.src }
+	end
+	if #out == 0 then
+		return nil
+	end
+	table.sort(out, function(a, b)
+		if a.extra ~= b.extra then
+			return a.extra < b.extra
+		end
+		return a.spell < b.spell
+	end)
+	for k = #out, P.OTHERS + 1, -1 do
+		out[k] = nil
+	end
+	return out
+end
+
+-- The skill at the boundary before steps[i]: where the next step with a range starts (the plan's end after the last).
+local function startOf(ctx, steps, i)
+	for j = i, #steps do
+		if steps[j].from then
+			return steps[j].from
+		end
+	end
+	for j = #steps, 1, -1 do
+		if steps[j].to then
+			return steps[j].to
+		end
+	end
+	return ctx.skill
+end
+
+-- Rank training in the step list. Per rank-up (window [at, by]; at unknown = by): at or past by, train first. Else
+-- batch it before a trainer visit already in the window, else the earliest step boundary in the window. When one run
+-- straddles the whole window it is never split: the step carries step.rankUp ("train between at and by").
+local function placeRanks(ctx, steps)
+	for _, up in ipairs(ctx.rankUps or {}) do
+		local lo, hi = up.at or up.by, up.by
+		local function rankStep(skill)
+			return {
+				kind = "trainRank",
+				name = up.name,
+				cap = up.cap,
+				by = up.by,
+				at = up.at,
+				level = up.level,
+				cost = up.cost,
+				where = up.where,
+				skill = skill,
+			}
+		end
+		local function inWindow(s)
+			return s >= lo - EPS and s <= hi + EPS
+		end
+		local placed = false
+		if ctx.skill >= hi - EPS then
+			local i = 1
+			while steps[i] and steps[i].kind == "trainRank" do
+				i = i + 1
+			end
+			table.insert(steps, i, rankStep(ctx.skill))
+			placed = true
+		end
+		if not placed then
+			for i, st in ipairs(steps) do
+				if st.kind == "train" and inWindow(startOf(ctx, steps, i)) then
+					table.insert(steps, i, rankStep(startOf(ctx, steps, i)))
+					placed = true
+					break
+				end
+			end
+		end
+		if not placed then
+			for i = 1, #steps + 1 do
+				local s = startOf(ctx, steps, i)
+				if inWindow(s) then
+					table.insert(steps, i, rankStep(s))
+					placed = true
+					break
+				end
+			end
+		end
+		if not placed then
+			for _, st in ipairs(steps) do
+				if st.from and st.to and st.to > hi + EPS then
+					st.rankUp = up
+					placed = true
+					break
+				end
+			end
+		end
+		if not placed then
+			steps[#steps + 1] = rankStep(startOf(ctx, steps, #steps + 1))
+		end
+	end
+end
+
 -- Pass 2 to 4 for the formula run, compared with the flat run. Cheap: rerun on every bag update.
-function P.finish(ctx, baseline, have)
+-- commits: the steps the user bought for (rule 3), { { spell, to } }.
+local function finishCore(ctx, baseline, have, commits)
 	have = have or {}
-	local base, chance = baseline.formula, baseline.formula.chance
-	local st = stockPass(ctx, base, have)
-	local flatSt = stockPass(ctx, baseline.flat, have)
+	local chance = baseline.formula.chance
+	local base, committed = commitLevels(ctx, baseline.formula, commits, chance)
+	local route = next(committed) and committed or nil
+	local st = stockPass(ctx, base, have, route)
+	local flatSt = stockPass(ctx, baseline.flat, have, route)
 	local flatUse = usage(ctx, baseline.flat, flatSt)
 	local parts = labelParts(ctx, partsOf(ctx, base, st), have)
 	local segs = segmentsOf(parts)
@@ -766,6 +1212,9 @@ function P.finish(ctx, baseline, have)
 				why = "no known or buyable recipe gives skill here",
 			}
 			cur = math.max(cur, seg.to)
+		elseif seg.source == "buy" and math.max(cur, seg.from) >= math.min(seg.to, ctx.cap) - EPS then
+			-- an earlier stock step's expected points already passed this stretch: nothing left to buy for
+			cur = math.max(cur, seg.from)
 		elseif
 			seg.source ~= "buy"
 			and stockLimit(ctx, seg.o, have, pool) < 1
@@ -790,13 +1239,15 @@ function P.finish(ctx, baseline, have)
 					price = b.price,
 					where = "ah",
 					learn = b.learn,
+					owned = (have[b.item] or 0) > 0 or nil, -- in the bags already: learn it, no AH
 					saves = b.saves,
 					fillsGap = b.fillsGap,
 					alt = b.instead and { spell = b.instead, name = b.insteadName, extra = b.saves } or nil,
 				}
 			elseif o.train and not announced[o.spell] then
 				announced[o.spell] = true
-				steps[#steps + 1] = { kind = "train", spell = o.spell, name = o.name, at = o.at }
+				steps[#steps + 1] =
+					{ kind = "train", spell = o.spell, name = o.name, at = o.at, unchecked = o.unchecked }
 			end
 			local crafts
 			local source = seg.source
@@ -809,20 +1260,31 @@ function P.finish(ctx, baseline, have)
 					crafts = math.max(1, math.min(math.ceil(seg.alloc - EPS), limit))
 				end
 			end
-			if source == "buy" then
-				crafts = math.max(1, math.ceil(seg.alloc - EPS))
-			end
 			local from = math.max(cur, seg.from)
-			local pts = P.expectedPoints(from, crafts, o, chance, ctx.cap)
+			local pts, expected
+			if source == "buy" then
+				-- rule 1: buy for the luck percentile of the crafts to the step's target, not for the mean; the
+				-- target holds (a lucky run ends the step early and leaves spares as stock)
+				local target = math.min(seg.to, ctx.cap)
+				local mean, var = P.craftSpread(from, target, o, chance)
+				expected = mean
+				crafts = math.max(1, math.ceil(mean + ctx.z * math.sqrt(var) - EPS))
+				pts = math.max(0, target - from)
+			else
+				pts = P.expectedPoints(from, crafts, o, chance, ctx.cap)
+			end
 			local step = {
 				kind = "craft",
 				spell = o.spell,
 				name = o.name,
 				crafts = crafts,
+				expected = expected, -- buy steps: the mean crafts (crafts is the luck percentile)
 				source = source,
 				from = from,
 				to = from + pts,
 				points = pts,
+				committed = committed[o.spell] or nil,
+				unchecked = o.unchecked, -- taught by a trainer nobody has seen teach it yet
 				color = colorOf(math.floor(from), o.y, o.g),
 				-- the chance at the first craft and at the last one
 				chance = {
@@ -905,26 +1367,25 @@ function P.finish(ctx, baseline, have)
 			if source == "buy" then
 				step.poolBefore = poolBefore
 			end
+			optOf[step] = o
 			steps[#steps + 1] = step
 			cur = step.to
 		end
 	end
 
-	-- the stock alternative of each buy step: what is in the bags then, less what a later step keeps for itself (an
-	-- item the plan buys more of anyway stays available: using it now costs its buy price, which the extra shows)
+	-- the stock alternative of each buy step: what is in the bags then, less everything a later step uses (rule 2:
+	-- an earmark is hard, whether or not the plan buys more of that item later)
 	for idx, step in ipairs(steps) do
 		local before = step.poolBefore
 		step.poolBefore = nil
-		if before then
+		if before and not step.committed then
 			local avail = {}
 			for i, q in pairs(before) do
 				avail[i] = q
 			end
 			for j = idx + 1, #steps do
 				for _, u in ipairs(steps[j].used or {}) do
-					if (st.demand[u.item] or 0) < (have[u.item] or 0) - EPS then
-						avail[u.item] = (avail[u.item] or 0) - u.count
-					end
+					avail[u.item] = (avail[u.item] or 0) - u.count
 				end
 			end
 			local lo = math.floor(step.from)
@@ -941,14 +1402,22 @@ function P.finish(ctx, baseline, have)
 					points = apts,
 					extra = math.max(0, (ac - v) * math.min(apts, step.points)),
 				}
+				altOf[step] = alt
 			end
 		end
 	end
 
 	-- pass 4: what is held for later steps, what is left over, the from-stock list
 	local holdKey = {}
+	-- an earmark names a different, later step: materials kept for the current recipe's own next crafts are not one
+	local current
 	for _, step in ipairs(steps) do
-		if step.kind == "craft" and math.floor(step.from) > ctx.skill then
+		if step.kind == "craft" then
+			current = current or step.spell
+		end
+	end
+	for _, step in ipairs(steps) do
+		if step.kind == "craft" and math.floor(step.from) > ctx.skill and step.spell ~= current then
 			for _, u in ipairs(step.used) do
 				if not isVendor(ctx, u.item) and u.count > 0 then
 					local key = u.item .. ":" .. step.spell
@@ -969,9 +1438,21 @@ function P.finish(ctx, baseline, have)
 			end
 		end
 	end
+	local patterns = {} -- a recipe item the plan learns later is not a leftover
+	for _, step in ipairs(steps) do
+		if step.kind == "buyRecipe" and step.item then
+			patterns[step.item] = true
+		end
+	end
 	for _, i in ipairs(sortedKeys(pool)) do
 		local q = math.floor(pool[i] + EPS)
-		if q >= 1 and (have[i] or 0) > 0 and not isVendor(ctx, i) and (st.rem[i] or 0) >= 1 - EPS then
+		if
+			q >= 1
+			and (have[i] or 0) > 0
+			and not isVendor(ctx, i)
+			and not patterns[i]
+			and (st.rem[i] or 0) >= 1 - EPS
+		then
 			local pr = ctx.price[i] or {}
 			local info = ctx.items[i] or {}
 			plan.leftovers[#plan.leftovers + 1] = {
@@ -993,17 +1474,30 @@ function P.finish(ctx, baseline, have)
 			end
 		end
 	end
+	-- rule 2: the earmark of each item, the first step that uses it (later steps through plan.hold, first steps too)
 	local held = {}
-	for _, h in ipairs(plan.hold) do
-		held[h.item] = held[h.item] or h
+	for _, step in ipairs(steps) do
+		for _, u in ipairs(step.kind == "craft" and step.used or {}) do
+			if not held[u.item] and u.count > 0 then
+				held[u.item] = { spell = step.spell, at = math.floor(step.from) }
+			end
+		end
+	end
+	local alts = {}
+	for _, step in ipairs(steps) do
+		if step.alt then
+			alts[step.alt.spell] = step.alt
+		end
 	end
 	for _, o in ipairs(ctx.options) do
 		if o.learned and o.variant == 1 then
-			local crafts, any = math.huge, false
+			-- crafts the bags hold reagents for (have), and crafts from true spares only (pool: what no step uses)
+			local crafts, spare, any = math.huge, math.huge, false
 			for i, n in pairs(o.mats) do
 				if not isVendor(ctx, i) then
 					any = true
 					crafts = math.min(crafts, math.floor((have[i] or 0) / n + EPS))
+					spare = math.min(spare, math.floor(math.max(0, pool[i] or 0) / n + EPS))
 				end
 			end
 			local c, p = trueCostPt(ctx, o, ctx.skill, have, st, chance)
@@ -1016,20 +1510,25 @@ function P.finish(ctx, baseline, have)
 					color = colorOf(ctx.skill, o.y, o.g),
 				}
 				local h
-				for i in pairs(o.mats) do
-					h = h or held[i]
+				for _, i in ipairs(sortedKeys(o.mats)) do
+					if spare < 1 and held[i] and (not h or (h.spell == o.spell and held[i].spell ~= o.spell)) then
+						h = held[i]
+					end
 				end
-				if first[o.spell] then
-					e.verdict = first[o.spell] == "alternative" and "alternative" or "now"
-				elseif vNow and c > vNow * P.WASTEFUL then
-					e.verdict, e.extra = "wasteful", c - vNow
-					e.instead = lv.o.spell
+				if first[o.spell] == true then
+					e.verdict = "now"
+				elseif first[o.spell] == "alternative" then
+					e.verdict, e.crafts = "alternative", alts[o.spell].crafts
 				elseif h then
+					-- its reagents belong to another step: never offered as a way to spend them now
 					e.verdict, e.instead, e.at = "later", h.spell, h.at
+				elseif vNow and c > vNow * P.WASTEFUL then
+					e.verdict, e.extra, e.crafts = "wasteful", c - vNow, spare
+					e.instead = lv.o.spell
 				else
-					e.verdict = "ok"
+					e.verdict, e.crafts = "ok", spare
 				end
-				e.points = P.expectedPoints(ctx.skill, crafts, o, chance, ctx.cap)
+				e.points = P.expectedPoints(ctx.skill, e.crafts, o, chance, ctx.cap)
 				plan.fromStock[#plan.fromStock + 1] = e
 			end
 		end
@@ -1070,11 +1569,269 @@ function P.finish(ctx, baseline, have)
 		end
 	end
 	plan.buys = base.buys
+	-- alternatives, then the rank training (after every list above: neither changes what a craft step uses)
+	local info = {}
+	for _, list in ipairs({ ctx.options, ctx.hidden or {} }) do
+		for _, o in ipairs(list) do
+			info[o.spell] = info[o.spell] or o
+		end
+	end
+	for _, step in ipairs(steps) do
+		if step.kind == "craft" then
+			step.others = othersOf(ctx, base, step, info)
+		end
+	end
+	placeRanks(ctx, steps)
+	plan.liveCap = ctx.liveCap
+	plan.rankUps = ctx.rankUps
+	plan.capBlock = ctx.capBlock
+	plan.coverage = ctx.coverage
+	return plan
+end
+
+local function isAh(ctx, item)
+	local pr = ctx.price[item]
+	return pr ~= nil and pr.where ~= "vendor"
+end
+
+-- Whether a step sends the user to the AH: a recipe to buy there, or a reagent it buys there.
+local function needsAh(ctx, st)
+	if st.kind == "buyRecipe" then
+		return not st.owned
+	end
+	for _, b in ipairs(st.kind == "craft" and st.buy or {}) do
+		if isAh(ctx, b.item) then
+			return true
+		end
+	end
+	return false
+end
+P.needsAh = needsAh
+
+-- One AH trip for the stretch ahead: every AH buy from the first step that needs the AH up to the next trainer visit,
+-- gap or the cap (patterns are bought on the same trip), stopping early when gold on hand runs out. Each recipe
+-- bought in the stretch buys for the 90th percentile of its crafts: the leftovers are stock for later steps.
+local function tripOf(ctx, steps, chance, gold)
+	local first
+	for i, st in ipairs(steps) do
+		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
+			return nil
+		elseif needsAh(ctx, st) then
+			first = i
+			break
+		end
+	end
+	if not first then
+		return nil
+	end
+	local rows, byItem, spread = {}, {}, {}
+	local total, last, ends = 0, first, "cap"
+	local function add(item, count, each, field)
+		local r = byItem[item]
+		if not r then
+			r = { item = item, count = 0, buffer = 0, each = each or 0 }
+			byItem[item] = r
+			rows[#rows + 1] = r
+		end
+		r[field] = r[field] + count
+		total = total + count * (each or 0)
+	end
+	for i = first, #steps do
+		local st = steps[i]
+		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
+			ends = st.kind
+			break
+		end
+		local cost = 0
+		if st.kind == "buyRecipe" then
+			cost = st.owned and 0 or (st.price or 0)
+		else
+			for _, b in ipairs(st.buy) do
+				if isAh(ctx, b.item) then
+					cost = cost + b.count * (b.each or 0)
+				end
+			end
+		end
+		if gold and i > first and total + cost > gold then
+			ends = "gold"
+			break
+		end
+		if st.kind == "buyRecipe" then
+			if not st.owned then
+				add(st.item, 1, st.price, "count")
+				byItem[st.item].recipe = true
+			end
+		else
+			local o = optOf[st]
+			local bought = {}
+			for _, b in ipairs(st.buy) do
+				if isAh(ctx, b.item) then
+					add(b.item, b.count, b.each, "count")
+					bought[b.item] = true
+				end
+			end
+			if o and next(bought) then
+				local sp = spread[o]
+				if not sp then
+					sp = { mean = 0, var = 0, crafts = 0, items = {} }
+					spread[o] = sp
+					spread[#spread + 1] = o
+				end
+				local m, v = P.craftSpread(st.from, st.to, o, chance)
+				sp.mean, sp.var, sp.crafts = sp.mean + m, sp.var + v, sp.crafts + st.crafts
+				for item in pairs(bought) do
+					sp.items[item] = true
+				end
+			end
+		end
+		last = i
+	end
+	-- the luck buffer over the whole trip: each buy step already covers its own percentile (rule 1); a recipe that runs
+	-- over several steps only tops up where its joint percentile needs more than the steps' sum
+	local spare = 0
+	for _, o in ipairs(spread) do
+		local sp = spread[o]
+		local extra = math.ceil(sp.mean + ctx.z * math.sqrt(sp.var) - sp.crafts - EPS)
+		if extra > 0 then
+			spare = spare + extra
+			for _, item in ipairs(sortedKeys(sp.items)) do
+				add(item, math.ceil(o.mats[item] * extra - EPS), byItem[item].each, "buffer")
+			end
+		end
+	end
+	for _, r in ipairs(rows) do
+		r.total = r.count + r.buffer
+		r.cost = r.total * r.each
+	end
+	table.sort(rows, function(a, b)
+		if a.cost ~= b.cost then
+			return a.cost > b.cost
+		end
+		return a.item < b.item
+	end)
+	local lastStep = steps[last]
+	-- the steps the trip buys for: saved with the list, they are committed (rule 3) until their target is reached
+	local route, commit = {}, {}
+	for i = first, last do
+		local st = steps[i]
+		if st.kind == "craft" then
+			route[#route + 1] = st.spell
+			commit[#commit + 1] = { spell = st.spell, from = st.from, to = st.to, crafts = st.crafts }
+		end
+	end
+	return {
+		fromStep = first,
+		toStep = last,
+		to = lastStep.to or lastStep.learn or ctx.skill,
+		ends = ends,
+		rows = rows,
+		total = total,
+		spareCrafts = spare,
+		route = route,
+		commit = commit,
+	}
+end
+P.tripOf = tripOf
+
+-- The shopping list grouped by place, for the stretch ahead: the trainer visits due now (leading train and trainRank
+-- steps), then every step up to the next trainer visit or gap, or the trip's last step (gold). One trainer block, one
+-- vendor block (merged per item, by merchant), one AH block (reagents and patterns merged per item, plus the trip's
+-- luck buffer). order = travel order: trainer and vendor before the AH, never vendor, AH, vendor.
+function P.shoppingOf(ctx, steps, trip)
+	local shop = { vendor = {}, ah = {}, trainer = {}, order = {} }
+	local function trainerRow(st, i)
+		shop.trainer[#shop.trainer + 1] = {
+			kind = st.kind,
+			name = st.name,
+			skill = st.kind == "trainRank" and st.skill or st.at,
+			cost = st.cost,
+			step = i,
+		}
+	end
+	local i = 1
+	while steps[i] and (steps[i].kind == "train" or steps[i].kind == "trainRank") do
+		trainerRow(steps[i], i)
+		i = i + 1
+	end
+	local vendorBy, ahBy = {}, {}
+	local function add(block, by, item, count, each, extra, idx)
+		local r = by[item]
+		if not r then
+			local info = ctx.items[item] or {}
+			r = { item = item, name = info.name, count = 0, price = each, step = idx }
+			for k, v in pairs(extra) do
+				r[k] = v
+			end
+			by[item] = r
+			block[#block + 1] = r
+		end
+		r.count = r.count + count
+	end
+	local stop = trip and trip.toStep or #steps
+	for j = i, stop do
+		local st = steps[j]
+		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
+			break
+		elseif st.kind == "buyRecipe" then
+			if not st.owned then
+				add(shop.ah, ahBy, st.item, 1, st.price, { kind = "pattern" }, j)
+			end
+		elseif st.kind == "craft" then
+			for _, b in ipairs(st.buy) do
+				if isVendor(ctx, b.item) then
+					local pr = ctx.price[b.item] or {}
+					local info = ctx.items[b.item] or {}
+					add(shop.vendor, vendorBy, b.item, b.count, b.each, { merchant = pr.merchant or info.merchant }, j)
+				elseif isAh(ctx, b.item) then
+					add(shop.ah, ahBy, b.item, b.count, b.each, { kind = "reagent" }, j)
+				end
+			end
+		end
+	end
+	for _, r in ipairs(trip and trip.rows or {}) do
+		if ahBy[r.item] and (r.buffer or 0) > 0 then
+			ahBy[r.item].count = ahBy[r.item].count + r.buffer
+		end
+	end
+	table.sort(shop.vendor, function(a, b)
+		local ma, mb = a.merchant and tostring(a.merchant), b.merchant and tostring(b.merchant)
+		if ma ~= mb then
+			if not ma or not mb then
+				return ma ~= nil
+			end
+			return ma < mb
+		elseif a.step ~= b.step then
+			return a.step < b.step
+		end
+		return a.item < b.item
+	end)
+	table.sort(shop.ah, function(a, b)
+		if a.step ~= b.step then
+			return a.step < b.step
+		end
+		return a.item < b.item
+	end)
+	for _, k in ipairs({ "trainer", "vendor", "ah" }) do
+		if #shop[k] > 0 then
+			shop.order[#shop.order + 1] = k
+		end
+	end
+	return shop
+end
+
+-- Pass 2 to 4, then the AH trip and the shopping list. opts: commit (the steps of the saved trip, { { spell, to } }:
+-- rule 3), gold (copper on hand: the trip stops where it runs out).
+function P.finish(ctx, baseline, have, opts)
+	opts = opts or {}
+	local plan = finishCore(ctx, baseline, have or {}, opts.commit)
+	plan.luck = ctx.z
+	plan.trip = tripOf(ctx, plan.steps, baseline.formula.chance, opts.gold)
+	plan.shopping = P.shoppingOf(ctx, plan.steps, plan.trip)
 	return plan
 end
 
 -- The whole planner in one call (tests, and the panel when nothing is cached).
 function P.run(input)
 	local ctx = P.prepare(input)
-	return P.finish(ctx, P.baseline(ctx, input.chance), input.have)
+	return P.finish(ctx, P.baseline(ctx, input.chance), input.have, { commit = input.commit, gold = input.gold })
 end

@@ -29,6 +29,31 @@ frames. TSM's API cannot add to its crafting queue, so there is no "queue these"
 
 Only WoW: Forever (interface 16001) is supported.
 
+## Planner rules
+
+These rules hold for every plan, every replan and every alternative the panel offers:
+
+1. **Buy for bad luck.** A step that buys reagents buys enough for a bad-luck run: the 90th percentile of the crafts
+   it takes to reach the step's target, not the average. The card says "usually N crafts, up to M". A lucky run ends
+   early and the spares count as stock for later steps. `/skillup luck 95` changes the percentile (50, 75, 80, 90, 95
+   or 99).
+2. **Earmarked materials stay put.** A material a later step needs is never offered for something else: not as "Or use
+   stock", not in the from-stock list as "ok", and not by a replan. Only true spares are offered.
+3. **A bought step holds.** Once a step is on your AH list, its recipe and target hold until you reach the target or
+   the recipe turns grey. A replan after a skill-up or a price change never switches or shrinks it.
+4. **One recipe, one step.** A recipe's crafts stay one step even when part comes from stock and part is bought.
+5. **No one-craft detours.** A single point of another recipe between two runs of the same recipe is folded in,
+   unless it saves at least 10% of the remaining cost.
+6. **Caps are planned.** The live cap comes from the client; ranks above it come from what the addon read at a
+   profession trainer (Forever's client carries no rank table), "unknown" until then. A rank-up goes between its
+   unlock skill and the cap, next to a trainer visit already planned when there is one, and never splits a craft
+   run. A rank your character level can't train yet is a hard stop.
+7. **Shopping by place.** One trainer, one vendor and one auction house block per stretch, in travel order; never
+   vendor, AH, vendor.
+8. **Taught where?** A recipe or rank taught by a special NPC (a dungeon teacher) is never a trainer step, and is
+   left out unless enabled. A trainer recipe the addon hasn't yet seen at a trainer is "not checked" and loses near
+   ties.
+
 ## Limits
 
 - Bank counts are what the client remembers from your last bank visit.

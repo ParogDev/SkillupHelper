@@ -28,6 +28,10 @@ else
 		"C_Map", "C_SuperTrack", "C_Texture", "IsInInstance", "GetPlayerFacing", "UnitName", "UnitGUID", "IsInGroup",
 		"InCombatLockdown", "GetNumTrainerServices", "GetTrainerServiceSkillLine", "hooksecurefunc",
 		"GetTrainerServiceInfo", "GetTrainerServiceTypeFilter", "SetTrainerServiceTypeFilter",
+		-- rank and recipe learning at the trainer (Scan.lua)
+		"UnitLevel", "GetProfessions", "GetProfessionInfo", "C_TooltipInfo", "Enum", "IsTradeskillTrainer",
+		"GetTrainerServiceCost", "GetTrainerServiceDescription", "GetTrainerServiceLevelReq",
+		"GetTrainerServiceSkillReq", "GetTrainerTradeskillRankValues",
 	}
 end
 -- FrameXML globals for the vendor buy: the merchant window and bag constants.

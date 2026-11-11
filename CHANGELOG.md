@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.7
+
+- The planner knows your profession's ranks. At a profession trainer the addon reads each rank (Journeyman, Expert,
+  Artisan...) with its skill, level and cost and keeps it; until then those show "unknown". A plan that runs into
+  your cap gets a "Train Expert" step at a convenient point before it, never in the middle of a craft run. A rank
+  your character level can't train yet stops the plan with a message. `/skillup ranks` lists what was read.
+- No more one-craft detours: a single point of another recipe between two runs of the same recipe is folded in.
+- Purchases are grouped by place: one trainer block, one vendor block and one auction house block, in travel order.
+- At the auction house the AH list becomes buy rows: one click to buy (commodities ask for a confirm click with the
+  live total), patterns at the cheapest buyout. Sold out or overpriced rows say so.
+- "Other ways" on a step lists alternatives with their extra cost. `/skillup exclude dungeon|ahpatterns|special|<spellID>`
+  keeps routes you don't want out of the plan.
+- Recipes taught by special NPCs (a dungeon teacher, for example) are no longer planned as trainer visits, and are left
+  out unless you enable them (`/skillup exclude special`). A trainer recipe not yet seen at a trainer is marked "not
+  checked" and loses near ties.
+- Show recipe works on every learned craft row, not only the Next card.
+- One AH trip for the stretch ahead: when a step needs the auction house, the card lists every AH buy up to the next
+  trainer visit, patterns included, with one total. "Add to AH list" keeps the list.
+- Buys cover a bad-luck run. A step buys for the 90th percentile of the crafts it takes, so a run of failed
+  skill-ups no longer sends you back to the AH. `/skillup luck <50|75|80|90|95|99>` changes it.
+- Materials a later step needs are never offered for something else ("Or use stock", the from-stock list, a replan).
+- A step on your AH list keeps its recipe and target until you reach it or it turns grey.
+
 ## 0.2.6
 
 - A guide chip says where to go for the step to do now: the nearest vendor that sells its materials, the

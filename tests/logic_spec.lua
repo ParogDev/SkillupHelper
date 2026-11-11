@@ -548,7 +548,7 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal(ns.CODE_VERSION, "0.2.6")
+		assert.equal(ns.CODE_VERSION, "0.2.7")
 	end)
 end)
 
@@ -598,5 +598,59 @@ describe("Vendor buy math", function()
 		assert.equal(40, L.bagRoom(2, 20, 40)) -- full stacks take nothing
 		assert.equal(0, L.bagRoom(0, 20, 0))
 		assert.equal(3, L.bagRoom(3, 1, 5)) -- unstackable
+	end)
+end)
+
+describe("AH list math", function()
+	local L
+	before_each(function()
+		L = load({}).Logic
+	end)
+
+	it("merges the saved lists into what is left to buy; reagents are committed, patterns are not", function()
+		local trips = {
+			Leatherworking = {
+				rows = {
+					{ item = 2318, name = "Light Leather", count = 10, bought = 4, each = 20 },
+					{ item = 9000, name = "Pattern", count = 1, each = 5000, recipe = true },
+					{ item = 2319, name = "Medium Leather", count = 3, bought = 3, each = 60 },
+				},
+			},
+			Cooking = { rows = { { item = 2318, name = "Light Leather", count = 2, each = 20 } } },
+		}
+		local list = L.ahList(trips)
+		assert.equal(2, #list)
+		-- Cooking sorts first, then Leatherworking adds its 6 left
+		assert.same({ 2318, 8, true, false }, { list[1].item, list[1].count, list[1].committed, list[1].pattern })
+		assert.same({ 9000, 1, false, true }, { list[2].item, list[2].count, list[2].committed, list[2].pattern })
+		assert.same({}, L.ahList(nil))
+	end)
+
+	it("prices a commodity buy cheapest first and says how many are listed", function()
+		local q = L.commodityQuote({ { unitPrice = 30, quantity = 5 }, { unitPrice = 20, quantity = 3 } }, 6)
+		assert.same({ 8, 6, 20 * 3 + 30 * 3, 20 }, { q.available, q.qty, q.total, q.unit })
+		local short = L.commodityQuote({ { unitPrice = 20, quantity = 2 } }, 6)
+		assert.same({ 2, 2, 40 }, { short.available, short.qty, short.total })
+		local none = L.commodityQuote({}, 6)
+		assert.same({ 0, 0 }, { none.available, none.qty })
+		assert.is_nil(none.avg)
+	end)
+
+	it("picks the cheapest buyout, never the user's own or a bid-only auction", function()
+		local best = L.cheapestBuyout({
+			{ auctionID = 1, buyoutAmount = 900, quantity = 1 },
+			{ auctionID = 2, buyoutAmount = 500, quantity = 1, containsOwnerItem = true },
+			{ auctionID = 3, quantity = 1 },
+			{ auctionID = 4, buyoutAmount = 700, quantity = 1 },
+		})
+		assert.same({ auctionID = 4, buyout = 700, quantity = 1 }, best)
+		assert.is_nil(L.cheapestBuyout({ { auctionID = 3, quantity = 1 } }))
+	end)
+
+	it("calls a price over 1.5x the plan's estimate overpriced", function()
+		assert.equal("ok", (L.ahVerdict(100, 150)))
+		local v, r = L.ahVerdict(100, 151)
+		assert.same({ "over", 1.51 }, { v, r })
+		assert.equal("unknown", (L.ahVerdict(nil, 151)))
 	end)
 end)

@@ -106,8 +106,72 @@ local TAG_TEXT = {
 
 local WHERE = { vendor = "vendor", ah = "AH" }
 
--- The materials of a craft step: what it takes from the bags (have/need) and what it buys (where, price).
-local function craftMats(st, env)
+-- A field the planner may leave nil (unknown, never guessed), as text.
+local function known(v, f)
+	if v == nil then
+		return "unknown"
+	end
+	if f then
+		return f(v)
+	end
+	return type(v) == "number" and tostring(math.floor(v)) or tostring(v)
+end
+
+-- A rank's terms: "level 20, 5g" ("unknown" for what the trainer has not shown yet).
+function V.rankTerms(st, env)
+	return ("level %s, %s"):format(known(st.level), st.cost and env.money(st.cost) or "cost unknown")
+end
+
+-- "Train Expert (225) — level 20, 5g".
+function V.rankLine(st, env)
+	return ("Train %s (%s) — %s"):format(st.name or "the next rank", known(st.cap), V.rankTerms(st, env))
+end
+
+local SRC_TEXT = {
+	known = "known",
+	trainer = "trainer",
+	item = "pattern",
+	auto = "learned with the rank",
+	vendor = "vendor pattern",
+	ah = "AH pattern",
+	drop = "drop",
+	dungeon = "dungeon drop",
+	special = "special NPC / dungeon",
+}
+
+V.UNCHECKED = "not checked at a trainer"
+
+-- A step's alternatives as lines: "Other way: Name, +1s 20c (trainer)", cheapest first, at most `max`.
+function V.otherLines(others, env, max)
+	local list = {}
+	for _, o in ipairs(others or {}) do
+		list[#list + 1] = o
+	end
+	table.sort(list, function(a, b)
+		return (a.extra or 0) < (b.extra or 0)
+	end)
+	local out = {}
+	for i, o in ipairs(list) do
+		if max and i > max then
+			out[#out + 1] = ("and %d more ways"):format(#list - max)
+			break
+		end
+		local src = SRC_TEXT[o.src] or (o.src and tostring(o.src)) or "source unknown"
+		if o.src == "special" and o.teacher then
+			src = ("%s: %s"):format(src, tostring(o.teacher))
+		end
+		out[#out + 1] = ("Other way: %s, +%s (%s)"):format(
+			tostring(o.name or o.spell),
+			env.money(math.max(0, o.extra or 0)),
+			src
+		)
+	end
+	return out
+end
+
+-- The materials of a craft step: what it takes from the bags (have/need) and what it buys (where, price). listed:
+-- the items on the plan's shopping list (a set), whose buy rows point to it instead of naming a place and a price.
+local function craftMats(st, env, listed)
 	local byItem, order = {}, {}
 	local function row(item)
 		local r = byItem[item]
@@ -129,7 +193,9 @@ local function craftMats(st, env)
 	end
 	for _, r in ipairs(order) do
 		r.covered = r.buy == nil
-		if r.buy then
+		if r.buy and listed and listed[r.item] then
+			r.right = ("%d/%d, on the list"):format(math.min(r.have, r.need), r.need)
+		elseif r.buy then
 			r.right = ("buy %d, %s %s"):format(r.buy.count, r.buy.where, env.money(r.buy.cost))
 		else
 			r.right = ("%d/%d"):format(math.min(r.have, r.need), r.need)
@@ -139,10 +205,25 @@ local function craftMats(st, env)
 end
 
 -- The Next card of a planner step.
-local function nextCard(st, env)
+local WHERE_RANK = { trainer = "at the trainer", book = "from a book", special = "special NPC / dungeon" }
+
+local function nextCard(st, env, listed)
 	local money = env.money
-	local card = { key = stepKey(st), kind = st.kind, spell = st.spell, mats = {}, notes = {} }
-	if st.kind == "gap" then
+	local card = { key = stepKey(st), kind = st.kind, spell = st.spell, mats = {}, notes = {}, others = {} }
+	if st.kind == "trainRank" then
+		card.key = "trainRank:" .. tostring(st.cap)
+		card.color = "gold"
+		card.name = ("Train %s (%s)"):format(st.name or "the next rank", known(st.cap))
+		card.verb = V.rankTerms(st, env)
+		card.gain = st.skill and ("needs skill %d"):format(st.skill) or "skill needed unknown"
+		card.cost = st.where and (WHERE_RANK[st.where] or tostring(st.where)) or "where unknown"
+		if st.at and st.by then
+			card.notes[#card.notes + 1] = ("Train it between %d and %d"):format(st.at, st.by)
+		elseif st.by then
+			card.notes[#card.notes + 1] = ("Train it before %d"):format(st.by)
+		end
+		return card
+	elseif st.kind == "gap" then
 		card.color = "warn"
 		card.name = ("Nothing gives skill from %d to %d"):format(st.from, st.to)
 		card.verb = st.why
@@ -151,12 +232,15 @@ local function nextCard(st, env)
 		card.color = "gold"
 		card.name = st.name
 		card.verb = ("Train it at the trainer, from %d"):format(st.at)
+		if st.unchecked then
+			card.cost = V.UNCHECKED
+		end
 		return card
 	elseif st.kind == "buyRecipe" then
 		card.color = "gold"
 		card.item = st.item
 		card.name = env.nameOf(st.item, "Recipe: " .. tostring(st.name))
-		card.verb = ("Buy it on the AH for %s"):format(money(st.price))
+		card.verb = st.owned and "In your bags: learn it" or ("Buy it on the AH for %s"):format(money(st.price))
 		card.gain = ("learn at %d"):format(st.learn or 0)
 		if st.saves then
 			card.cost = ("saves %s over the plan without it"):format(money(st.saves))
@@ -178,7 +262,16 @@ local function nextCard(st, env)
 	if st.costPt then
 		card.cost = ("%s a point"):format(money(st.costPt))
 	end
-	card.mats = craftMats(st, env)
+	card.mats = craftMats(st, env, listed)
+	if st.rankUp then
+		local up = st.rankUp
+		card.notes[#card.notes + 1] = ("Train %s between %s and %s"):format(
+			up.name or "the next rank",
+			known(up.at),
+			known(up.by)
+		)
+	end
+	card.others = V.otherLines(st.others, env, 3)
 	card.pre = {}
 	for _, p in ipairs(st.pre or {}) do
 		local name = env.nameOf(p.item)
@@ -191,6 +284,16 @@ local function nextCard(st, env)
 			st.alt.name,
 			money(st.alt.extra)
 		)
+	end
+	if st.expected then
+		-- planner rule 1: the buys cover a bad-luck run; the mean is what it usually takes
+		card.notes[#card.notes + 1] = ("Bought for a bad-luck run: usually %d crafts, up to %d"):format(
+			math.ceil(st.expected - 1e-6),
+			st.crafts
+		)
+	end
+	if st.committed then
+		card.notes[#card.notes + 1] = ("On your AH list: this recipe holds until %d"):format(math.floor(st.to or 0))
 	end
 	local tags = {}
 	for _, t in ipairs(st.tags or {}) do
@@ -210,8 +313,20 @@ end
 local function laterRow(n, st, env)
 	if st.kind == "gap" then
 		return { n = n, color = "warn", text = "No recipe gives skill", right = ("%d to %d"):format(st.from, st.to) }
+	elseif st.kind == "trainRank" then
+		return {
+			n = n,
+			color = "gold",
+			text = ("Train %s (%s)"):format(st.name or "the next rank", known(st.cap)),
+			right = V.rankTerms(st, env),
+		}
 	elseif st.kind == "train" then
-		return { n = n, color = "gold", text = "Train " .. st.name, right = ("at %d"):format(st.at) }
+		return {
+			n = n,
+			color = "gold",
+			text = "Train " .. st.name .. (st.unchecked and (", " .. V.UNCHECKED) or ""),
+			right = ("at %d"):format(st.at),
+		}
 	elseif st.kind == "buyRecipe" then
 		return {
 			n = n,
@@ -439,6 +554,283 @@ function V.buyAction(want, env)
 	return a
 end
 
+-- The AH trip as a block for the card: { title, rows = { { item, name, right, recipe } }, total, to, route, key }.
+-- `saved` is the trip list the user already keeps (env.savedTrip), shown as such.
+function V.tripBlock(trip, env, saved)
+	if not trip or #trip.rows == 0 then
+		return nil
+	end
+	local b = {
+		rows = {},
+		total = trip.total,
+		to = trip.to,
+		route = trip.route,
+		commit = trip.commit,
+		saved = saved ~= nil,
+	}
+	local ENDS = { train = "the trainer", gap = "a gap", gold = "your gold", cap = "the cap" }
+	b.title = ("One AH trip: %s, covers to %d (up to %s)"):format(
+		env.money(trip.total),
+		math.floor(trip.to or 0),
+		ENDS[trip.ends] or tostring(trip.ends)
+	)
+	for _, r in ipairs(trip.rows) do
+		local count = r.buffer > 0 and ("%d (+%d spare)"):format(r.count, r.buffer) or tostring(r.total)
+		b.rows[#b.rows + 1] = {
+			item = r.item,
+			name = env.nameOf(r.item),
+			count = r.total,
+			each = r.each,
+			recipe = r.recipe,
+			right = ("%s, %s"):format(count, env.money(r.cost)),
+		}
+	end
+	return b
+end
+
+-- The trip-list button: "Add to AH list" away from the AH, or the list already kept.
+function V.tripAction(block)
+	if not block then
+		return nil
+	end
+	if block.saved then
+		return { id = "untrip", block = block, enabled = true, label = "On your AH list (click to drop it)" }
+	end
+	return {
+		id = "trip",
+		block = block,
+		enabled = true,
+		label = ("Add to AH list, %d items"):format(#block.rows),
+		tip = "Keeps this list: at the auction house it becomes buy rows.",
+	}
+end
+
+local PLACE = { trainer = "Trainer", vendor = "Vendor", ah = "Auction House" }
+
+-- A row's cost: its own total when the planner gives one, else unit price times count; nil when unknown.
+local function rowCost(r)
+	if r.kind == "trainRank" or r.kind == "train" or type(r.cost) == "number" then
+		return r.cost
+	end
+	if type(r.price) == "number" then
+		return r.price * (r.count or 1)
+	end
+	return nil
+end
+
+-- plan.shopping as blocks for the card, one per place in travel order (each place once):
+-- { { place, title, total, unknown, rows = { { item, name, right } } } }. nil when there is nothing to buy.
+function V.shoppingBlocks(shopping, env)
+	if type(shopping) ~= "table" then
+		return nil
+	end
+	local out, seen = {}, {}
+	local order = shopping.order or { "trainer", "vendor", "ah" }
+	for _, place in ipairs(order) do
+		local rows = shopping[place]
+		if not seen[place] and PLACE[place] and type(rows) == "table" and #rows > 0 then
+			seen[place] = true
+			local b = { place = place, rows = {}, total = 0, unknown = 0 }
+			for _, r in ipairs(rows) do
+				local cost = rowCost(r)
+				if cost then
+					b.total = b.total + cost
+				else
+					b.unknown = b.unknown + 1
+				end
+				local row = { item = r.item }
+				if place == "trainer" then
+					row.name = r.kind == "trainRank" and ("%s rank"):format(tostring(r.name)) or tostring(r.name)
+					if r.unchecked then
+						row.name = row.name .. ", " .. V.UNCHECKED
+					end
+					row.right = ("at %s, %s"):format(known(r.skill), cost and env.money(cost) or "cost unknown")
+				else
+					local name = env.nameOf(r.item, r.name)
+					if place == "vendor" and type(r.merchant) == "string" then
+						name = ("%s (%s)"):format(name, r.merchant)
+					end
+					row.name = name
+					row.right = ("%d, %s"):format(r.count or 0, cost and env.money(cost) or "price unknown")
+				end
+				b.rows[#b.rows + 1] = row
+			end
+			b.title = ("%s: %s%s"):format(
+				PLACE[place],
+				env.money(b.total),
+				b.unknown > 0 and (" + %d unknown"):format(b.unknown) or ""
+			)
+			out[#out + 1] = b
+		end
+	end
+	return #out > 0 and out or nil
+end
+
+-- The AH block of plan.shopping as the list the "Add to AH list" button keeps (ns.saveTrip): rows in the trip
+-- list's shape ({ item, name, count, each, recipe = pattern }), commit and target from plan.trip.
+function V.shoppingTrip(p, env, saved)
+	local rows = p.shopping and p.shopping.ah
+	if type(rows) ~= "table" or #rows == 0 then
+		return nil
+	end
+	local b = { rows = {}, total = 0, saved = saved ~= nil, prof = p.profKey }
+	for _, r in ipairs(rows) do
+		local each = type(r.price) == "number" and r.price or nil
+		b.rows[#b.rows + 1] = {
+			item = r.item,
+			name = env.nameOf(r.item, r.name),
+			count = r.count or 0,
+			each = each,
+			recipe = r.kind == "pattern" or nil,
+		}
+		b.total = b.total + (rowCost(r) or 0)
+	end
+	local trip = p.trip
+	if trip then
+		b.to, b.route, b.commit = trip.to, trip.route, trip.commit
+	end
+	return b
+end
+
+-- The hard stop when the next rank needs a higher character level: "Artisan needs level 35, you are 30".
+function V.capBlockLine(cb)
+	if type(cb) ~= "table" then
+		return nil
+	end
+	return ("%s needs level %s, you are %s"):format(
+		tostring(cb.name or "The next rank"),
+		known(cb.level),
+		known(cb.have)
+	)
+end
+
+------------------------------------------------------------------------------------------------- the AH buy rows
+
+-- One AH list row (Logic.ahList) at the open AH. live: what the AH said about the item (UI.lua keeps it):
+-- { state = "searching"|"listed"|"quoting"|"quoted"|"buying"|"bought"|"failed"|"unavailable", kind = "commodity"|
+-- "item", results, quote = { unit, total }, qty, err }. env: money, nameOf, gold() (optional), busy (the item of the
+-- purchase in flight, or nil).
+-- Returns { item, name, right, note, warn, skip, action = { id, item, qty, auctionID, buyout, cost, enabled, label,
+-- tip } }. skip: sold out or overpriced and not for a committed step, so the next plan may go without it.
+function V.ahRow(row, live, env)
+	local money = env.money
+	local name = env.nameOf(row.item, row.name)
+	local out = { item = row.item, name = ("%s x%d"):format(name, row.count), right = "", committed = row.committed }
+	local act = { item = row.item, enabled = false }
+	out.action = act
+	local state = live and live.state or "waiting"
+	local problem -- "sold out" or "overpriced": the row may go
+	if state == "waiting" or state == "searching" then
+		out.right = "searching"
+		act.id, act.label = "ahWait", "Searching the AH"
+		return out
+	end
+	if state == "bought" then
+		out.right = "bought"
+		act.id, act.label = "ahDone", ("Bought %d"):format(live.qty or row.count)
+		return out
+	end
+	if state == "unavailable" then
+		out.note = "The price changed or it sold out while you looked."
+		act.id, act.enabled, act.label = "ahSearch", true, "Search again"
+		return out
+	end
+	local estimate = row.each
+	if live.kind == "item" then
+		local best = ns.Logic.cheapestBuyout(live.results)
+		if not best then
+			problem = "sold out"
+			out.right = "none with a buyout"
+		else
+			local verdict, ratio = ns.Logic.ahVerdict(estimate, best.buyout / math.max(1, best.quantity))
+			out.right = money(best.buyout)
+			if verdict == "over" then
+				problem = "overpriced"
+				out.warn = ("%.1fx the plan's %s"):format(ratio, money(estimate))
+			end
+			act.id, act.auctionID, act.buyout, act.cost = "ahBid", best.auctionID, best.buyout, best.buyout
+			act.qty = best.quantity
+			act.enabled = true
+			act.label = (verdict == "over" and "Buy anyway for %s" or "Buy for %s"):format(money(best.buyout))
+		end
+	else
+		local q = ns.Logic.commodityQuote(live.results, row.count)
+		if q.qty == 0 then
+			problem = "sold out"
+			out.right = "none listed"
+		else
+			local verdict, ratio = ns.Logic.ahVerdict(estimate, q.avg)
+			out.right = ("%s each, %s"):format(money(q.unit), money(q.total))
+			if q.qty < row.count then
+				out.note = ("Only %d on the AH."):format(q.available)
+			end
+			if verdict == "over" then
+				problem = "overpriced"
+				out.warn = ("%.1fx the plan's %s each"):format(ratio, money(estimate))
+			end
+			act.id, act.qty, act.cost, act.enabled = "ahStart", q.qty, q.total, true
+			act.label = (verdict == "over" and "Buy anyway: %d for %s" or "Buy %d for %s"):format(q.qty, money(q.total))
+		end
+		if state == "quoting" then
+			act.id, act.enabled, act.label = "ahWait", false, "Getting the price"
+		elseif state == "quoted" and live.quote then
+			local total = live.quote.total
+			act.id, act.qty, act.cost, act.enabled = "ahConfirm", live.qty, total, true
+			act.label = ("Confirm %d for %s"):format(live.qty or 0, money(total))
+			local v, ratio = ns.Logic.ahVerdict(estimate, live.quote.unit)
+			if v == "over" then
+				problem = "overpriced"
+				out.warn = ("%.1fx the plan's %s each"):format(ratio, money(estimate))
+			end
+		end
+	end
+	if state == "buying" then
+		act.id, act.enabled, act.label = "ahWait", false, "Buying"
+	elseif state == "failed" then
+		out.note = live.err or "The purchase failed."
+	end
+	if problem then
+		local msg = problem == "sold out" and "Sold out." or "Overpriced."
+		if row.committed then
+			-- planner rule 3: a committed step's buy never drops silently
+			out.note = msg .. " For a step you committed to: it stays on the list (drop the AH list to replan)."
+		else
+			out.note = msg .. " The next plan goes without it."
+			out.skip = problem
+		end
+		if problem == "sold out" then
+			act.id, act.enabled, act.label = "ahSearch", true, "Search again"
+		end
+	end
+	-- one purchase at a time, every step from a click: a row waits while another is in flight
+	if act.enabled and env.busy and env.busy ~= row.item then
+		act.enabled, act.label = false, "Wait: another buy is in progress"
+	elseif act.enabled and act.id ~= "ahSearch" and env.gold and act.cost then
+		local gold = env.gold()
+		if type(gold) == "number" and gold < act.cost then
+			act.enabled, act.label = false, ("Not enough gold: %s needed"):format(money(act.cost))
+		end
+	end
+	return out
+end
+
+-- The AH panel: { title, rows, empty }. list: Logic.ahList; live[item]: V.ahRow's live.
+function V.ahPanel(list, live, env)
+	local d = { rows = {} }
+	local est = 0
+	for _, r in ipairs(list or {}) do
+		est = est + (r.each or 0) * r.count
+		d.rows[#d.rows + 1] = V.ahRow(r, live and live[r.item], env)
+	end
+	if #d.rows == 0 then
+		d.title = "SkillupHelper: your AH list is empty"
+		d.empty = "Add a list from the profession panel's Next card (Add to AH list)."
+	else
+		d.title = ("SkillupHelper AH list: %d items, plan %s"):format(#d.rows, env.money(est))
+	end
+	return d
+end
+
 -- The buttons of a Next card: { { id = "craft", spell, count, enabled, label, tip }, { id = "open", ... } }, or nil
 -- and why when the card gets none (not a craft, the recipe is not learned, the client gave no count).
 -- "Craft N" casts min(the step's crafts, what the bags allow now); with nothing craftable it stays, inert, and its
@@ -479,6 +871,22 @@ function V.actions(card, env)
 	return out
 end
 
+-- The "Show recipe" control of a plan step row: { id = "open", spell, enabled, label, tip }, or nil when the row
+-- gets none. Only craft steps whose recipe is learned (env.craftable answers a count) qualify, and only beside
+-- Blizzard's window: TSM's window does not follow C_TradeSkillUI.OpenRecipe, so the control is hidden there.
+function V.rowOpen(st, env)
+	if type(st) ~= "table" or st.kind ~= "craft" or type(st.spell) ~= "number" then
+		return nil
+	end
+	if env.dock ~= "blizzard" or type(env.craftable) ~= "function" then
+		return nil
+	end
+	if type(env.craftable(st.spell)) ~= "number" then
+		return nil
+	end
+	return { id = "open", spell = st.spell, enabled = true, label = "Show", tip = "Show this recipe in the window" }
+end
+
 -- The panel's height for `content` under `chrome` (header and margins), up to `limit` (the docked window's height):
 -- as tall as what it shows, and scrolling only when that does not fit.
 function V.fit(content, chrome, limit)
@@ -516,16 +924,67 @@ function V.describe(m, env)
 	local p = m.planner
 	if p then
 		d.header.stale = staleLine(p)
-		d.next = p.steps[1] and nextCard(p.steps[1], env)
+		local shop = V.shoppingBlocks(p.shopping, env)
+		local listed
+		if shop then
+			listed = {}
+			for _, place in ipairs({ "vendor", "ah" }) do
+				for _, r in ipairs(p.shopping[place] or {}) do
+					listed[r.item or false] = true
+				end
+			end
+		end
+		d.next = p.steps[1] and nextCard(p.steps[1], env, listed)
+		local saved = env.savedTrip and env.savedTrip(p.profKey)
+		local cb = V.capBlockLine(p.capBlock)
+		if cb then
+			d.capBlock = cb
+			d.notice = d.notice and (cb .. "\n" .. d.notice) or cb
+		end
+		if d.next and shop then
+			-- one block per place in travel order; the AH block is also what "Add to AH list" keeps
+			d.next.blocks = shop
+			-- the list "Add to AH list" keeps: plan.trip when the trip starts now (as before), else the AH block
+			if p.trip and p.trip.fromStep == 1 then
+				d.next.trip = V.tripBlock(p.trip, env, saved)
+			elseif not p.trip then
+				d.next.trip = V.shoppingTrip(p, env, saved)
+			end
+			if d.next.trip then
+				d.next.trip.prof = p.profKey
+			end
+		elseif d.next and p.trip and p.trip.fromStep == 1 then
+			d.next.trip = V.tripBlock(p.trip, env, saved)
+			if d.next.trip then
+				d.next.trip.prof = p.profKey
+				d.next.blocks = { d.next.trip }
+			end
+		elseif p.trip and not shop then
+			d.footer[#d.footer + 1] = ("AH trip at step %d: %s, covers to %d"):format(
+				p.trip.fromStep,
+				env.money(p.trip.total),
+				math.floor(p.trip.to or 0)
+			)
+		end
 		for i = 2, #p.steps do
 			if #d.later >= V.MAX_LATER then
 				d.later[#d.later + 1] =
 					{ n = nil, color = "ash", text = ("and %d more steps"):format(#p.steps - i + 1) }
 				break
 			end
-			d.later[#d.later + 1] = laterRow(i, p.steps[i], env)
+			local row = laterRow(i, p.steps[i], env)
+			row.open = V.rowOpen(p.steps[i], env)
+			d.later[#d.later + 1] = row
 		end
+		local tripLine = d.footer[1]
 		d.footer = footerLines(p, env)
+		if tripLine then
+			table.insert(d.footer, 1, tripLine)
+		end
+		local cov = p.coverage and p.coverage.to
+		if type(cov) == "number" and (not m.maxSkill or cov < m.maxSkill) then
+			table.insert(d.footer, 1, ("Data/Plan.lua covers to %d"):format(cov))
+		end
 		if not d.next then
 			d.empty = "Nothing gives skill in range: every known recipe is grey."
 		end
@@ -559,6 +1018,11 @@ function V.describe(m, env)
 	if nx then
 		-- actions read every reagent (a buy row past the cut still blocks Craft); only the display is cut
 		nx.actions, nx.actionsWhy = V.actions(nx, env)
+		local ta = V.tripAction(nx.trip)
+		if ta then
+			nx.actions = nx.actions or {}
+			table.insert(nx.actions, 1, ta)
+		end
 	end
 	if nx and #nx.mats > V.MAX_MATS then
 		for k = #nx.mats, V.MAX_MATS + 1, -1 do
@@ -594,8 +1058,17 @@ function V.text(d)
 		for _, mt in ipairs(nx.mats) do
 			add(("%s %s"):format(mt.name, mt.right))
 		end
+		for _, b in ipairs(nx.blocks or {}) do
+			add(b.title)
+			for _, r in ipairs(b.rows) do
+				add(("  %s %s"):format(r.name, r.right))
+			end
+		end
 		for _, n in ipairs(nx.notes) do
 			add(n)
+		end
+		for _, o in ipairs(nx.others or {}) do
+			add(o)
 		end
 		add(nx.alt)
 		add(nx.tags)
@@ -605,7 +1078,10 @@ function V.text(d)
 	end
 	add(d.empty)
 	for _, r in ipairs(d.later) do
-		add(((r.n and (r.n .. " ") or "") .. r.text .. (r.right and (" " .. r.right) or "")))
+		add(
+			((r.n and (r.n .. " ") or "") .. r.text .. (r.right and (" " .. r.right) or ""))
+				.. (r.open and (" [" .. r.open.label .. "]") or "")
+		)
 	end
 	for _, f in ipairs(d.footer) do
 		add(f)
