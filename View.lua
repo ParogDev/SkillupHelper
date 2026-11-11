@@ -618,8 +618,73 @@ local function rowCost(r)
 	return nil
 end
 
--- plan.shopping as blocks for the card, one per place in travel order (each place once):
--- { { place, title, total, unknown, rows = { { item, name, right } } } }. nil when there is nothing to buy.
+local KIND_RANK = { trainer = 1, vendor = 2, ah = 3 }
+
+-- Blocks ordered by city: the city whose nearest stop is closest first, a city of unknown distance after those, and
+-- blocks with no known city last; inside a city the travel order (trainer, vendor, auction house). Pure.
+-- blocks: { { place, city, dist, rank } }, rank = the block's position in travel order. Returns a new list.
+function V.orderByCity(blocks)
+	local cityDist, cityFirst = {}, {}
+	for _, b in ipairs(blocks) do
+		if b.city then
+			cityFirst[b.city] = math.min(cityFirst[b.city] or b.rank, b.rank)
+			if b.dist and (not cityDist[b.city] or b.dist < cityDist[b.city]) then
+				cityDist[b.city] = b.dist
+			end
+		end
+	end
+	local out = {}
+	for i, b in ipairs(blocks) do
+		out[i] = b
+	end
+	table.sort(out, function(a, b)
+		if a.city ~= b.city then
+			if not a.city or not b.city then
+				return a.city ~= nil
+			end
+			local da, db = cityDist[a.city], cityDist[b.city]
+			if (da ~= nil) ~= (db ~= nil) then
+				return da ~= nil
+			elseif da and da ~= db then
+				return da < db
+			elseif cityFirst[a.city] ~= cityFirst[b.city] then
+				return cityFirst[a.city] < cityFirst[b.city]
+			end
+			return a.city < b.city
+		end
+		if (KIND_RANK[a.place] or 9) ~= (KIND_RANK[b.place] or 9) then
+			return (KIND_RANK[a.place] or 9) < (KIND_RANK[b.place] or 9)
+		end
+		return a.rank < b.rank
+	end)
+	return out
+end
+
+-- Splits a place's rows by city. env.where(place, row) -> city, yards (Guide.lua `place` of the nearest NPC that
+-- serves the row), or nil when no NPC with a place is known. Without env.where every row is one group, no city.
+local function byCity(place, rows, env)
+	local groups, index = {}, {}
+	for _, r in ipairs(rows) do
+		local city, dist
+		if type(env.where) == "function" then
+			city, dist = env.where(place, r)
+		end
+		local key = city or false
+		local gr = index[key]
+		if not gr then
+			gr = { city = city, dist = dist, rows = {} }
+			index[key] = gr
+			groups[#groups + 1] = gr
+		elseif dist and (not gr.dist or dist < gr.dist) then
+			gr.dist = dist
+		end
+		gr.rows[#gr.rows + 1] = r
+	end
+	return groups
+end
+
+-- plan.shopping as blocks for the card, one per place and city, ordered by city (V.orderByCity), each city in travel
+-- order: { { place, city, title, total, unknown, rows = { { item, name, right } } } }. nil when there is nothing to buy.
 function V.shoppingBlocks(shopping, env)
 	if type(shopping) ~= "table" then
 		return nil
@@ -627,43 +692,58 @@ function V.shoppingBlocks(shopping, env)
 	local out, seen = {}, {}
 	local order = shopping.order or { "trainer", "vendor", "ah" }
 	for _, place in ipairs(order) do
-		local rows = shopping[place]
-		if not seen[place] and PLACE[place] and type(rows) == "table" and #rows > 0 then
+		local all = shopping[place]
+		if not seen[place] and PLACE[place] and type(all) == "table" and #all > 0 then
 			seen[place] = true
-			local b = { place = place, rows = {}, total = 0, unknown = 0 }
-			for _, r in ipairs(rows) do
-				local cost = rowCost(r)
-				if cost then
-					b.total = b.total + cost
-				else
-					b.unknown = b.unknown + 1
-				end
-				local row = { item = r.item }
-				if place == "trainer" then
-					row.name = r.kind == "trainRank" and ("%s rank"):format(tostring(r.name)) or tostring(r.name)
-					if r.unchecked then
-						row.name = row.name .. ", " .. V.UNCHECKED
+			for _, gr in ipairs(byCity(place, all, env)) do
+				local rows = gr.rows
+				local b = {
+					place = place,
+					city = gr.city,
+					dist = gr.dist,
+					rank = #out + 1,
+					rows = {},
+					total = 0,
+					unknown = 0,
+				}
+				for _, r in ipairs(rows) do
+					local cost = rowCost(r)
+					if cost then
+						b.total = b.total + cost
+					else
+						b.unknown = b.unknown + 1
 					end
-					row.right = ("at %s, %s"):format(known(r.skill), cost and env.money(cost) or "cost unknown")
-				else
-					local name = env.nameOf(r.item, r.name)
-					if place == "vendor" and type(r.merchant) == "string" then
-						name = ("%s (%s)"):format(name, r.merchant)
+					local row = { item = r.item }
+					if place == "trainer" then
+						row.name = r.kind == "trainRank" and ("%s rank"):format(tostring(r.name)) or tostring(r.name)
+						if r.unchecked then
+							row.name = row.name .. ", " .. V.UNCHECKED
+						end
+						row.right = ("at %s, %s"):format(known(r.skill), cost and env.money(cost) or "cost unknown")
+					else
+						local name = env.nameOf(r.item, r.name)
+						if place == "vendor" and type(r.merchant) == "string" then
+							name = ("%s (%s)"):format(name, r.merchant)
+						end
+						row.name = name
+						row.right = ("%d, %s"):format(r.count or 0, cost and env.money(cost) or "price unknown")
 					end
-					row.name = name
-					row.right = ("%d, %s"):format(r.count or 0, cost and env.money(cost) or "price unknown")
+					b.rows[#b.rows + 1] = row
 				end
-				b.rows[#b.rows + 1] = row
+				b.title = ("%s%s: %s%s"):format(
+					PLACE[place],
+					b.city and (", " .. b.city) or "",
+					env.money(b.total),
+					b.unknown > 0 and (" + %d unknown"):format(b.unknown) or ""
+				)
+				out[#out + 1] = b
 			end
-			b.title = ("%s: %s%s"):format(
-				PLACE[place],
-				env.money(b.total),
-				b.unknown > 0 and (" + %d unknown"):format(b.unknown) or ""
-			)
-			out[#out + 1] = b
 		end
 	end
-	return #out > 0 and out or nil
+	if #out == 0 then
+		return nil
+	end
+	return V.orderByCity(out)
 end
 
 -- The AH block of plan.shopping as the list the "Add to AH list" button keeps (ns.saveTrip): rows in the trip

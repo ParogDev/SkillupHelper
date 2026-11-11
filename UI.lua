@@ -157,6 +157,7 @@ function UI.env()
 		gold = GetMoney,
 		bagRoom = UI.bagRoom,
 		savedTrip = ns.savedTrip,
+		where = ns.GuideUI and ns.GuideUI.where or nil,
 	}
 end
 
@@ -525,6 +526,124 @@ local function playConsumed(row, units)
 	count("consumed")
 end
 
+---------------------------------------------------------------------------------------------------------- guide strip
+-- One row on the Next card that repeats the guide chip's arrow, name and distance (GuideUI.lua decides, Guide.strip
+-- words it). Plain card content: it takes no part in docking, and the Target button stays on the chip.
+
+local STRIP_W = INNER - 2 * PAD - 2
+local STRIP_ARROW_ATLAS, STRIP_ARROW_FILE = "MiniMap-QuestArrow", "Interface\\Minimap\\MinimapArrow"
+local STRIP_STAR = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_1"
+local STRIP_CIRCLE = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
+
+local function newStrip(card)
+	local s = CreateFrame("Button", nil, card)
+	s:SetSize(STRIP_W, 28)
+	s:RegisterForClicks("LeftButtonUp")
+	s.hover = s:CreateTexture(nil, "BACKGROUND")
+	s.hover:SetAllPoints()
+	fill(s.hover, "line", 0.5)
+	s.hover:Hide()
+	s.hair = s:CreateTexture(nil, "BORDER")
+	s.hair:SetHeight(1)
+	s.hair:SetPoint("TOPLEFT")
+	s.hair:SetPoint("TOPRIGHT")
+	fill(s.hair, "line")
+	s.arrow = s:CreateTexture(nil, "ARTWORK")
+	s.arrow:SetSize(14, 14)
+	s.arrow:SetPoint("TOPLEFT", 0, -7)
+	s.arrowAtlas = C_Texture and C_Texture.GetAtlasInfo and C_Texture.GetAtlasInfo(STRIP_ARROW_ATLAS) ~= nil
+	s.dot = s:CreateTexture(nil, "ARTWORK")
+	s.dot:SetSize(8, 8)
+	s.dot:SetPoint("CENTER", s.arrow, "CENTER")
+	s.dot:SetTexture(WHITE)
+	local m = s:CreateMaskTexture()
+	m:SetTexture(STRIP_CIRCLE, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+	m:SetAllPoints(s.dot)
+	s.dot:AddMaskTexture(m)
+	s.ar = text(s, "GameFontHighlightSmall", 11)
+	s.ar:SetPoint("TOPRIGHT", 0, -7)
+	s.ar:SetJustifyH("RIGHT")
+	s.ar:SetWordWrap(false)
+	s.a = text(s, "GameFontHighlightSmall", 11)
+	s.a:SetPoint("TOPLEFT", 20, -7)
+	s.a:SetPoint("RIGHT", s.ar, "LEFT", -8, 0)
+	s.a:SetWordWrap(false)
+	s.b = text(s, "GameFontHighlightSmall", 10)
+	s.b:SetPoint("TOPLEFT", s.a, "BOTTOMLEFT", 0, -2)
+	s.b:SetWidth(STRIP_W - 20)
+	s.b:SetWordWrap(false)
+	s:SetScript("OnEnter", function(self)
+		self.hover:Show()
+		showTip(self, self.tip)
+	end)
+	s:SetScript("OnLeave", function(self)
+		self.hover:Hide()
+		hideTip(self)
+	end)
+	s:SetScript("OnClick", function()
+		UI.stats.clicks.strip = (UI.stats.clicks.strip or 0) + 1
+		if ns.GuideUI and ns.GuideUI.stripClick then
+			ns.guard("strip click", ns.GuideUI.stripClick)
+		end
+	end)
+	s:Hide()
+	return s
+end
+
+-- Paints a strip from Guide.strip's table; collapsed = the Buy button carries the action ("You are here" alone).
+local function paintStrip(s, g, color, collapsed)
+	s.a:SetText(g.a or "")
+	setColor(s.a, g.phase == "here" and "green" or (g.phase == "unknown" or g.phase == "notnow") and "ash" or "bone")
+	s.ar:SetText(g.ar or "")
+	setColor(s.ar, g.arTint == "ash" and "ash" or g.arTint or "ash")
+	local b = not collapsed and g.b or nil
+	s.b:SetText(b or "")
+	setColor(s.b, "ash")
+	s.b:SetShown(b ~= nil)
+	s.tip = g.tip
+	local icon, tint = g.icon, g.tint
+	if icon == s.icon and tint == s.tint and color == s.color then
+		return b ~= nil
+	end
+	s.tint, s.color = tint, color
+	if icon == "arrow" then
+		if s.arrowAtlas then
+			s.arrow:SetAtlas(STRIP_ARROW_ATLAS)
+		else
+			s.arrow:SetTexture(STRIP_ARROW_FILE)
+		end
+		s.arrow:SetDesaturated(true)
+		local tc = tint == "bone" and "bone" or (tint or color or "bone")
+		s.arrow:SetVertexColor(rgb(tc))
+		s.arrow:Show()
+		s.dot:Hide()
+	elseif icon == "star" then
+		s.arrow:SetTexture(STRIP_STAR)
+		s.arrow:SetDesaturated(false)
+		s.arrow:SetVertexColor(1, 1, 1)
+		s.arrow:SetRotation(0)
+		s.arrow:Show()
+		s.dot:Hide()
+	elseif icon == "dot" then
+		s.arrow:Hide()
+		s.dot:SetVertexColor(rgb(tint or "green"))
+		s.dot:Show()
+	else
+		s.arrow:Hide()
+		s.dot:Hide()
+	end
+	s.icon = icon
+	return b ~= nil
+end
+
+-- The strip's height for a Guide.strip table: 28, 40 with a second line, 0 when there is none.
+local function stripHeight(g, collapsed)
+	if not g then
+		return 0
+	end
+	return (g.b and not collapsed) and 40 or 28
+end
+
 ---------------------------------------------------------------------------------------------------------- the card
 
 local function newCard(parent)
@@ -578,6 +697,7 @@ local function newCard(parent)
 	card.blockTitles = {}
 	card.tripRows = {}
 	card.buttons = { trip = newButton(card), buy = newButton(card), craft = newButton(card), open = newButton(card) }
+	card.guide = newStrip(card)
 
 	-- slide: in from the right with a fade, out to the left
 	local ig = card:CreateAnimationGroup()
@@ -757,6 +877,26 @@ local function fillCard(card, c, consumed)
 	for _, a in ipairs(c.actions or {}) do
 		byId[a.id] = a
 	end
+
+	-- the guide strip: where to go for this step, after the notes and before the buttons
+	local gs = ns.GuideUI and ns.GuideUI.strip and ns.GuideUI.strip() or nil
+	local collapsed = gs ~= nil and gs.phase == "here" and byId.buy ~= nil
+	card.stripShape = gs and (stripHeight(gs, collapsed) .. ":" .. tostring(byId.buy ~= nil)) or "none"
+	card.stripBuy = byId.buy ~= nil
+	card.stripColor = col
+	if gs then
+		top = top + 8
+		local s = card.guide
+		s:ClearAllPoints()
+		s:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		s:SetHeight(stripHeight(gs, collapsed))
+		paintStrip(s, gs, col, collapsed)
+		s:Show()
+		top = top + stripHeight(gs, collapsed)
+	else
+		card.guide:Hide()
+	end
+
 	local ta = byId.trip or byId.untrip
 	if ta then
 		top = top + 10
@@ -1312,6 +1452,38 @@ function UI.show(model)
 	local d = ns.View.describe(model, UI.env())
 	UI.draw(d, UI.last)
 	UI.last = d
+end
+
+-- The guide's tick (GuideUI, 10 Hz and on events): repaints the live card's strip in place, and redraws the panel
+-- only when the strip appears, goes, or changes height.
+function UI.guideStrip(g)
+	local f = UI.frame
+	if not f or not f:IsShown() or not UI.last or not UI.last.next then
+		return
+	end
+	local card = f.cards[f.current]
+	if not card or not card.live then
+		return
+	end
+	local collapsed = g ~= nil and g.phase == "here" and card.stripBuy
+	local shape = g and (stripHeight(g, collapsed) .. ":" .. tostring(card.stripBuy)) or "none"
+	if shape ~= card.stripShape then
+		UI.stats.stripRelayouts = (UI.stats.stripRelayouts or 0) + 1
+		UI.draw(UI.last, UI.last)
+		return
+	end
+	if g then
+		paintStrip(card.guide, g, card.stripColor, collapsed)
+	end
+end
+
+-- The guide's eased arrow angle, every frame while the chip turns: the strip's arrow follows it.
+function UI.guideStripAngle(angle)
+	local f = UI.frame
+	local card = f and f:IsShown() and f.cards[f.current]
+	if card and card.live and card.guide:IsShown() and card.guide.icon == "arrow" then
+		card.guide.arrow:SetRotation(angle)
+	end
 end
 
 ------------------------------------------------------------------------------------------------------- the AH list
