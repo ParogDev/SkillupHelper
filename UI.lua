@@ -143,18 +143,26 @@ local BACKDROP = {
 -- free and movable where the user put it when there is no window to dock to.
 function UI.dock(target)
 	local f = UI.frame
-	if not f or f.dockedTo == target then
+	if not f then
+		return
+	end
+	if target then
+		local h = target:GetHeight()
+		f:SetHeight((h and h > 0) and math.max(300, math.min(600, h)) or 420)
+	end
+	-- false = free, so the first call with no target still anchors the panel
+	local key = target or false
+	if f.dockedTo == key then
 		return
 	end
 	f:ClearAllPoints()
 	if target then
 		f:SetPoint("TOPLEFT", target, "TOPRIGHT", 2, 0)
-		f:SetHeight(math.max(300, math.min(600, target:GetHeight() or 420)))
 	else
 		f:SetPoint("CENTER", UIParent, "CENTER", 300, 0)
 		f:SetHeight(420)
 	end
-	f.dockedTo = target
+	f.dockedTo = key
 end
 
 function UI.create()

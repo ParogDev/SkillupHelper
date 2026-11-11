@@ -290,6 +290,31 @@ describe("TSM docking", function()
 		assert.same("hidden", ns.TSM.status().lastCallback)
 	end)
 
+	it("anchors the panel free when there is no window, then docks and keeps one anchor", function()
+		local ns = load({})
+		local points = {}
+		ns.UI.frame = {
+			ClearAllPoints = function()
+				points = {}
+			end,
+			SetPoint = function(_, p, rel)
+				points[#points + 1] = { p, rel }
+			end,
+			SetHeight = function() end,
+		}
+		_G.UIParent = {}
+		ns.UI.dock(nil)
+		assert.same({ { "CENTER", _G.UIParent } }, points)
+		local target = {
+			GetHeight = function()
+				return 0
+			end,
+		}
+		ns.UI.dock(target)
+		ns.UI.dock(target)
+		assert.same({ { "TOPLEFT", target } }, points)
+	end)
+
 	it("names a missing TSM_API", function()
 		_G.TSM_API = nil
 		local ns = load({})

@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.1.1"
+ns.CODE_VERSION = "0.1.2"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -177,12 +177,12 @@ f:SetScript("OnEvent", function(_, event, arg1)
 		end
 	elseif event == "PLAYER_LOGIN" then
 		db.selftest = nil
-		ns.TSM.register()
 		ns.onTSMChanged = function()
 			if ns.tradeSkillOpen then
 				redock()
 			end
 		end
+		ns.TSM.register()
 		refreshSelftest()
 	elseif event == "PLAYER_LOGOUT" then
 		refreshSelftest()
