@@ -407,3 +407,43 @@ describe("View description", function()
 		assert.same({ "not your own profession window: NPC crafting" }, ns.View.text(d))
 	end)
 end)
+
+describe("AH trip on the Next card", function()
+	local function model(skill, plan)
+		return { skill = skill, maxSkill = 150, profession = "Leatherworking", planner = plan }
+	end
+
+	it("shows one list for the stretch with spares, and the Add to AH list button", function()
+		local ns = load()
+		local plan = ns.Planner.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 109, 150, {}))
+		plan.profKey = "Leatherworking"
+		local env = envOf(ns, {})
+		local d = ns.View.describe(model(109, plan), env)
+		local trip = d.next.trip
+		assert.is_truthy(trip.title:find("^One AH trip: "))
+		assert.equal("Leatherworking", trip.prof)
+		local light
+		for _, r in ipairs(trip.rows) do
+			if r.item == I.LIGHT then
+				light = r
+			end
+		end
+		assert.is_truthy(light.right:find("spare"))
+		assert.equal("trip", d.next.actions[1].id)
+		assert.is_truthy(d.next.actions[1].label:find("^Add to AH list"))
+
+		env.savedTrip = function(prof)
+			return prof == "Leatherworking" and {} or nil
+		end
+		assert.equal("untrip", ns.View.describe(model(109, plan), env).next.actions[1].id)
+	end)
+
+	it("a stock step that defers the trip says so, and the trip shows as a footer line", function()
+		local ns = load()
+		local plan = ns.Planner.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 112, 150, { [I.MEDIUM] = 96 }))
+		local d = ns.View.describe(model(112, plan), envOf(ns, { [I.MEDIUM] = 96 }))
+		assert.is_truthy(d.next.alt:find("^Saves an AH trip now"))
+		assert.is_nil(d.next.trip)
+		assert.is_truthy(d.footer[1]:find("^AH trip at step 2"))
+	end)
+end)

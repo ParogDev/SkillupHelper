@@ -445,7 +445,9 @@ describe("Worked examples", function()
 	end)
 
 	it("Leatherworking 109, 92 Medium Leather", function()
+		-- an AH trip worth nothing: the buy-first plan of the design note (the trip-cost case is in "AH trip")
 		local input = F.leather()
+		input.tripCost = 0
 		local plan = P.run(input)
 		print("\nLeatherworking 109 -> 150, 92 Medium Leather")
 		for _, l in ipairs(F.describe(plan, input.items)) do
@@ -471,5 +473,126 @@ describe("Worked examples", function()
 		for _, n in ipairs({ "Dark Leather Tunic", "Dark Leather Cloak", "Gray Leather Boots" }) do
 			assert.equal("wasteful", verdict(plan, n).verdict)
 		end
+	end)
+end)
+
+describe("AH trip", function()
+	local P
+	before_each(function()
+		P = load().Planner
+	end)
+
+	local function row(trip, item)
+		for _, r in ipairs(trip.rows) do
+			if r.item == item then
+				return r
+			end
+		end
+	end
+
+	-- What the bags hold after buying the whole trip list.
+	local function afterTrip(trip, have)
+		local bags = {}
+		for i, q in pairs(have or {}) do
+			bags[i] = q
+		end
+		for _, r in ipairs(trip.rows) do
+			bags[r.item] = (bags[r.item] or 0) + r.total
+		end
+		return bags
+	end
+
+	it("Leatherworking 109 to 115 on Light Leather: one trip, and a bad-luck run needs no second one", function()
+		local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 109, 150, {}))
+		local s1 = plan.steps[1]
+		assert.equal("Light Leather Pants", s1.name)
+		assert.equal("buy", s1.source)
+		local trip = plan.trip
+		assert.equal(1, trip.fromStep)
+		assert.equal("train", trip.ends) -- the pattern is bought on the same trip; the trainer ends it
+		local light = row(trip, I.LIGHT)
+		assert.equal(10 * s1.crafts, light.count)
+		-- the p90 buffer: mean plus 1.28 standard deviations of the crafts 109 to 115 take, in Light Leather
+		local mean, var = P.craftSpread(s1.from, s1.to, { y = 100, g = 130, k = 1 })
+		local extra = math.ceil(mean + P.TRIP_Z * math.sqrt(var) - s1.crafts - 1e-6)
+		assert.is_true(extra >= 2)
+		assert.equal(10 * extra, light.buffer)
+		assert.is_true(row(trip, I.PATTERN).recipe)
+		local total = 0
+		for _, r in ipairs(trip.rows) do
+			total = total + r.cost
+		end
+		assert.equal(total, trip.total)
+
+		-- bad luck: every planned craft done, the skill a point short of the step's end
+		local bags = afterTrip(trip)
+		for _, u in ipairs({ { I.LIGHT, 10 }, { I.HIDE, 1 } }) do
+			bags[u[1]] = bags[u[1]] - u[2] * s1.crafts
+		end
+		local short = math.floor(s1.to) - 1
+		local route = {}
+		for _, spell in ipairs(trip.route) do
+			route[spell] = true
+		end
+		assert.is_true(route[9195])
+		-- the pattern came on the same trip and waits in the bags for rank 115
+		local again = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, short, 150, bags, { route = route }))
+		assert.is_true(again.steps[2].kind == "buyRecipe" and again.steps[2].owned)
+		for _, l in ipairs(again.leftovers) do
+			assert.not_equal(I.PATTERN, l.item)
+		end
+		print(("\nAfter the trip and a bad-luck run, at %d"):format(short))
+		for _, l in ipairs(F.describe(again, F.input(F.LEATHER, {}, 1, 2).items)) do
+			print("  " .. l)
+		end
+		local a1 = again.steps[1]
+		assert.equal("Light Leather Pants", a1.name)
+		assert.is_false(P.needsAh(P.prepare(F.input(F.LEATHER, F.LEATHER_LEARNED, short, 150, bags)), a1))
+		assert.is_nil(again.trip) -- nothing sends the user back to the AH before the trainer
+	end)
+
+	it("the trip cost makes the stock route win at 112 instead of a third trip", function()
+		local input = F.input(F.LEATHER, F.LEATHER_LEARNED, 112, 150, { [I.MEDIUM] = 96 })
+		local free = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 112, 150, { [I.MEDIUM] = 96 }, { tripCost = 0 }))
+		assert.equal("Light Leather Pants", free.steps[1].name)
+		assert.equal("buy", free.steps[1].source)
+		local alt = free.steps[1].alt
+		assert.equal("Dark Leather Pants", alt.name)
+		assert.is_true(alt.extra < P.TRIP_COST)
+
+		local plan = P.run(input)
+		print("\nLeatherworking 112, 96 Medium Leather, trip cost 50s")
+		for _, l in ipairs(F.describe(plan, input.items)) do
+			print("  " .. l)
+		end
+		local s1 = plan.steps[1]
+		assert.equal("Dark Leather Pants", s1.name)
+		assert.equal("stock", s1.source)
+		assert.equal(alt.crafts, s1.crafts)
+		assert.same({ cost = P.TRIP_COST, extra = alt.extra, instead = "Light Leather Pants" }, s1.tripDeferred)
+		-- the pattern and the leather for the shoulders: one trip after the stock runs out
+		assert.equal("buyRecipe", plan.steps[2].kind)
+		assert.equal(2, plan.trip.fromStep)
+		assert.near(s1.to, plan.steps[3].from, 1e-9)
+		assert.equal("train", plan.trip.ends)
+	end)
+
+	it("a planned trip keeps the AH route: no stock detour mid-trip", function()
+		local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 112, 150, { [I.MEDIUM] = 96 }, { tripPlanned = true }))
+		assert.equal("Light Leather Pants", plan.steps[1].name)
+		assert.is_nil(plan.steps[1].tripDeferred)
+	end)
+
+	it("the trip stops where the gold on hand runs out, never before its first step", function()
+		local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 109, 150, {}, { gold = 1 }))
+		assert.equal("gold", plan.trip.ends)
+		assert.equal(1, plan.trip.toStep)
+		assert.is_nil(row(plan.trip, I.PATTERN))
+	end)
+
+	it("no AH buy ahead, no trip", function()
+		local only = { [2169] = F.LEATHER[2169] }
+		local plan = P.run(F.input(only, { [2169] = true }, 109, 125, { [I.MEDIUM] = 600 }))
+		assert.is_nil(plan.trip)
 	end)
 end)

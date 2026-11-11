@@ -102,6 +102,7 @@ local TAG_TEXT = {
 	["needs AH sale"] = "counts on selling the results on the AH",
 	["chance model"] = "the chance formula decides this one",
 	["prices from export"] = "some prices from the export",
+	["saves an AH trip"] = "stock first, the AH trip comes later",
 }
 
 local WHERE = { vendor = "vendor", ah = "AH" }
@@ -156,7 +157,7 @@ local function nextCard(st, env)
 		card.color = "gold"
 		card.item = st.item
 		card.name = env.nameOf(st.item, "Recipe: " .. tostring(st.name))
-		card.verb = ("Buy it on the AH for %s"):format(money(st.price))
+		card.verb = st.owned and "In your bags: learn it" or ("Buy it on the AH for %s"):format(money(st.price))
 		card.gain = ("learn at %d"):format(st.learn or 0)
 		if st.saves then
 			card.cost = ("saves %s over the plan without it"):format(money(st.saves))
@@ -190,6 +191,13 @@ local function nextCard(st, env)
 			st.alt.crafts,
 			st.alt.name,
 			money(st.alt.extra)
+		)
+	end
+	if st.tripDeferred then
+		card.alt = ("Saves an AH trip now: %s more than %s, less than a trip (%s)"):format(
+			money(st.tripDeferred.extra),
+			st.tripDeferred.instead,
+			money(st.tripDeferred.cost)
 		)
 	end
 	local tags = {}
@@ -428,7 +436,51 @@ function V.buyAction(want, env)
 	return a
 end
 
--- The buttons of a Next card: { { id = "craft", spell, count, enabled, label, tip }, { id = "open", ... } }, or nil
+-- The AH trip as a block for the card: { title, rows = { { item, name, right, recipe } }, total, to, route, key }.
+-- `saved` is the trip list the user already keeps (env.savedTrip), shown as such.
+function V.tripBlock(trip, env, saved)
+	if not trip or #trip.rows == 0 then
+		return nil
+	end
+	local b = { rows = {}, total = trip.total, to = trip.to, route = trip.route, saved = saved ~= nil }
+	local ENDS = { train = "the trainer", gap = "a gap", gold = "your gold", cap = "the cap" }
+	b.title = ("One AH trip: %s, covers to %d (up to %s)"):format(
+		env.money(trip.total),
+		math.floor(trip.to or 0),
+		ENDS[trip.ends] or tostring(trip.ends)
+	)
+	for _, r in ipairs(trip.rows) do
+		local count = r.buffer > 0 and ("%d (+%d spare)"):format(r.count, r.buffer) or tostring(r.total)
+		b.rows[#b.rows + 1] = {
+			item = r.item,
+			name = env.nameOf(r.item),
+			count = r.total,
+			each = r.each,
+			recipe = r.recipe,
+			right = ("%s, %s"):format(count, env.money(r.cost)),
+		}
+	end
+	return b
+end
+
+-- The trip-list button: "Add to AH list" away from the AH, or the list already kept.
+function V.tripAction(block)
+	if not block then
+		return nil
+	end
+	if block.saved then
+		return { id = "untrip", block = block, enabled = true, label = "On your AH list (click to drop it)" }
+	end
+	return {
+		id = "trip",
+		block = block,
+		enabled = true,
+		label = ("Add to AH list, %d items"):format(#block.rows),
+		tip = "Keeps this list: at the auction house it becomes buy rows.",
+	}
+end
+
+-- The buttons of a Next card:{ { id = "craft", spell, count, enabled, label, tip }, { id = "open", ... } }, or nil
 -- and why when the card gets none (not a craft, the recipe is not learned, the client gave no count).
 -- "Craft N" casts min(the step's crafts, what the bags allow now); with nothing craftable it stays, inert, and its
 -- label says what to do first. "Show recipe" selects the recipe in Blizzard's window only: TSM's window does not
@@ -506,6 +558,19 @@ function V.describe(m, env)
 	if p then
 		d.header.stale = staleLine(p)
 		d.next = p.steps[1] and nextCard(p.steps[1], env)
+		local saved = env.savedTrip and env.savedTrip(p.profKey)
+		if d.next and p.trip and p.trip.fromStep == 1 then
+			d.next.trip = V.tripBlock(p.trip, env, saved)
+			if d.next.trip then
+				d.next.trip.prof = p.profKey
+			end
+		elseif p.trip then
+			d.footer[#d.footer + 1] = ("AH trip at step %d: %s, covers to %d"):format(
+				p.trip.fromStep,
+				env.money(p.trip.total),
+				math.floor(p.trip.to or 0)
+			)
+		end
 		for i = 2, #p.steps do
 			if #d.later >= V.MAX_LATER then
 				d.later[#d.later + 1] =
@@ -514,7 +579,11 @@ function V.describe(m, env)
 			end
 			d.later[#d.later + 1] = laterRow(i, p.steps[i], env)
 		end
+		local tripLine = d.footer[1]
 		d.footer = footerLines(p, env)
+		if tripLine then
+			table.insert(d.footer, 1, tripLine)
+		end
 		if not d.next then
 			d.empty = "Nothing gives skill in range: every known recipe is grey."
 		end
@@ -548,6 +617,11 @@ function V.describe(m, env)
 	if nx then
 		-- actions read every reagent (a buy row past the cut still blocks Craft); only the display is cut
 		nx.actions, nx.actionsWhy = V.actions(nx, env)
+		local ta = V.tripAction(nx.trip)
+		if ta then
+			nx.actions = nx.actions or {}
+			table.insert(nx.actions, 1, ta)
+		end
 	end
 	if nx and #nx.mats > V.MAX_MATS then
 		for k = #nx.mats, V.MAX_MATS + 1, -1 do

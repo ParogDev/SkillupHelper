@@ -135,10 +135,24 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
 			have[item] = n
 		end
 	end
-	local result = ns.Planner.finish(bc.ctx, bc.baseline, have)
+	-- the AH trip list the user keeps for this profession: its recipes keep their levels until its skill is reached
+	local saved = settings.trips and settings.trips[prof.name]
+	local route
+	if saved and skill < (saved.to or 0) then
+		route = {}
+		for _, spell in ipairs(saved.route or {}) do
+			route[spell] = true
+		end
+	end
+	local result = ns.Planner.finish(bc.ctx, bc.baseline, have, {
+		tripCost = settings.tripCost or plan.tripCost,
+		route = route,
+		gold = GetMoney and GetMoney() or nil,
+	})
 	result.ms = clock() - t0
 	result.prices = pc.counts
 	result.ageHours = ns.TSM.ageHours(plan)
+	result.profKey = prof.name
 	return result
 end
 

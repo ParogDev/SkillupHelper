@@ -17,6 +17,8 @@ P.CRAFT_SAVING = 0.2 -- craft an intermediate only when that saves this share of
 P.MAX_RECIPE_BUYS = 3
 P.WASTEFUL = 1.1 -- a from-stock recipe more than 10% over the plan's cost per point is "wasteful"
 P.CANDS_PER_LEVEL = 6 -- stock candidates kept per level for the greedy fill
+P.TRIP_COST = 5000 -- copper: what one AH trip is worth in the user's time (a setting: SkillupHelperDB.tripCost)
+P.TRIP_Z = 1.2816 -- the AH trip buys for the 90th percentile of crafts, not the mean (normal approximation)
 local HUGE = 1e7 -- cost per point of a level nothing covers
 local EPS = 1e-6
 
@@ -415,15 +417,29 @@ function P.baseline(ctx, chance)
 end
 
 -- Pass 2: owned units the baseline does not use, given to the levels where they save most per unit.
-local function stockPass(ctx, base, have)
+-- route: spells of the AH trip in progress; their levels keep the bought recipe (no stock detour mid-trip).
+local function stockPass(ctx, base, have, route)
 	local chance = base.chance
-	local demand = {}
+	local demand, var, users = {}, {}, {}
 	for s = ctx.skill, ctx.cap - 1 do
 		local lv = base.levels[s]
 		if lv then
 			for i, n in pairs(lv.o.mats) do
 				demand[i] = (demand[i] or 0) + n / lv.p
 			end
+			local p = math.min(lv.p, 1)
+			if not var[lv.o] then
+				users[#users + 1] = lv.o
+			end
+			var[lv.o] = (var[lv.o] or 0) + (1 - p) / (p * p)
+		end
+	end
+	-- the AH trip buys for the 90th percentile of crafts: those spares are not surplus while their recipe still runs,
+	-- or a replan after a bad-luck run would spend them elsewhere and change the advice mid-trip
+	for _, o in ipairs(users) do
+		local spare = P.TRIP_Z * math.sqrt(var[o])
+		for i, n in pairs(o.mats) do
+			demand[i] = demand[i] + n * spare
 		end
 	end
 	local rem = {}
@@ -467,7 +483,7 @@ local function stockPass(ctx, base, have)
 			local numer = (net > 0 and net or 0) + ctx.effort * (1 + o.precrafts)
 			for s = math.max(ctx.skill, o.at == -math.huge and ctx.skill or math.ceil(o.at)), ctx.cap - 1 do
 				local lv = base.levels[s]
-				if not lv or o ~= lv.o then
+				if (not lv or o ~= lv.o) and not (lv and route and route[lv.o.spell]) then
 					local p = chance(s, o.y, o.g) * o.k
 					if p <= 0 then
 						break
@@ -721,12 +737,37 @@ local function stockAlternative(ctx, s, pool, skip, st, have, chance)
 	return best, bc, bcrafts, bp
 end
 
+-- Crafts it takes to go from skill `from` to `to` with o: mean and variance. Each point at level s takes a geometric
+-- number of crafts with success p(s) (mean 1/p, variance (1-p)/p^2); a part of a level counts by its share.
+function P.craftSpread(from, to, o, chance)
+	chance = chance or P.chance
+	local mean, var = 0, 0
+	local s = math.floor(from)
+	while s < to - EPS do
+		local f = math.min(to, s + 1) - math.max(from, s)
+		local p = chance(s, o.y, o.g) * (o.k or 1)
+		if p <= 0 then
+			break
+		end
+		p = math.min(p, 1)
+		mean = mean + f / p
+		var = var + f * (1 - p) / (p * p)
+		s = s + 1
+	end
+	return mean, var
+end
+
+-- The option each step crafts and the option of its stock alternative (internal; plans stay plain data).
+local optOf = setmetatable({}, { __mode = "k" })
+local altOf = setmetatable({}, { __mode = "k" })
+
 -- Pass 2 to 4 for the formula run, compared with the flat run. Cheap: rerun on every bag update.
-function P.finish(ctx, baseline, have)
+-- start: a fractional skill to begin the steps at (the rest of a plan after a stock step that defers an AH trip).
+local function finishCore(ctx, baseline, have, start, route)
 	have = have or {}
 	local base, chance = baseline.formula, baseline.formula.chance
-	local st = stockPass(ctx, base, have)
-	local flatSt = stockPass(ctx, baseline.flat, have)
+	local st = stockPass(ctx, base, have, route)
+	local flatSt = stockPass(ctx, baseline.flat, have, route)
 	local flatUse = usage(ctx, baseline.flat, flatSt)
 	local parts = labelParts(ctx, partsOf(ctx, base, st), have)
 	local segs = segmentsOf(parts)
@@ -752,7 +793,7 @@ function P.finish(ctx, baseline, have)
 		pool[i] = q
 	end
 	local sold = {}
-	local cur = ctx.skill
+	local cur = start or ctx.skill
 	local steps = plan.steps
 	for idx, seg in ipairs(segs) do
 		if cur >= ctx.cap then
@@ -790,6 +831,7 @@ function P.finish(ctx, baseline, have)
 					price = b.price,
 					where = "ah",
 					learn = b.learn,
+					owned = (have[b.item] or 0) > 0 or nil, -- in the bags already: learn it, no AH
 					saves = b.saves,
 					fillsGap = b.fillsGap,
 					alt = b.instead and { spell = b.instead, name = b.insteadName, extra = b.saves } or nil,
@@ -905,6 +947,7 @@ function P.finish(ctx, baseline, have)
 			if source == "buy" then
 				step.poolBefore = poolBefore
 			end
+			optOf[step] = o
 			steps[#steps + 1] = step
 			cur = step.to
 		end
@@ -941,6 +984,7 @@ function P.finish(ctx, baseline, have)
 					points = apts,
 					extra = math.max(0, (ac - v) * math.min(apts, step.points)),
 				}
+				altOf[step] = alt
 			end
 		end
 	end
@@ -969,9 +1013,21 @@ function P.finish(ctx, baseline, have)
 			end
 		end
 	end
+	local patterns = {} -- a recipe item the plan learns later is not a leftover
+	for _, step in ipairs(steps) do
+		if step.kind == "buyRecipe" and step.item then
+			patterns[step.item] = true
+		end
+	end
 	for _, i in ipairs(sortedKeys(pool)) do
 		local q = math.floor(pool[i] + EPS)
-		if q >= 1 and (have[i] or 0) > 0 and not isVendor(ctx, i) and (st.rem[i] or 0) >= 1 - EPS then
+		if
+			q >= 1
+			and (have[i] or 0) > 0
+			and not isVendor(ctx, i)
+			and not patterns[i]
+			and (st.rem[i] or 0) >= 1 - EPS
+		then
 			local pr = ctx.price[i] or {}
 			local info = ctx.items[i] or {}
 			plan.leftovers[#plan.leftovers + 1] = {
@@ -1073,8 +1129,239 @@ function P.finish(ctx, baseline, have)
 	return plan
 end
 
+local function isAh(ctx, item)
+	local pr = ctx.price[item]
+	return pr ~= nil and pr.where ~= "vendor"
+end
+
+-- Whether a step sends the user to the AH: a recipe to buy there, or a reagent it buys there.
+local function needsAh(ctx, st)
+	if st.kind == "buyRecipe" then
+		return not st.owned
+	end
+	for _, b in ipairs(st.kind == "craft" and st.buy or {}) do
+		if isAh(ctx, b.item) then
+			return true
+		end
+	end
+	return false
+end
+P.needsAh = needsAh
+
+-- The stock alternative of a buy step as a step of its own: its owned reagents from the bags, vendor ones bought.
+local function stockStep(ctx, st, o, chance)
+	local a = st.alt
+	local from = st.from
+	local pts = P.expectedPoints(from, a.crafts, o, chance, ctx.cap)
+	local step = {
+		kind = "craft",
+		spell = o.spell,
+		name = o.name,
+		crafts = a.crafts,
+		source = "stock",
+		from = from,
+		to = from + pts,
+		points = pts,
+		color = colorOf(math.floor(from), o.y, o.g),
+		chance = { chance(math.floor(from), o.y, o.g), chance(math.floor(math.max(from, from + pts - 1)), o.y, o.g) },
+		thresholds = { o.y, o.g, o.k },
+		buy = {},
+		used = {},
+		pre = {},
+		tags = { "saves an AH trip" },
+	}
+	local out = 0
+	for _, i in ipairs(sortedKeys(o.mats)) do
+		local need = o.mats[i] * a.crafts
+		if isVendor(ctx, i) then
+			local pr = ctx.price[i]
+			step.buy[#step.buy + 1] = { item = i, count = math.ceil(need - EPS), where = "vendor", each = pr.buy }
+			out = out + math.ceil(need - EPS) * (pr.buy or 0)
+		else
+			step.used[#step.used + 1] = { item = i, count = math.floor(need + EPS) }
+		end
+	end
+	step.cash = { out = out, back = a.crafts * (o.vendor or 0) }
+	optOf[step] = o
+	return step
+end
+
+-- One AH trip for the stretch ahead: every AH buy from the first step that needs the AH up to the next trainer visit,
+-- gap or the cap (patterns are bought on the same trip), stopping early when gold on hand runs out. Each recipe
+-- bought in the stretch buys for the 90th percentile of its crafts: the leftovers are stock for later steps.
+local function tripOf(ctx, steps, chance, gold)
+	local first
+	for i, st in ipairs(steps) do
+		if st.kind == "train" or st.kind == "gap" then
+			return nil
+		elseif needsAh(ctx, st) then
+			first = i
+			break
+		end
+	end
+	if not first then
+		return nil
+	end
+	local rows, byItem, spread = {}, {}, {}
+	local total, last, ends = 0, first, "cap"
+	local function add(item, count, each, field)
+		local r = byItem[item]
+		if not r then
+			r = { item = item, count = 0, buffer = 0, each = each or 0 }
+			byItem[item] = r
+			rows[#rows + 1] = r
+		end
+		r[field] = r[field] + count
+		total = total + count * (each or 0)
+	end
+	for i = first, #steps do
+		local st = steps[i]
+		if st.kind == "train" or st.kind == "gap" then
+			ends = st.kind
+			break
+		end
+		local cost = 0
+		if st.kind == "buyRecipe" then
+			cost = st.owned and 0 or (st.price or 0)
+		else
+			for _, b in ipairs(st.buy) do
+				if isAh(ctx, b.item) then
+					cost = cost + b.count * (b.each or 0)
+				end
+			end
+		end
+		if gold and i > first and total + cost > gold then
+			ends = "gold"
+			break
+		end
+		if st.kind == "buyRecipe" then
+			if not st.owned then
+				add(st.item, 1, st.price, "count")
+				byItem[st.item].recipe = true
+			end
+		else
+			local o = optOf[st]
+			local bought = {}
+			for _, b in ipairs(st.buy) do
+				if isAh(ctx, b.item) then
+					add(b.item, b.count, b.each, "count")
+					bought[b.item] = true
+				end
+			end
+			if o and next(bought) then
+				local sp = spread[o]
+				if not sp then
+					sp = { mean = 0, var = 0, crafts = 0, items = {} }
+					spread[o] = sp
+					spread[#spread + 1] = o
+				end
+				local m, v = P.craftSpread(st.from, st.to, o, chance)
+				sp.mean, sp.var, sp.crafts = sp.mean + m, sp.var + v, sp.crafts + st.crafts
+				for item in pairs(bought) do
+					sp.items[item] = true
+				end
+			end
+		end
+		last = i
+	end
+	-- the luck buffer: crafts past the planned count that reach the 90th percentile, in the reagents the trip buys
+	local spare = 0
+	for _, o in ipairs(spread) do
+		local sp = spread[o]
+		local extra = math.ceil(sp.mean + P.TRIP_Z * math.sqrt(sp.var) - sp.crafts - EPS)
+		if extra > 0 then
+			spare = spare + extra
+			for _, item in ipairs(sortedKeys(sp.items)) do
+				add(item, math.ceil(o.mats[item] * extra - EPS), byItem[item].each, "buffer")
+			end
+		end
+	end
+	for _, r in ipairs(rows) do
+		r.total = r.count + r.buffer
+		r.cost = r.total * r.each
+	end
+	table.sort(rows, function(a, b)
+		if a.cost ~= b.cost then
+			return a.cost > b.cost
+		end
+		return a.item < b.item
+	end)
+	local lastStep = steps[last]
+	-- the recipes the trip buys for: saved with the list, they keep their levels until the trip's skill is reached
+	local route = {}
+	for i = first, last do
+		if steps[i].kind == "craft" then
+			route[#route + 1] = steps[i].spell
+		end
+	end
+	return {
+		fromStep = first,
+		toStep = last,
+		to = lastStep.to or lastStep.learn or ctx.skill,
+		ends = ends,
+		rows = rows,
+		total = total,
+		spareCrafts = spare,
+		route = route,
+	}
+end
+P.tripOf = tripOf
+
+-- Pass 2 to 4, then the AH trip. opts: tripCost (copper an AH trip is worth), route (set of spells of the saved trip
+-- in progress: no stock detour, its levels keep the bought recipe), tripPlanned (a trip list is saved: no stock
+-- detour), gold (copper on hand: the trip stops where it runs out).
+-- When the first step would send the user to the AH and its stock alternative costs less than a trip more over the
+-- path, the stock route goes first: the trip waits until stock runs out, and buys for the whole stretch then.
+function P.finish(ctx, baseline, have, opts)
+	opts = opts or {}
+	have = have or {}
+	local chance = baseline.formula.chance
+	local plan = finishCore(ctx, baseline, have, nil, opts.route)
+	local tripCost = opts.tripCost or P.TRIP_COST
+	local s1 = plan.steps[1]
+	local alt = s1 and altOf[s1]
+	if
+		alt
+		and not (opts.tripPlanned or opts.route)
+		and s1.kind == "craft"
+		and s1.source == "buy"
+		and needsAh(ctx, s1)
+		and s1.alt.extra < tripCost
+	then
+		local first = stockStep(ctx, s1, alt, chance)
+		local left = {}
+		for i, q in pairs(have) do
+			left[i] = q
+		end
+		for _, u in ipairs(first.used) do
+			left[u.item] = math.max(0, (left[u.item] or 0) - u.count)
+			if left[u.item] == 0 then
+				left[u.item] = nil
+			end
+		end
+		local resume = math.floor(first.to + EPS)
+		first.tripDeferred = { cost = tripCost, extra = s1.alt.extra, instead = s1.name }
+		if resume < ctx.cap then
+			local rest =
+				finishCore(setmetatable({ skill = resume }, { __index = ctx }), baseline, left, first.to, opts.route)
+			table.insert(rest.steps, 1, first)
+			plan.steps, plan.hold, plan.leftovers = rest.steps, rest.hold, rest.leftovers
+		else
+			plan.steps = { first }
+		end
+	end
+	plan.tripCost = tripCost
+	plan.trip = tripOf(ctx, plan.steps, chance, opts.gold)
+	return plan
+end
+
 -- The whole planner in one call (tests, and the panel when nothing is cached).
 function P.run(input)
 	local ctx = P.prepare(input)
-	return P.finish(ctx, P.baseline(ctx, input.chance), input.have)
+	return P.finish(
+		ctx,
+		P.baseline(ctx, input.chance),
+		input.have,
+		{ tripCost = input.tripCost, tripPlanned = input.tripPlanned, route = input.route, gold = input.gold }
+	)
 end

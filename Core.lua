@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.4"
+ns.CODE_VERSION = "0.2.6"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -62,7 +62,8 @@ local function refreshSelftest()
 	st.lastScan = ns.lastScan
 	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
 	st.scans = ns.scans
-	st.settings = { effort = db.effort, sellShare = db.sellShare }
+	st.settings = { effort = db.effort, sellShare = db.sellShare, tripCost = db.tripCost }
+	st.trips = db.trips
 	st.tsm = ns.TSM.status()
 	st.craftedEvent = ns.craftedEvent
 	local age = ns.TSM.ageHours(ns.Data.plan)
@@ -183,7 +184,47 @@ end
 
 -- The planner settings from SavedVariables (nil fields fall back to Data/Plan.lua's defaults).
 function ns.settings()
-	return { effort = db and db.effort, sellShare = db and db.sellShare }
+	return {
+		effort = db and db.effort,
+		sellShare = db and db.sellShare,
+		tripCost = db and db.tripCost,
+		trips = db and db.trips,
+	}
+end
+
+-- The AH trip list kept per profession (View.tripBlock): what to buy at the AH, and the recipes it buys for, which
+-- keep their levels in the plan until the trip's skill is reached.
+function ns.saveTrip(block)
+	if not db or not block or not block.prof then
+		return false
+	end
+	local rows = {}
+	for _, r in ipairs(block.rows) do
+		rows[#rows + 1] = { item = r.item, name = r.name, count = r.count, each = r.each, recipe = r.recipe }
+	end
+	db.trips = db.trips or {}
+	db.trips[block.prof] = {
+		rows = rows,
+		route = block.route,
+		to = block.to,
+		total = block.total,
+		at = date("%Y-%m-%d %H:%M:%S"),
+	}
+	ns.refresh()
+	return true
+end
+
+function ns.clearTrip(prof)
+	if db and db.trips and prof then
+		db.trips[prof] = nil
+	end
+	ns.refresh()
+	return true
+end
+
+-- The trip list kept for `prof`, or nil.
+function ns.savedTrip(prof)
+	return db and db.trips and prof and db.trips[prof] or nil
 end
 
 -- Shows the panel or folds it to its handle (the choice is kept). byUser: a click, so the change fades in.
@@ -328,6 +369,20 @@ SLASH_SKILLUPHELPER1 = "/skillup"
 -- "/skillup effort 30": copper charged per craft by the planner ("/skillup effort" resets to the plan's default).
 function ns.command(msg)
 	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
+	if cmd == "trip" then
+		-- "/skillup trip 5000": copper one AH trip is worth (a stock route that costs less more goes first)
+		local n = tonumber(arg)
+		if db then
+			db.tripCost = (n and n >= 0) and n or nil
+		end
+		print(
+			("SkillupHelper: an AH trip is worth %s copper."):format(
+				db and db.tripCost and tostring(db.tripCost) or ("default " .. ns.Planner.TRIP_COST)
+			)
+		)
+		ns.refresh()
+		return true
+	end
 	if cmd ~= "effort" then
 		return false
 	end

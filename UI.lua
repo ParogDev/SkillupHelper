@@ -153,6 +153,7 @@ function UI.env()
 		merchant = ns.merchantOpen and UI.merchantOffer or nil,
 		gold = GetMoney,
 		bagRoom = UI.bagRoom,
+		savedTrip = ns.savedTrip,
 	}
 end
 
@@ -202,6 +203,13 @@ function UI.act(a)
 	local stats = UI.stats
 	if type(a) == "table" and a.id == "buy" then
 		return a.enabled and buy(a) or false
+	end
+	if type(a) == "table" and (a.id == "trip" or a.id == "untrip") then
+		stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
+		if a.id == "trip" then
+			return ns.saveTrip(a.block)
+		end
+		return ns.clearTrip(a.block and a.block.prof)
 	end
 	if type(a) ~= "table" or not a.enabled or secret(a.spell) or type(a.spell) ~= "number" then
 		return false
@@ -536,7 +544,10 @@ local function newCard(parent)
 		card.lines[k] = text(card, "GameFontHighlightSmall", 11)
 		card.lines[k]:SetWidth(INNER - PAD * 2)
 	end
-	card.buttons = { buy = newButton(card), craft = newButton(card), open = newButton(card) }
+	card.tripTitle = text(card, "GameFontHighlightSmall", 11)
+	card.tripTitle:SetWidth(INNER - PAD * 2)
+	card.tripRows = {}
+	card.buttons = { trip = newButton(card), buy = newButton(card), craft = newButton(card), open = newButton(card) }
 
 	-- slide: in from the right with a fade, out to the left
 	local ig = card:CreateAnimationGroup()
@@ -629,6 +640,35 @@ local function fillCard(card, c, consumed)
 		card.mats[i]:Hide()
 	end
 
+	-- the AH trip: one list for the stretch ahead, spares for bad luck included
+	local trip = c.trip
+	card.tripTitle:SetShown(trip ~= nil)
+	local nTrip = trip and #trip.rows or 0
+	if trip then
+		top = top + 8
+		card.tripTitle:ClearAllPoints()
+		card.tripTitle:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		card.tripTitle:SetText(trip.title)
+		setColor(card.tripTitle, "gold")
+		top = top + card.tripTitle:GetStringHeight() + 4
+		for i, tr in ipairs(trip.rows) do
+			local row = card.tripRows[i] or newMatRow(card)
+			card.tripRows[i] = row
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 10, -top)
+			row.name:SetText(tr.name)
+			setColor(row.name, "bone")
+			row.right:SetText(tr.right)
+			setColor(row.right, "bone")
+			fill(row.mark, "gold")
+			row:Show()
+			top = top + 16
+		end
+	end
+	for i = nTrip + 1, #card.tripRows do
+		card.tripRows[i]:Hide()
+	end
+
 	local extra = {}
 	for _, n in ipairs(c.notes) do
 		extra[#extra + 1] = { n, "bone" }
@@ -665,12 +705,23 @@ local function fillCard(card, c, consumed)
 	-- the buttons: Buy (vendor reagents the step lacks) takes a row of its own above; Craft takes the next row, Show
 	-- recipe sits at its right when the view offers it
 	local craft, open, buyButton = card.buttons.craft, card.buttons.open, card.buttons.buy
+	local tripButton = card.buttons.trip
 	craft:Hide()
 	open:Hide()
 	buyButton:Hide()
+	tripButton:Hide()
 	local byId = {}
 	for _, a in ipairs(c.actions or {}) do
 		byId[a.id] = a
+	end
+	local ta = byId.trip or byId.untrip
+	if ta then
+		top = top + 10
+		tripButton:ClearAllPoints()
+		tripButton:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		tripButton:SetWidth(INNER - 2 * PAD - 2)
+		setButton(tripButton, ta, ta.id == "trip" and ns.View.RGB.gold or ns.View.RGB.ash)
+		top = top + 20
 	end
 	if byId.buy then
 		top = top + 10
