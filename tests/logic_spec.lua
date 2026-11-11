@@ -1,9 +1,21 @@
 -- Logic, the panel text and the scan against a fake C_TradeSkillUI. Frames are checked in game.
 local function load(ns)
-	for _, f in ipairs({ "Logic.lua", "Planner.lua", "Scan.lua", "TSM.lua", "UI.lua" }) do
+	for _, f in ipairs({ "Logic.lua", "Planner.lua", "Scan.lua", "TSM.lua", "View.lua", "UI.lua" }) do
 		assert(loadfile(f))("SkillupHelper", ns)
 	end
 	return ns
+end
+
+-- The panel's view description of a model, as text lines.
+local function panelText(ns, m)
+	local env = {
+		nameOf = function(item, fallback)
+			return fallback or ("item " .. item)
+		end,
+		money = ns.Logic.money,
+		have = ns.Scan.have,
+	}
+	return ns.View.text(ns.View.describe(m, env))
 end
 
 local LIZARD, SPICES, TAIL, COD = 101, 2678, 5, 6
@@ -236,14 +248,14 @@ describe("Scan and panel", function()
 	end)
 
 	it("renders every section without errors", function()
-		local text = table.concat(ns.UI.lines(ns.Scan.build(plan)), "\n")
-		assert.matches("Cooking 175/225", text)
+		local text = table.concat(panelText(ns, ns.Scan.build(plan)), "\n")
+		assert.matches("Cooking 175 / 225", text)
 		assert.matches("Crispy Lizard Tail", text)
-		assert.matches("buy 10 item 2678", text)
-		assert.matches("Recipes worth buying", text)
-		assert.matches("Recipe: Rockscale Cod 27s 92c", text)
-		assert.matches("then 180%-215 Rockscale Cod", text)
-		assert.is_true(#ns.UI.lines({ why = "x", state = "not now" }) == 1)
+		assert.matches("Thunder Lizard Tail buy 65", text)
+		assert.matches("Crispy Lizard Tail x10, from stock", text)
+		assert.matches("Worth buying: Recipe: Rockscale Cod, 27s 92c, for 180 to 215", text)
+		assert.matches("version 1", text)
+		assert.is_true(#panelText(ns, { why = "x", state = "not now" }) == 1)
 	end)
 end)
 
@@ -312,12 +324,13 @@ describe("Planner in the scan and the panel", function()
 		assert.is_true(p.ageHours > 24)
 		assert.equal(4, #m.greyCheck)
 		assert.same({ spell = 3397, client = 190, plan = 190 }, m.greyCheck[1])
-		local text = table.concat(ns.UI.lines(m), "\n")
-		assert.matches("NOW |r Craft 1x", text, 1, true)
-		assert.matches("Big Bear Steak", text)
-		assert.matches("NEXT|r Craft 7x", text, 1, true)
-		assert.matches("Buy Recipe: Rockscale Cod %(AH 28s 11c%)", text)
-		assert.matches("TSM data is 30 h old", text)
+		local text = table.concat(panelText(ns, m), "\n")
+		assert.matches("Cooking 173 / 225", text, 1, true)
+		assert.matches("17 to grey", text, 1, true)
+		assert.matches("Big Bear Steak\nCraft 1, about +0.4, to 173", text, 1, true)
+		assert.matches("2 7x Hot Lion Chops, from stock", text, 1, true)
+		assert.matches("Rockscale Cod 28s 11c", text, 1, true)
+		assert.matches("TSM prices are 30 h old", text)
 		assert.matches("prices from the export", text)
 		assert.matches("Train Goldthorn Tea", text)
 	end)
@@ -339,7 +352,7 @@ describe("Planner in the scan and the panel", function()
 	it("names a version 1 plan", function()
 		local m = ns.Scan.build(plan)
 		assert.matches("version 1", m.plannerWhy)
-		assert.matches("version 1", table.concat(ns.UI.lines(m), "\n"))
+		assert.matches("version 1", table.concat(panelText(ns, m), "\n"))
 	end)
 end)
 
@@ -460,6 +473,6 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal(ns.CODE_VERSION, "0.2.0")
+		assert.equal(ns.CODE_VERSION, "0.2.1")
 	end)
 end)
