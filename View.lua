@@ -402,8 +402,19 @@ function V.buyAction(want, env)
 		end
 	end
 	if #a.items == 0 then
-		a.label = #want == 1 and ("Buy %s: %s"):format(first.name, (problems[1]:gsub("^[^:]*: ", "")))
-			or "This vendor sells none of them"
+		-- one reason for all of them (bags full, no vendor stock) goes on the button; mixed reasons go to the tip
+		local reasons, same = {}, true
+		for k, w in ipairs(want) do
+			reasons[k] = problems[k]:sub(#w.name + 3)
+			same = same and reasons[k] == reasons[1]
+		end
+		if #want == 1 then
+			a.label = ("Buy %s: %s"):format(first.name, reasons[1])
+		elseif same then
+			a.label = ("Buy %d reagents: %s"):format(#want, reasons[1])
+		else
+			a.label = "This vendor sells none of them"
+		end
 		a.tip = table.concat(problems, "\n")
 		return a
 	end

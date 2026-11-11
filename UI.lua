@@ -87,8 +87,8 @@ function UI.merchantOffer(item)
 		return nil, "GetMerchantNumItems failed: " .. tostring(n)
 	end
 	for i = 1, n do
-		local id = GetMerchantItemID(i)
-		if id == item and not secret(id) then
+		local okId, id = pcall(GetMerchantItemID, i)
+		if okId and not secret(id) and id == item then
 			local ok, info = pcall(C_MerchantFrame.GetItemInfo, i)
 			if not ok or type(info) ~= "table" then
 				return nil, "C_MerchantFrame.GetItemInfo failed: " .. tostring(info)
@@ -117,9 +117,11 @@ end
 
 -- Units of `item` the bags take now: free slots of bags that accept it (general bags, a profession bag of its
 -- family, the reagent bag for a crafting reagent) times its stack size, plus the top of a partial stack.
-function UI.bagRoom(item, offer)
+function UI.bagRoom(item)
 	local _, _, _, _, _, _, _, stack, _, _, _, _, _, _, _, _, isReagent = C_Item.GetItemInfo(item)
-	stack = stack or (offer and offer.maxStack) or 1
+	if not stack then
+		return nil -- item info not cached yet: room unknown, the client refuses a buy that does not fit
+	end
 	local family = C_Item.GetItemFamily and C_Item.GetItemFamily(item) or 0
 	local bags = NUM_BAG_SLOTS or 4
 	local free = 0
@@ -166,6 +168,11 @@ end
 local function buy(a)
 	local stats = UI.stats
 	stats.clicks.buy = (stats.clicks.buy or 0) + 1
+	-- a second click before the bags report the first buy would buy again from the same short counts
+	if UI.buyPending then
+		stats.lastBuyError = "refused at the click: the last buy has not reached the bags yet"
+		return false
+	end
 	local fresh = ns.View.buyAction(a.want, UI.env())
 	if not fresh or not fresh.enabled then
 		stats.lastBuyError = "refused at the click: " .. tostring(fresh and fresh.label or "nothing to buy")
@@ -174,7 +181,7 @@ local function buy(a)
 	end
 	local bought, err = {}, nil
 	for _, it in ipairs(fresh.items) do
-		local done = 0
+		local done, before = 0, C_Item.GetItemCount(it.item) or 0
 		for _, n in ipairs(it.calls) do
 			local ok, e = pcall(BuyMerchantItem, it.index, n)
 			if not ok then
@@ -183,7 +190,8 @@ local function buy(a)
 			end
 			done = done + n
 		end
-		bought[#bought + 1] = { item = it.item, count = done, cost = it.cost, calls = #it.calls }
+		-- requested: what the calls asked for. got: what reached the bags (UI.noteBags); a refusal raises no error
+		bought[#bought + 1] = { item = it.item, requested = done, before = before, cost = it.cost, calls = #it.calls }
 		if err then
 			break
 		end
@@ -193,7 +201,26 @@ local function buy(a)
 	stats.buysByUi[ui] = (stats.buysByUi[ui] or 0) + 1
 	stats.lastBuy = { at = date("%Y-%m-%d %H:%M:%S"), ui = ui, cost = fresh.cost, items = bought }
 	stats.lastBuyError = err
+	UI.buyPending = true
 	return err == nil
+end
+
+-- BAG_UPDATE_DELAYED: what the last buy put in the bags, and the Buy button may act again. A buy the client
+-- refused (gold, bags, stock) shows as got < requested and names itself in lastBuyError.
+function UI.noteBags()
+	if not UI.buyPending then
+		return
+	end
+	UI.buyPending = false
+	local last = UI.stats.lastBuy
+	for _, it in ipairs(last and last.items or {}) do
+		if it.got == nil then
+			it.got = (C_Item.GetItemCount(it.item) or 0) - (it.before or 0)
+			if it.got < it.requested and not UI.stats.lastBuyError then
+				UI.stats.lastBuyError = ("item %d: asked for %d, the bags got %d"):format(it.item, it.requested, it.got)
+			end
+		end
+	end
 end
 
 -- A click on a card button. Each client call runs under pcall and leaves its result in UI.stats (selftest ui).

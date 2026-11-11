@@ -291,6 +291,9 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 		end
 		return
 	end
+	if event == "BAG_UPDATE_DELAYED" then
+		ns.UI.noteBags()
+	end
 	if event == "MERCHANT_SHOW" or event == "MERCHANT_CLOSED" then
 		ns.merchantOpen = event == "MERCHANT_SHOW"
 		local m = ns.UI.stats.merchant
