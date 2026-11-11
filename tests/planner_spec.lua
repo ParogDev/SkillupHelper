@@ -937,3 +937,458 @@ describe("Planner rules", function()
 		assert.equal((buyCrafts(90)), (buyCrafts(37)))
 	end)
 end)
+
+describe("Cap model", function()
+	local P
+	local EPS = 1e-6
+	before_each(function()
+		P = load().Planner
+	end)
+
+	-- A synthetic profession: a trainer recipe every 20 skill (learn L, orange to L+25, grey at L+45), one reagent
+	-- each (AH and vendor alternating); a gathering-like line has no reagents (effort only).
+	local function profession(label, gathering)
+		local recipes, price, items = {}, {}, {}
+		for k = 0, 14 do
+			local learn = 1 + 20 * k
+			local item = 9000 + k
+			recipes[50000 + k] = {
+				name = ("%s %d"):format(label, learn),
+				y = learn + 25,
+				g = learn + 45,
+				k = 1,
+				learn = learn,
+				src = "trainer",
+				mats = gathering and {} or { item, 1 },
+			}
+			price[item] = { buy = 40 + (k % 3) * 15, where = k % 2 == 0 and "ah" or "vendor", salvage = 5 }
+			items[item] = { name = "Reagent " .. k }
+		end
+		return recipes, price, items
+	end
+
+	local function ranksOf(expertWhere, artisanSkill)
+		return {
+			{ name = "Apprentice", cap = 75 },
+			{ name = "Journeyman", cap = 150, skill = 50, level = 10, cost = 500, where = "trainer" },
+			{ name = "Expert", cap = 225, skill = 125, level = 20, cost = 5000, where = expertWhere },
+			{ name = "Artisan", cap = 300, skill = artisanSkill, level = 35, cost = 50000, where = "trainer" },
+		}
+	end
+
+	local PROFS = {
+		{ label = "Cooking", ranks = ranksOf("book", 200) },
+		{ label = "Leatherworking", ranks = ranksOf("trainer", 200) },
+		{ label = "First Aid", ranks = ranksOf("book", 200) },
+		-- the gathering line: Artisan's unlock skill unknown (nil, placed as its cap)
+		{ label = "Mining", gathering = true, ranks = ranksOf("trainer", nil) },
+	}
+	local LIVE = { [1] = 75, [60] = 75, [130] = 150, [150] = 150, [210] = 225 }
+
+	local function inputOf(prof, skill, cap, extra)
+		local recipes, price, items = profession(prof.label, prof.gathering)
+		local learned = {}
+		for spell, r in pairs(recipes) do
+			if r.learn <= skill then
+				learned[spell] = true
+			end
+		end
+		local input = {
+			skill = skill,
+			cap = cap,
+			level = 60,
+			target = 300,
+			ranks = prof.ranks,
+			recipes = recipes,
+			learned = learned,
+			price = price,
+			items = items,
+			effort = 20,
+		}
+		for k, v in pairs(extra or {}) do
+			input[k] = v
+		end
+		return input
+	end
+
+	local function craftsOf(plan)
+		local out = {}
+		for _, st in ipairs(plan.steps) do
+			if st.kind == "craft" or st.kind == "gap" then
+				out[#out + 1] = ("%s %s %.3f-%.3f"):format(st.kind, tostring(st.spell), st.from, st.to)
+			end
+		end
+		return out
+	end
+
+	it("no step breaks at an unlock skill: the craft steps equal a plan whose live cap is the target", function()
+		for _, prof in ipairs(PROFS) do
+			for skill, live in pairs(LIVE) do
+				local plan = P.run(inputOf(prof, skill, live))
+				local free = P.run(inputOf(prof, skill, 300, { ranks = {} }))
+				assert.equal(300, plan.cap)
+				assert.same(craftsOf(free), craftsOf(plan), ("%s %d"):format(prof.label, skill))
+			end
+		end
+	end)
+
+	it("a run across the cap gets the training first, in the rank's window, each rank once", function()
+		for _, prof in ipairs(PROFS) do
+			for skill, live in pairs(LIVE) do
+				local plan = P.run(inputOf(prof, skill, live))
+				local at = ("%s %d"):format(prof.label, skill)
+				assert.is_true(#plan.rankUps > 0, at)
+				for _, up in ipairs(plan.rankUps) do
+					local trained, seen = false, 0
+					for _, st in ipairs(plan.steps) do
+						if st.kind == "trainRank" and st.cap == up.cap then
+							seen = seen + 1
+							trained = true
+							if skill < up.by then
+								local ok = st.skill >= (up.at or up.by) - EPS and st.skill <= up.by + EPS
+								assert.is_true(ok, ("%s: %s at %.2f"):format(at, up.name, st.skill))
+							end
+						elseif st.rankUp == up then
+							seen = seen + 1
+							trained = true
+							assert.is_true(st.from < (up.at or up.by) and st.to > up.by, at)
+						elseif (st.kind == "craft" or st.kind == "gap") and st.to > up.by + EPS then
+							assert.is_true(trained, ("%s: %s crosses %d untrained"):format(at, st.kind, up.by))
+						end
+					end
+					assert.equal(1, seen, at .. " " .. up.name)
+				end
+			end
+		end
+	end)
+
+	it("at the live cap the rank is the first step; unknown fields stay nil", function()
+		local mining = PROFS[4]
+		local plan = P.run(inputOf(mining, 150, 150))
+		local st = plan.steps[1]
+		assert.equal("trainRank", st.kind)
+		assert.equal("Expert", st.name)
+		assert.equal(150, st.by)
+		assert.equal(125, st.at)
+		-- Artisan's unlock skill is unknown: trained as late as its cap allows, its `at` left nil
+		local art
+		for _, s in ipairs(plan.steps) do
+			if s.kind == "trainRank" and s.name == "Artisan" then
+				art = s
+			elseif s.rankUp and s.rankUp.name == "Artisan" then
+				art = s.rankUp
+			end
+		end
+		assert.is_not_nil(art)
+		assert.is_nil(art.at)
+		assert.equal(225, art.by)
+		local bare = P.run(inputOf(mining, 150, 150, { ranks = { { name = "Expert", cap = 225 } }, target = 225 }))
+		assert.equal("trainRank", bare.steps[1].kind)
+		for _, k in ipairs({ "at", "level", "cost", "where" }) do
+			assert.is_nil(bare.steps[1][k], k)
+		end
+	end)
+
+	it("a cap the character level blocks is a hard stop with the message", function()
+		for _, prof in ipairs(PROFS) do
+			local plan = P.run(inputOf(prof, 130, 150, { level = 15 }))
+			assert.same(
+				{ name = "Expert", level = 20, have = 15, cap = 225, reason = "level", by = 150 },
+				plan.capBlock
+			)
+			assert.equal(150, plan.cap)
+			for _, st in ipairs(plan.steps) do
+				assert.is_not.equal("trainRank", st.kind)
+				assert.is_true((st.to or 0) <= 150 + EPS)
+			end
+		end
+		-- the player's level unknown: never guessed as a block
+		local plan = P.run(inputOf(PROFS[2], 130, 150, { level = false }))
+		assert.is_nil(plan.capBlock)
+	end)
+
+	it("a rank taught by a special teacher stops the plan unless special teachers are enabled", function()
+		local prof = { label = "Cooking", ranks = ranksOf("special", 200) }
+		local plan = P.run(inputOf(prof, 130, 150))
+		assert.equal("special", plan.capBlock.reason)
+		assert.equal(150, plan.cap)
+		plan = P.run(inputOf(prof, 130, 150, { exclude = { special = false } }))
+		assert.is_nil(plan.capBlock)
+		assert.equal(300, plan.cap)
+	end)
+
+	it("plans to the target only as far as the recipes go, and says so", function()
+		local ranks = ranksOf("trainer", 200)
+		ranks[#ranks + 1] = { name = "Master", cap = 375, skill = 275, level = 50 }
+		local plan = P.run(inputOf(PROFS[2], 210, 225, { ranks = ranks, target = 375 }))
+		assert.same({ to = 326 }, plan.coverage)
+		assert.equal(326, plan.cap)
+		assert.equal("Master", plan.rankUps[#plan.rankUps].name)
+	end)
+
+	it("without ranks the cap is the live cap", function()
+		local plan = P.run(inputOf(PROFS[2], 130, 150, { ranks = {}, target = 300 }))
+		assert.equal(150, plan.cap)
+		assert.same({}, plan.rankUps)
+		assert.is_nil(plan.capBlock)
+	end)
+
+	it("a trip ends at a rank training", function()
+		for skill, live in pairs(LIVE) do
+			local plan = P.run(inputOf(PROFS[2], skill, live))
+			local trip = plan.trip
+			if trip then
+				for i = trip.fromStep, trip.toStep do
+					assert.is_not.equal("trainRank", plan.steps[i].kind)
+				end
+			end
+		end
+	end)
+end)
+
+describe("No one-craft interleaving", function()
+	local P
+	before_each(function()
+		P = load().Planner
+	end)
+	local X, Y = 1, 2
+	local function input(cloakMat)
+		return {
+			skill = 140,
+			cap = 150,
+			recipes = {
+				[1] = { name = "Shoulders", y = 130, g = 170, k = 1, mats = { X, 1 }, src = "trainer" },
+				-- usable at 145 only (trained there, grey at 146): a one-point island
+				[2] = {
+					name = "Hillman's Cloak",
+					y = 146,
+					g = 146,
+					k = 1,
+					mats = { Y, 1 },
+					src = "trainer",
+					learn = 145,
+				},
+			},
+			learned = { [1] = true },
+			price = {
+				[X] = { buy = 100, where = "ah", salvage = 5 },
+				[Y] = { buy = cloakMat, where = "ah", salvage = 5 },
+			},
+			effort = 20,
+		}
+	end
+	local function spells(plan)
+		local out = {}
+		for _, st in ipairs(plan.steps) do
+			if st.kind == "craft" then
+				out[#out + 1] = st.spell
+			end
+		end
+		return out
+	end
+
+	it("a one-point run between two runs of one recipe becomes that recipe (Hillman's Cloak 145-146)", function()
+		local plan = P.run(input(150))
+		for _, st in ipairs(plan.steps) do
+			assert.is_not.equal("train", st.kind)
+		end
+		assert.same({ 1 }, spells(plan))
+		assert.equal(10, plan.steps[1].points)
+	end)
+
+	it("keeps the island when it saves at least INTERLEAVE_SAVING of the cost left", function()
+		assert.same({ 1, 2, 1 }, spells(P.run(input(1))))
+	end)
+end)
+
+describe("Alternatives and exclusions", function()
+	local P
+	before_each(function()
+		P = load().Planner
+	end)
+	local M1, M2, M3, M4, PAT, M6 = 11, 12, 13, 14, 15, 16
+	local function recipe(name, mat, extra)
+		local r = { name = name, y = 100, g = 140, k = 1, mats = { mat, 1 }, src = "trainer" }
+		for k, v in pairs(extra or {}) do
+			r[k] = v
+		end
+		return r
+	end
+	local function input(recipes, learned, extra)
+		local inp = {
+			skill = 100,
+			cap = 110,
+			recipes = recipes,
+			learned = learned,
+			price = {
+				[M1] = { buy = 50, where = "ah", salvage = 1 },
+				[M2] = { buy = 60, where = "ah", salvage = 1 },
+				[M3] = { buy = 80, where = "vendor", salvage = 1 },
+				[M4] = { buy = 5, where = "ah", salvage = 1 },
+				[PAT] = { buy = 100, where = "ah", salvage = 1 },
+				[M6] = { buy = 48, where = "ah", salvage = 1 },
+			},
+			effort = 20,
+		}
+		for k, v in pairs(extra or {}) do
+			inp[k] = v
+		end
+		return inp
+	end
+	local THREE = { [1] = recipe("R1", M1), [2] = recipe("R2", M2), [3] = recipe("R3", M3) }
+	local ALL = { [1] = true, [2] = true, [3] = true }
+
+	local function craftSpells(plan)
+		local out = {}
+		for _, st in ipairs(plan.steps) do
+			if st.kind == "craft" then
+				out[#out + 1] = st.spell
+			end
+		end
+		return out
+	end
+
+	it("lists the other ways per step, extra >= 0, cheapest first", function()
+		local plan = P.run(input(THREE, ALL))
+		local st = plan.steps[1]
+		assert.equal(1, st.spell)
+		assert.equal(2, #st.others)
+		assert.same({ 2, 3 }, { st.others[1].spell, st.others[2].spell })
+		for _, o in ipairs(st.others) do
+			assert.is_true(o.extra >= 0)
+			assert.equal("known", o.src)
+		end
+		assert.is_true(st.others[1].extra > 0 and st.others[1].extra < st.others[2].extra)
+	end)
+
+	it("excluding the picked recipe picks the former first alternative", function()
+		local plan = P.run(input(THREE, ALL, { exclude = { notNow = { [1] = true } } }))
+		assert.same({ 2 }, craftSpells(plan))
+	end)
+
+	it("an excluded option never appears in steps (not now, AH patterns, dungeon patterns)", function()
+		local recipes = {
+			[1] = recipe("R1", M1),
+			[4] = recipe("Pattern", M4, { src = "item", item = PAT, learn = 100 }),
+		}
+		local function kinds(exclude)
+			local plan = P.run(input(recipes, { [1] = true }, { exclude = exclude }))
+			local out = {}
+			for _, st in ipairs(plan.steps) do
+				out[#out + 1] = (st.spell or 0) .. st.kind
+			end
+			return out
+		end
+		assert.same({ "4buyRecipe", "4craft" }, kinds(nil))
+		assert.same({ "1craft" }, kinds({ ahPatterns = true }))
+		assert.same({ "1craft" }, kinds({ notNow = { [4] = true } }))
+		recipes[4].patternSrc = "dungeon"
+		assert.same({ "1craft" }, kinds({ dungeon = true }))
+		assert.same({ "4buyRecipe", "4craft" }, kinds({ dungeon = false }))
+	end)
+
+	it("a special teacher's recipe never appears by default, only as an alternative; enabling it plans it", function()
+		local recipes = { [1] = recipe("R1", M1), [5] = recipe("Dungeon Tea", M4, { src = "special", learn = 100 }) }
+		local plan = P.run(input(recipes, { [1] = true }))
+		assert.same({ 1 }, craftSpells(plan))
+		assert.equal(5, plan.steps[1].others[1].spell)
+		assert.equal("special", plan.steps[1].others[1].src)
+		plan = P.run(input(recipes, { [1] = true }, { exclude = { special = false } }))
+		assert.same({ 5 }, craftSpells(plan))
+		for _, st in ipairs(plan.steps) do
+			assert.is_not.equal("train", st.kind)
+		end
+	end)
+
+	it("an unchecked trainer recipe loses a near tie to a checked one", function()
+		-- R1 50 per craft, R6 48: within the unchecked penalty
+		local recipes = { [1] = recipe("R1", M1), [6] = recipe("R6", M6) }
+		local function run(seen)
+			return P.run(input(recipes, {}, { trainerSeen = seen }))
+		end
+		assert.same({ 6 }, craftSpells(run(nil)))
+		local p = run({ [1] = true })
+		assert.same({ 1 }, craftSpells(p))
+		assert.equal("train", p.steps[1].kind)
+		assert.is_nil(p.steps[2].unchecked)
+		-- a lowercased name counts as seen too
+		assert.same({ 1 }, craftSpells(run({ r1 = true })))
+		-- far cheaper, the unchecked one still wins, marked
+		recipes[6] = recipe("R6", M4)
+		local q = run({ [1] = true })
+		assert.same({ 6 }, craftSpells(q))
+		for _, st in ipairs(q.steps) do
+			if st.spell == 6 then
+				assert.is_true(st.unchecked)
+			end
+		end
+	end)
+end)
+
+describe("Shopping by place", function()
+	local P
+	before_each(function()
+		P = load().Planner
+	end)
+
+	local function check(plan, label)
+		local shop = plan.shopping
+		assert.is_not_nil(shop, label)
+		for _, k in ipairs({ "trainer", "vendor", "ah" }) do
+			assert.is_table(shop[k], label)
+			local seen = {}
+			for _, r in ipairs(shop[k]) do
+				local key = r.item or (r.kind .. (r.name or ""))
+				assert.is_nil(seen[key], ("%s: %s repeats %s"):format(label, k, tostring(key)))
+				seen[key] = true
+			end
+		end
+		-- each block once, in travel order: trainer, vendor, then the AH
+		local rank, last, used = { trainer = 1, vendor = 2, ah = 3 }, 0, {}
+		for _, k in ipairs(shop.order) do
+			assert.is_nil(used[k], label)
+			used[k] = true
+			assert.is_true(rank[k] > last, label)
+			last = rank[k]
+		end
+		for k in pairs(rank) do
+			assert.equal(#shop[k] > 0, used[k] == true, label .. " " .. k)
+		end
+		return shop
+	end
+
+	it("one block per place over the trip's stretch, AH counts as the trip's", function()
+		for _, skill in ipairs({ 100, 109, 115, 124, 140 }) do
+			local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, skill, 150))
+			local shop = check(plan, "Leatherworking " .. skill)
+			if plan.trip then
+				local total = {}
+				for _, r in ipairs(plan.trip.rows) do
+					total[r.item] = r.total
+				end
+				for _, r in ipairs(shop.ah) do
+					assert.equal(total[r.item], r.count, "AH " .. r.item)
+				end
+			end
+		end
+		for skill = 173, 221, 8 do
+			check(P.run(F.input(F.COOKING, F.COOKING_LEARNED, skill, 225)), "Cooking " .. skill)
+		end
+	end)
+
+	it("the trainer block holds the rank due now first", function()
+		local plan = P.run(F.input(F.LEATHER, F.LEATHER_LEARNED, 150, 150, {}, {
+			target = 165,
+			ranks = { { name = "Expert", cap = 225, skill = 125, level = 20, cost = 5000, where = "trainer" } },
+			level = 30,
+		}))
+		local shop = check(plan, "Leatherworking 150")
+		assert.equal("trainRank", shop.trainer[1].kind)
+		assert.equal("Expert", shop.trainer[1].name)
+		assert.equal(5000, shop.trainer[1].cost)
+		assert.equal("trainer", shop.order[1])
+		for _, r in ipairs(shop.vendor) do
+			assert.is_true(r.count > 0)
+		end
+	end)
+end)
