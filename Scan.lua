@@ -14,7 +14,9 @@ function S.professionInfo()
 	local base = TS.GetBaseProfessionInfo and TS.GetBaseProfessionInfo()
 	local child = TS.GetChildProfessionInfo and TS.GetChildProfessionInfo()
 	local pick
-	for _, info in ipairs({ child, base }) do
+	-- not ipairs: a nil child would end the list before the base
+	for k = 1, 2 do
+		local info = k == 1 and child or base
 		if type(info) == "table" and (info.maxSkillLevel or 0) > 0 and not secret(info.skillLevel) then
 			pick = pick or info
 		end
@@ -75,6 +77,71 @@ function S.itemName(item, fallback)
 	return fallback or ("item " .. item)
 end
 
+-- Live prices are cached per profession for PRICE_TTL seconds; the planner's pass 1 until skill, cap, learned
+-- recipes, prices or the effort setting change. Bag updates rerun only passes 2 to 4.
+S.PRICE_TTL = 300
+local priceCache, baseCache = {}, {}
+
+function S.resetCaches()
+	priceCache, baseCache = {}, {}
+end
+
+local function clock()
+	return debugprofilestop and debugprofilestop() or os.clock() * 1000
+end
+
+-- Runs the planner for one profession entry of a v2 Data/Plan.lua. learned[spell] = true, difficulty[spell] = the
+-- client's relativeDifficulty. Returns the plan (steps, hold, leftovers, fromStock) plus price diagnostics.
+function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings)
+	settings = settings or {}
+	local t0 = clock()
+	local now = GetTime and GetTime() or 0
+	local pc = priceCache[prof]
+	-- salvage values depend on the sell-share setting: a changed share refetches like an expired entry
+	if not pc or now - pc.at > S.PRICE_TTL or now < pc.at or pc.sellShare ~= settings.sellShare then
+		local price, product, counts = ns.TSM.prices(plan, prof, nil, settings.sellShare)
+		pc = { at = now, price = price, product = product, counts = counts, stamp = (pc and pc.stamp or 0) + 1 }
+		pc.sellShare = settings.sellShare
+		priceCache[prof] = pc
+	end
+	local effort = settings.effort or plan.effort or ns.Planner.EFFORT
+	local nLearned, learnedKey = 0, {}
+	for spell in pairs(learned) do
+		nLearned = nLearned + 1
+		learnedKey[#learnedKey + 1] = spell
+	end
+	table.sort(learnedKey)
+	local key = table.concat({ skill, cap, pc.stamp, effort, nLearned, table.concat(learnedKey, ",") }, ":")
+	local bc = baseCache[prof]
+	if not bc or bc.key ~= key then
+		local ctx = ns.Planner.prepare({
+			skill = skill,
+			cap = cap,
+			recipes = prof.recipes,
+			items = plan.items,
+			learned = learned,
+			difficulty = difficulty,
+			price = pc.price,
+			product = pc.product,
+			effort = effort,
+		})
+		bc = { key = key, ctx = ctx, baseline = ns.Planner.baseline(ctx) }
+		baseCache[prof] = bc
+	end
+	local have = {}
+	for item in pairs(pc.price) do
+		local n = S.have(item)
+		if n > 0 then
+			have[item] = n
+		end
+	end
+	local result = ns.Planner.finish(bc.ctx, bc.baseline, have)
+	result.ms = clock() - t0
+	result.prices = pc.counts
+	result.ageHours = ns.TSM.ageHours(plan)
+	return result
+end
+
 -- The model the panel shows, or { why = "..." } naming the link that broke or why not now.
 function S.build(plan)
 	local own, notOwn = S.isOwnWindow()
@@ -96,7 +163,7 @@ function S.build(plan)
 	local ids, idSource = recipeIDs()
 	local recipes = {}
 	local counts = { ids = #ids, learned = 0, secret = 0, noSchematic = 0, clientColor = 0, dataThresholds = 0 }
-	local learned = {}
+	local learned, difficulties, greyCheck = {}, {}, {}
 	for _, id in ipairs(ids) do
 		local r = C_TradeSkillUI.GetRecipeInfo(id)
 		if type(r) == "table" then
@@ -115,16 +182,22 @@ function S.build(plan)
 				end
 				if difficulty ~= nil then
 					counts.clientColor = counts.clientColor + 1
+					difficulties[id] = difficulty
 				end
-				if thresholds[id] then
+				local th = ns.Logic.thresholds(thresholds[id])
+				if th then
 					counts.dataThresholds = counts.dataThresholds + 1
+					-- the client's grey (maxTrivialLevel) next to the export's, for a few recipes (selftest)
+					if #greyCheck < 5 and not secret(r.maxTrivialLevel) then
+						greyCheck[#greyCheck + 1] = { spell = id, client = r.maxTrivialLevel, plan = th[2] }
+					end
 				end
 				recipes[#recipes + 1] = {
 					id = id,
 					name = r.name,
 					learned = true,
 					difficulty = difficulty,
-					thresholds = thresholds[id],
+					thresholds = th,
 					reagents = reagents,
 				}
 			end
@@ -140,7 +213,28 @@ function S.build(plan)
 		plan = prof,
 		generatedAt = plan and plan.generatedAt,
 		fromStock = ns.Logic.fromStock(recipes, skill, S.have, vendor),
+		greyCheck = greyCheck,
 	}
+	if prof and ns.Logic.isPlanV2(plan, prof) and info.maxSkillLevel and info.maxSkillLevel > skill then
+		local ok, result = pcall(
+			S.runPlanner,
+			plan,
+			prof,
+			skill,
+			info.maxSkillLevel,
+			learned,
+			difficulties,
+			ns.settings and ns.settings()
+		)
+		if ok then
+			model.planner = result
+		else
+			model.plannerWhy = "planner failed: " .. tostring(result)
+		end
+	elseif prof and not ns.Logic.isPlanV2(plan, prof) then
+		model.plannerWhy =
+			"Data/Plan.lua is version 1 (no recipe reagents): rerun tools/tsm/skillup_lua.py, then /reload"
+	end
 	if prof then
 		model.step, model.nextStep, model.planState = ns.Logic.planStep(prof, skill)
 		model.shopping, model.craftsLeft = ns.Logic.stepShopping(model.step, skill, S.have)

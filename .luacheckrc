@@ -15,12 +15,14 @@ else
 	-- CI in this repo runs standalone: every global the addon touches must be here.
 	read_globals = {
 		"CreateFrame", "C_AddOns", "C_Timer", "C_Item", "C_TradeSkillUI", "GetBuildInfo", "WOW_PROJECT_ID",
-		"issecretvalue", "date",
+		"issecretvalue", "date", "time", "GetTime", "debugprofilestop",
 	}
 end
 -- FrameXML globals the generated list doesn't carry (it is built from the C API lists).
 read_globals[#read_globals + 1] = "ProfessionsFrame"
 read_globals[#read_globals + 1] = "UIParent"
+read_globals[#read_globals + 1] = "GameTooltip"
+read_globals[#read_globals + 1] = "debugstack"
 -- TradeSkillMaster's public API (a required dependency).
 read_globals[#read_globals + 1] = "TSM_API"
 

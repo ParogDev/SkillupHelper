@@ -187,6 +187,30 @@ function L.recipesToBuy(prof, skill, isLearned)
 	return out
 end
 
+-- A recipe's { yellow, grey, skillups } from a Data/Plan.lua row: version 2 ({ y, g, k, mats, ... }) or the
+-- version 1 three-element array. nil when the row has no thresholds.
+function L.thresholds(row)
+	if type(row) ~= "table" then
+		return nil
+	end
+	if row.y and row.g then
+		return { row.y, row.g, row.k or 1 }
+	end
+	if row[1] and row[2] then
+		return row
+	end
+	return nil
+end
+
+-- Whether a profession entry carries the planner's input (Plan.lua version 2: reagents per recipe).
+function L.isPlanV2(plan, prof)
+	if not plan or (plan.version or 1) < 2 or not prof or type(prof.recipes) ~= "table" then
+		return false
+	end
+	local _, row = next(prof.recipes)
+	return row == nil or row.mats ~= nil
+end
+
 -- Copper as "1g 2s 3c" (gold and silver only when present).
 function L.money(c)
 	if not c then

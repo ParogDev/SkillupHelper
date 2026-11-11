@@ -2,17 +2,21 @@
 
 A panel on the right of the profession window that answers "what do I craft next to level this?":
 
-- **Craft now from bags + bank**: every learned recipe that still gives skill and that you can make from what you carry
-  and what sits in your bank, orange first, with how many crafts you have the materials for and roughly how many points
-  that is. Vendor reagents (thread, spices, dyes, vials) count as always available; the line says how many to buy.
-- **Cheapest next step**: the recipe a price plan picks for your current skill, how many crafts are left in that stretch
-  and which materials you are still short of.
-- **Recipes worth buying**: recipe and pattern items the plan buys, with the price and whether you can learn them yet.
+- **Plan**: ordered steps from your skill to the cap. Craft N from stock, buy materials (vendor or auction house, with
+  the cost) and craft, buy a recipe, train, or a gap where nothing gives skill. Each step says how many points to
+  expect. A buy step also shows the use-your-stock alternative and what it costs extra over the whole path.
+- Materials you own count at what they are worth: the buy price when the plan buys more of them anyway, otherwise what
+  they sell for. A recipe about to turn grey uses its materials first, materials a later step needs are kept for it,
+  and surplus is listed with what it sells for.
+- **Craftable from bags + bank**: every learned recipe you can make from stock, with a verdict: now, keep for later, or
+  wasteful (and how much more per point than the plan).
 
-The live list needs nothing else. The plan comes from `Data/Plan.lua`, a file written on your PC from your auction house
-prices (the maintainer's tool, not shipped); without it the panel says so and shows the live list only.
+Prices come from TradeSkillMaster live (the TSM app keeps AuctionDB synced). The recipe data, and fallback prices when
+TSM has none, come from `Data/Plan.lua`, a file written on your PC (the maintainer's tool, not shipped); without it the
+panel shows the from-stock list only. The panel warns when the TSM data is more than 24 hours old.
 
-`/skillup` shows or hides the panel.
+`/skillup` shows or hides the panel. `/skillup effort <copper>` sets the effort charge per craft (default 20c): the
+planner adds it to every craft so a cheap recipe with a low skill-up chance does not win on price alone.
 
 Requires TradeSkillMaster. The panel docks to TSM's crafting window, and to Blizzard's window after you press TSM's
 "WoW UI" button; it follows you when you switch. It finds TSM's window through `TSM_API` only and never changes TSM's

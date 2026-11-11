@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.1.2"
+ns.CODE_VERSION = "0.2.3"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -17,6 +17,7 @@ end
 local DEFAULTS = { shown = true }
 local db
 ns.selftest = {}
+ns.scans = {}
 
 function ns.initDB(saved)
 	saved = type(saved) == "table" and saved or {}
@@ -59,9 +60,51 @@ local function refreshSelftest()
 	st.savedAt = date("%Y-%m-%d %H:%M:%S")
 	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent"
 	st.lastScan = ns.lastScan
+	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
+	st.scans = ns.scans
+	st.settings = { effort = db.effort, sellShare = db.sellShare }
 	st.tsm = ns.TSM.status()
+	st.craftedEvent = ns.craftedEvent
+	local age = ns.TSM.ageHours(ns.Data.plan)
+	st.tsmAgeHours = age and math.floor(age * 10 + 0.5) / 10
+	st.tsmStale = age == nil or age > ns.TSM.STALE_HOURS
 	st.lastError = ns.lastError
+	st.panelErrors = ns.panelErrors
+	local ui = ns.UI.stats
+	st.ui = {
+		layout = ui.layout,
+		animations = ui.animations,
+		played = ui.played,
+		lastDock = ui.lastDock,
+		docks = ui.docks,
+		dockGap = ui.dockGap,
+		fit = ui.fit,
+		handle = ui.handle,
+		clicks = ui.clicks,
+		actionsWhy = ui.actionsWhy,
+		lastCraft = ui.lastCraft,
+		lastCraftError = ui.lastCraftError,
+		lastOpenError = ui.lastOpenError,
+	}
 	db.selftest = st
+end
+
+-- Runs a panel step and keeps its error: chat once per step, selftest.lastError and panelErrors always. Without
+-- BugGrabber a frame error is otherwise invisible and the panel just does not appear.
+ns.panelErrors = {}
+function ns.guard(where, fn, ...)
+	local ok, err = xpcall(fn, function(e)
+		local stack = debugstack and debugstack(2, 6, 0) or ""
+		return tostring(e) .. "\n" .. stack
+	end, ...)
+	if not ok then
+		ns.lastError = where .. ": " .. tostring(err)
+		if not ns.panelErrors[where] then
+			print("|cffff6060SkillupHelper " .. where .. " failed:|r " .. tostring(err):match("^[^\n]*"))
+		end
+		ns.panelErrors[where] = ns.lastError
+	end
+	return ok
 end
 
 local pending = false
@@ -77,30 +120,74 @@ function ns.refresh()
 			ns.lastError = tostring(model)
 			model = { why = "scan failed: " .. tostring(model) }
 		end
-		ns.UI.show(model)
-		ns.lastScan = {
-			at = date("%Y-%m-%d %H:%M:%S"),
-			profession = model.profession,
-			skill = model.skill,
-			fromStock = model.fromStock and #model.fromStock or nil,
-			planState = model.planState,
-			why = model.why or model.planWhy,
-			counts = model.counts,
-			diag = model.diag,
-			idSource = model.idSource,
-			dock = ns.dockKind,
-			tsm = ns.TSM.status(),
-		}
+		ns.guard("draw", ns.UI.show, model)
+		ns.lastScan = ns.scanSummary(model)
+		ns.lastScan.dock = ns.dockKind
+		ns.lastScan.tsm = ns.TSM.status()
+		if model.profession then
+			ns.scans[model.profession] = ns.lastScan
+		end
 	end)
 end
 
-function ns.setShown(shown)
+-- What one scan and its plan looked like, for the selftest (no item or character names beyond recipe names).
+function ns.scanSummary(model)
+	local s = {
+		at = date("%Y-%m-%d %H:%M:%S"),
+		profession = model.profession,
+		skill = model.skill,
+		maxSkill = model.maxSkill,
+		fromStock = model.fromStock and #model.fromStock or nil,
+		planState = model.planState,
+		why = model.why or model.planWhy or model.plannerWhy,
+		counts = model.counts,
+		diag = model.diag,
+		idSource = model.idSource,
+		greyCheck = model.greyCheck,
+	}
+	local p = model.planner
+	if p then
+		local ageHours = p.ageHours
+		s.planner = {
+			ms = p.ms and math.floor(p.ms * 100 + 0.5) / 100,
+			steps = #p.steps,
+			hold = #p.hold,
+			leftovers = #p.leftovers,
+			skipped = #p.skipped,
+			colourMismatch = #p.colourMismatch,
+			mismatches = p.colourMismatch,
+			priceSources = p.prices,
+			tsmAgeHours = ageHours and math.floor(ageHours * 10 + 0.5) / 10,
+			tsmStale = ageHours == nil or ageHours > ns.TSM.STALE_HOURS,
+		}
+		local list = {}
+		for i, st in ipairs(p.steps) do
+			if i > 6 then
+				break
+			end
+			list[#list + 1] = ("%s %s%s %s"):format(
+				st.kind,
+				st.crafts and (st.crafts .. "x ") or "",
+				tostring(st.name or st.why),
+				st.from and ("%.1f-%.1f"):format(st.from, st.to or st.from) or tostring(st.at or "")
+			)
+		end
+		s.planner.first = list
+	end
+	return s
+end
+
+-- The planner settings from SavedVariables (nil fields fall back to Data/Plan.lua's defaults).
+function ns.settings()
+	return { effort = db and db.effort, sellShare = db and db.sellShare }
+end
+
+-- Shows the panel or folds it to its handle (the choice is kept). byUser: a click, so the change fades in.
+function ns.setShown(shown, byUser)
 	if db then
 		db.shown = shown
 	end
-	if ns.UI.frame then
-		ns.UI.frame:SetShown(shown)
-	end
+	ns.UI.setShown(shown, ns.tradeSkillOpen == true, byUser)
 	if shown then
 		ns.refresh()
 	end
@@ -130,14 +217,25 @@ end
 -- While a profession is open, follow the user flipping between TSM's UI and the WoW UI.
 local function redock()
 	local target, kind = ns.dockTarget()
-	ns.UI.dock(target)
+	ns.UI.dock(target, kind)
+	local changed = ns.dockKind ~= nil and ns.dockKind ~= kind
+	-- set before the redraw, which reads it
 	ns.dockKind = kind
+	if changed then
+		-- Show recipe is offered beside Blizzard's window only: redraw the card for the new window
+		ns.refresh()
+	end
+	if ns.UI.frame and ns.UI.frame:IsShown() then
+		ns.UI.noteDock(kind)
+	end
 end
 
 local function open()
-	ns.UI.create()
 	ns.tradeSkillOpen = true
-	ns.UI.frame:SetShown(db == nil or db.shown)
+	if not ns.guard("create", ns.UI.create) then
+		return
+	end
+	ns.UI.setShown(db == nil or db.shown, true)
 	redock()
 	stopTicker()
 	ticker = C_Timer.NewTicker(0.5, redock)
@@ -147,9 +245,7 @@ end
 local function close()
 	ns.tradeSkillOpen = false
 	stopTicker()
-	if ns.UI.frame then
-		ns.UI.frame:Hide()
-	end
+	ns.UI.setShown(false, false)
 end
 
 local f = CreateFrame("Frame")
@@ -169,7 +265,22 @@ f:RegisterEvent("TRADE_SKILL_CLOSE")
 for _, e in ipairs(REFRESH_EVENTS) do
 	f:RegisterEvent(e)
 end
-f:SetScript("OnEvent", function(_, event, arg1)
+-- A craft result replans at once (it carries no recipe id and can fire for other sources: a trigger, not a counter).
+-- Registered under pcall so a client without it names the event instead of breaking the load.
+local okCrafted, errCrafted = pcall(f.RegisterEvent, f, "TRADE_SKILL_ITEM_CRAFTED_RESULT")
+ns.craftedEvent = okCrafted and "registered"
+	or ("TRADE_SKILL_ITEM_CRAFTED_RESULT not registered: " .. tostring(errCrafted))
+-- A craft the client refuses raises no Lua error (pcall sees nothing): it fires one of these, naming the addon.
+for _, e in ipairs({ "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN" }) do
+	pcall(f.RegisterEvent, f, e)
+end
+f:SetScript("OnEvent", function(_, event, arg1, arg2)
+	if event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" then
+		if arg1 == ADDON then
+			ns.UI.stats.lastCraftError = ("%s: the client refused %s"):format(event, tostring(arg2))
+		end
+		return
+	end
 	if event == "ADDON_LOADED" then
 		if arg1 == ADDON then
 			SkillupHelperDB = ns.initDB(SkillupHelperDB)
@@ -196,7 +307,30 @@ f:SetScript("OnEvent", function(_, event, arg1)
 end)
 
 SLASH_SKILLUPHELPER1 = "/skillup"
-SlashCmdList.SKILLUPHELPER = function()
+-- "/skillup effort 30": copper charged per craft by the planner ("/skillup effort" resets to the plan's default).
+function ns.command(msg)
+	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
+	if cmd ~= "effort" then
+		return false
+	end
+	local n = tonumber(arg)
+	if db then
+		db.effort = (n and n >= 0) and n or nil
+	end
+	print(
+		("SkillupHelper: effort %s copper a craft."):format(
+			db and db.effort and tostring(db.effort)
+				or "default (" .. tostring(ns.Data.plan and ns.Data.plan.effort or 20) .. ")"
+		)
+	)
+	ns.refresh()
+	return true
+end
+
+SlashCmdList.SKILLUPHELPER = function(msg)
+	if ns.command(msg) then
+		return
+	end
 	if not ns.tradeSkillOpen then
 		print("SkillupHelper: open a profession first.")
 		return

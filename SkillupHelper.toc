@@ -12,7 +12,9 @@
 
 Data\Plan.lua
 Logic.lua
+Planner.lua
 Scan.lua
 TSM.lua
+View.lua
 UI.lua
 Core.lua
