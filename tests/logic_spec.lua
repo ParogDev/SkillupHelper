@@ -1,6 +1,6 @@
 -- Logic, the panel text and the scan against a fake C_TradeSkillUI. Frames are checked in game.
 local function load(ns)
-	for _, f in ipairs({ "Logic.lua", "Scan.lua", "UI.lua" }) do
+	for _, f in ipairs({ "Logic.lua", "Scan.lua", "TSM.lua", "UI.lua" }) do
 		assert(loadfile(f))("SkillupHelper", ns)
 	end
 	return ns
@@ -244,6 +244,64 @@ describe("Scan and panel", function()
 		assert.matches("Recipe: Rockscale Cod 27s 92c", text)
 		assert.matches("then 180%-215 Rockscale Cod", text)
 		assert.is_true(#ns.UI.lines({ why = "x", state = "not now" }) == 1)
+	end)
+end)
+
+describe("TSM docking", function()
+	local function fakeFrame(visible, left, top)
+		return {
+			IsVisible = function()
+				return visible
+			end,
+			GetLeft = function()
+				return left
+			end,
+			GetTop = function()
+				return top
+			end,
+		}
+	end
+
+	it("takes TSM's crafting frame from its callback and drops it when TSM hides", function()
+		local cb, visible = nil, true
+		_G.TSM_API = {
+			RegisterUICallback = function(ui, tag, fn)
+				assert.equal("CRAFTING", ui)
+				assert.equal("SkillupHelper:dock", tag)
+				cb = fn
+			end,
+			IsUIVisible = function()
+				return visible
+			end,
+		}
+		local ns = load({})
+		assert.is_true(ns.TSM.register())
+		local changed = 0
+		ns.onTSMChanged = function()
+			changed = changed + 1
+		end
+		local tsmFrame = fakeFrame(true, 10, 10)
+		cb(true, tsmFrame)
+		assert.equal(tsmFrame, ns.TSM.craftingFrame())
+		visible = false
+		assert.is_nil(ns.TSM.craftingFrame())
+		cb(false)
+		assert.equal(2, changed)
+		assert.same("hidden", ns.TSM.status().lastCallback)
+	end)
+
+	it("names a missing TSM_API", function()
+		_G.TSM_API = nil
+		local ns = load({})
+		assert.is_false(ns.TSM.register())
+		assert.matches("missing", ns.TSM.status().callback)
+	end)
+
+	it("counts Blizzard's window as showing only when TSM has not moved it off-screen", function()
+		local ns = load({})
+		assert.is_true(ns.TSM.onScreen(fakeFrame(true, 100, 700)))
+		assert.is_false(ns.TSM.onScreen(fakeFrame(true, 100100, 100700)))
+		assert.is_false(ns.TSM.onScreen(fakeFrame(false, 100, 700)))
 	end)
 end)
 

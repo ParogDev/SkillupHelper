@@ -20,6 +20,9 @@ else
 end
 -- FrameXML globals the generated list doesn't carry (it is built from the C API lists).
 read_globals[#read_globals + 1] = "ProfessionsFrame"
+read_globals[#read_globals + 1] = "UIParent"
+-- TradeSkillMaster's public API (a required dependency).
+read_globals[#read_globals + 1] = "TSM_API"
 
 globals = { "SkillupHelper", "SkillupHelperDB", "SLASH_SKILLUPHELPER1", "SlashCmdList" }
 

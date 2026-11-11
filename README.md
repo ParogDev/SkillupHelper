@@ -14,6 +14,10 @@ prices (the maintainer's tool, not shipped); without it the panel says so and sh
 
 `/skillup` shows or hides the panel.
 
+Requires TradeSkillMaster. The panel docks to TSM's crafting window, and to Blizzard's window after you press TSM's
+"WoW UI" button; it follows you when you switch. It finds TSM's window through `TSM_API` only and never changes TSM's
+frames. TSM's API cannot add to its crafting queue, so there is no "queue these" button.
+
 Only WoW: Forever (interface 16001) is supported.
 
 ## Limits

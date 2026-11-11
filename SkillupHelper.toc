@@ -4,6 +4,7 @@
 ## Author: ParogDev
 ## Version: @project-version@
 ## SavedVariables: SkillupHelperDB
+## Dependencies: TradeSkillMaster
 ## X-Game: forever
 ## X-Website: https://github.com/ParogDev/SkillupHelper
 ## X-License: MIT
@@ -12,5 +13,6 @@
 Data\Plan.lua
 Logic.lua
 Scan.lua
+TSM.lua
 UI.lua
 Core.lua

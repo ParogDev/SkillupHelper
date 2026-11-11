@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.1.0"
+ns.CODE_VERSION = "0.1.1"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -59,6 +59,7 @@ local function refreshSelftest()
 	st.savedAt = date("%Y-%m-%d %H:%M:%S")
 	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent"
 	st.lastScan = ns.lastScan
+	st.tsm = ns.TSM.status()
 	st.lastError = ns.lastError
 	db.selftest = st
 end
@@ -87,6 +88,8 @@ function ns.refresh()
 			counts = model.counts,
 			diag = model.diag,
 			idSource = model.idSource,
+			dock = ns.dockKind,
+			tsm = ns.TSM.status(),
 		}
 	end)
 end
@@ -103,13 +106,50 @@ function ns.setShown(shown)
 	end
 end
 
-local function attach()
-	if ns.UI.frame or not ProfessionsFrame then
-		return
+-- The window to dock to: TSM's crafting frame when it is shown, else Blizzard's ProfessionsFrame when shown.
+-- Returns the frame (or nil) and its kind, for the selftest.
+function ns.dockTarget()
+	local tsm = ns.TSM.craftingFrame()
+	if tsm and tsm:IsVisible() then
+		return tsm, "tsm"
 	end
-	ns.UI.create(ProfessionsFrame)
+	if ProfessionsFrame and ns.TSM.onScreen(ProfessionsFrame) then
+		return ProfessionsFrame, "blizzard"
+	end
+	return nil, "free"
+end
+
+local ticker
+local function stopTicker()
+	if ticker then
+		ticker:Cancel()
+		ticker = nil
+	end
+end
+
+-- While a profession is open, follow the user flipping between TSM's UI and the WoW UI.
+local function redock()
+	local target, kind = ns.dockTarget()
+	ns.UI.dock(target)
+	ns.dockKind = kind
+end
+
+local function open()
+	ns.UI.create()
+	ns.tradeSkillOpen = true
 	ns.UI.frame:SetShown(db == nil or db.shown)
-	ProfessionsFrame:HookScript("OnShow", ns.refresh)
+	redock()
+	stopTicker()
+	ticker = C_Timer.NewTicker(0.5, redock)
+	ns.refresh()
+end
+
+local function close()
+	ns.tradeSkillOpen = false
+	stopTicker()
+	if ns.UI.frame then
+		ns.UI.frame:Hide()
+	end
 end
 
 local f = CreateFrame("Frame")
@@ -125,6 +165,7 @@ local REFRESH_EVENTS = {
 f:RegisterEvent("ADDON_LOADED")
 f:RegisterEvent("PLAYER_LOGIN")
 f:RegisterEvent("PLAYER_LOGOUT")
+f:RegisterEvent("TRADE_SKILL_CLOSE")
 for _, e in ipairs(REFRESH_EVENTS) do
 	f:RegisterEvent(e)
 end
@@ -133,27 +174,31 @@ f:SetScript("OnEvent", function(_, event, arg1)
 		if arg1 == ADDON then
 			SkillupHelperDB = ns.initDB(SkillupHelperDB)
 			db = SkillupHelperDB
-		elseif arg1 == "Blizzard_Professions" then
-			attach()
 		end
 	elseif event == "PLAYER_LOGIN" then
 		db.selftest = nil
+		ns.TSM.register()
+		ns.onTSMChanged = function()
+			if ns.tradeSkillOpen then
+				redock()
+			end
+		end
 		refreshSelftest()
-		attach()
 	elseif event == "PLAYER_LOGOUT" then
 		refreshSelftest()
 	elseif event == "TRADE_SKILL_SHOW" then
-		attach()
-		ns.refresh()
-	else
+		open()
+	elseif event == "TRADE_SKILL_CLOSE" then
+		close()
+	elseif ns.tradeSkillOpen then
 		ns.refresh()
 	end
 end)
 
 SLASH_SKILLUPHELPER1 = "/skillup"
 SlashCmdList.SKILLUPHELPER = function()
-	if not ns.UI.frame then
-		print("SkillupHelper: open a profession window first.")
+	if not ns.tradeSkillOpen then
+		print("SkillupHelper: open a profession first.")
 		return
 	end
 	ns.setShown(not ns.UI.frame:IsShown())

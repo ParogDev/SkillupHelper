@@ -139,14 +139,40 @@ local BACKDROP = {
 	insets = { left = 4, right = 4, top = 4, bottom = 4 },
 }
 
-function UI.create(parent)
+-- Docks the panel to the right of `target` (TSM's crafting frame or Blizzard's ProfessionsFrame), or leaves it
+-- free and movable where the user put it when there is no window to dock to.
+function UI.dock(target)
+	local f = UI.frame
+	if not f or f.dockedTo == target then
+		return
+	end
+	f:ClearAllPoints()
+	if target then
+		f:SetPoint("TOPLEFT", target, "TOPRIGHT", 2, 0)
+		f:SetHeight(math.max(300, math.min(600, target:GetHeight() or 420)))
+	else
+		f:SetPoint("CENTER", UIParent, "CENTER", 300, 0)
+		f:SetHeight(420)
+	end
+	f.dockedTo = target
+end
+
+function UI.create()
 	if UI.frame then
 		return UI.frame
 	end
-	local f = CreateFrame("Frame", "SkillupHelperPanel", parent, "BackdropTemplate")
+	local f = CreateFrame("Frame", "SkillupHelperPanel", UIParent, "BackdropTemplate")
 	f:SetSize(340, 420)
-	f:SetPoint("TOPLEFT", parent, "TOPRIGHT", 2, 0)
-	f:SetPoint("BOTTOMLEFT", parent, "BOTTOMRIGHT", 2, 0)
+	f:SetFrameStrata("HIGH")
+	f:SetMovable(true)
+	f:EnableMouse(true)
+	f:RegisterForDrag("LeftButton")
+	f:SetScript("OnDragStart", function(self)
+		if not self.dockedTo then
+			self:StartMoving()
+		end
+	end)
+	f:SetScript("OnDragStop", f.StopMovingOrSizing)
 	f:SetBackdrop(BACKDROP)
 	f:SetBackdropColor(0, 0, 0, 0.85)
 
