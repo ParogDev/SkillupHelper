@@ -1,0 +1,6 @@
+.luacheckcache
+*.zip
+.release/
+# Written on this PC by tools/tsm/skillup_lua.py (scaffolding repo): prices from your own auction house.
+Data/Plan.lua
+Data/Plan.lua.tmp
