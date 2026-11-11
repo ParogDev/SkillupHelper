@@ -5,13 +5,27 @@ local _, ns = ...
 local UI = {}
 ns.UI = UI
 
-local WIDTH, INNER = 340, 296
+-- The panel is WIDTH wide with its scroll bar and NARROW without: the content column never moves.
+local WIDTH, NARROW, INNER = 340, 316, 296
 local PAD = 12
+local FREE_HEIGHT = 480 -- the tallest the panel gets with no window to dock to
+local DOCK_GAP, TAB_GAP = 2, 4
 local WHITE = "Interface\\Buttons\\WHITE8X8"
 local QUESTION = 134400 -- INV_Misc_QuestionMark
+local HANDLE_ICON = "Interface\\Icons\\INV_Misc_Note_01"
 
 -- Panel diagnostics for the selftest.
-UI.stats = { layout = "cards", animations = 0, played = {}, docks = {} }
+UI.stats = {
+	layout = "cards",
+	animations = 0,
+	played = {},
+	docks = {},
+	clicks = { craft = 0, open = 0, hide = 0, show = 0 },
+}
+
+local function secret(v)
+	return issecretvalue ~= nil and issecretvalue(v)
+end
 
 local function count(kind)
 	UI.stats.animations = UI.stats.animations + 1
@@ -30,6 +44,36 @@ local function itemName(item, fallback)
 	return ns.Scan and ns.Scan.itemName(item, fallback) or fallback or ("item " .. item)
 end
 
+-- How many casts of a learned recipe the client allows now, or nil and the link that broke (not learned, a secret
+-- value, no count from the client).
+function UI.craftable(spell)
+	if secret(spell) or type(spell) ~= "number" then
+		return nil, "no recipe id"
+	end
+	local ok, r = pcall(C_TradeSkillUI.GetRecipeInfo, spell)
+	if not ok then
+		return nil, "C_TradeSkillUI.GetRecipeInfo failed: " .. tostring(r)
+	end
+	if type(r) ~= "table" then
+		return nil, "no recipe info for spell " .. spell
+	end
+	if secret(r.learned) then
+		return nil, "recipe info is secret here"
+	end
+	if not r.learned then
+		return nil, "recipe not learned"
+	end
+	local okCount, n = pcall(C_TradeSkillUI.GetCraftableCount, spell)
+	if okCount and not secret(n) and type(n) == "number" then
+		return n
+	end
+	n = r.numAvailable
+	if not secret(n) and type(n) == "number" then
+		return n
+	end
+	return nil, "the client gave no craftable count (GetCraftableCount, numAvailable)"
+end
+
 -- The env View.describe reads the client through.
 function UI.env()
 	return {
@@ -38,7 +82,39 @@ function UI.env()
 		have = function(item)
 			return ns.Scan.have(item)
 		end,
+		craftable = UI.craftable,
+		dock = ns.dockKind,
 	}
+end
+
+-- A click on a card button. Each client call runs under pcall and leaves its result in UI.stats (selftest ui).
+-- Only ever called from a button's OnClick: a craft needs the user's own click.
+function UI.act(a)
+	local stats = UI.stats
+	if type(a) ~= "table" or not a.enabled or secret(a.spell) or type(a.spell) ~= "number" then
+		return false
+	end
+	if a.id == "open" then
+		stats.clicks.open = stats.clicks.open + 1
+		local ok, err = pcall(C_TradeSkillUI.OpenRecipe, a.spell)
+		stats.lastOpenError = not ok and ("C_TradeSkillUI.OpenRecipe: " .. tostring(err)) or nil
+		return ok
+	elseif a.id ~= "craft" then
+		return false
+	end
+	stats.clicks.craft = stats.clicks.craft + 1
+	-- the bags may have changed since the card was drawn: ask the client again
+	local can, why = UI.craftable(a.spell)
+	local n = math.floor(math.min(a.count or 0, can or 0))
+	if n < 1 then
+		stats.lastCraftError = "nothing craftable at the click: " .. (why or "the client counts 0")
+		ns.refresh()
+		return false
+	end
+	stats.lastCraft = { spell = a.spell, count = n }
+	local ok, err = pcall(C_TradeSkillUI.CraftRecipe, a.spell, n)
+	stats.lastCraftError = not ok and ("C_TradeSkillUI.CraftRecipe: " .. tostring(err)) or nil
+	return ok
 end
 
 local function text(parent, font, height, layer)
@@ -61,6 +137,120 @@ end
 local function fill(tex, name, alpha)
 	local r, g, b = rgb(name)
 	tex:SetColorTexture(r, g, b, alpha or 1)
+end
+
+-- Four one-pixel edges around `owner`, drawn on `parent` (default: owner).
+local function edges(owner, layer, parent)
+	local out = {}
+	for k, side in ipairs({ "TOP", "BOTTOM", "LEFT", "RIGHT" }) do
+		local t = (parent or owner):CreateTexture(nil, layer or "BORDER")
+		if k <= 2 then
+			t:SetHeight(1)
+			t:SetPoint(side .. "LEFT", owner, side .. "LEFT")
+			t:SetPoint(side .. "RIGHT", owner, side .. "RIGHT")
+		else
+			t:SetWidth(1)
+			t:SetPoint("TOP" .. side, owner, "TOP" .. side)
+			t:SetPoint("BOTTOM" .. side, owner, "BOTTOM" .. side)
+		end
+		out[k] = t
+	end
+	return out
+end
+
+local function paintEdges(list, r, g, b, a)
+	for _, t in ipairs(list) do
+		t:SetColorTexture(r, g, b, a or 1)
+	end
+end
+
+local function showTip(owner, tip)
+	if not tip or not GameTooltip then
+		return
+	end
+	GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+	GameTooltip:SetText(tip, 1, 1, 1, 1, true)
+	GameTooltip:Show()
+end
+
+local function hideTip(owner)
+	if GameTooltip and GameTooltip:IsOwned(owner) then
+		GameTooltip:Hide()
+	end
+end
+
+-- A short fade that plays when something appears because the user asked for it.
+local function appear(frame)
+	local g = frame:CreateAnimationGroup()
+	local a = g:CreateAnimation("Alpha")
+	a:SetFromAlpha(0)
+	a:SetToAlpha(1)
+	a:SetDuration(0.15)
+	g:SetToFinalAlpha(true)
+	return g
+end
+
+------------------------------------------------------------------------------------------------------------ buttons
+
+-- Flat buttons in the panel's palette. "primary" wears the step's colour, "quiet" is an outline, "inert" is a
+-- primary that cannot act yet: it keeps its place and its label says what to do first.
+local function paintButton(b)
+	local over = b.over and b.style ~= "inert"
+	local r, g, bl = rgb("line")
+	if b.style == "primary" then
+		r, g, bl = b.accent[1], b.accent[2], b.accent[3]
+		b.bg:SetColorTexture(r, g, bl, over and 0.34 or 0.18)
+		paintEdges(b.edge, r, g, bl, over and 1 or 0.8)
+		setColor(b.label, "bone")
+	elseif b.style == "quiet" then
+		b.bg:SetColorTexture(r, g, bl, over and 0.5 or 0)
+		paintEdges(b.edge, r, g, bl, 1)
+		setColor(b.label, over and "bone" or "ash")
+	else
+		b.bg:SetColorTexture(r, g, bl, 0.25)
+		paintEdges(b.edge, r, g, bl, 0.6)
+		setColor(b.label, "ash")
+	end
+end
+
+local function newButton(parent)
+	local b = CreateFrame("Button", nil, parent)
+	b:SetHeight(24)
+	b.bg = b:CreateTexture(nil, "BACKGROUND")
+	b.bg:SetAllPoints()
+	b.edge = edges(b)
+	b.label = text(b, "GameFontHighlightSmall", 12)
+	b.label:SetPoint("LEFT", 8, 0)
+	b.label:SetPoint("RIGHT", -8, 0)
+	b.label:SetJustifyH("CENTER")
+	b.label:SetJustifyV("MIDDLE")
+	b.label:SetWordWrap(false)
+	b.style, b.accent = "quiet", ns.View.RGB.bone
+	b:SetScript("OnEnter", function(self)
+		self.over = true
+		paintButton(self)
+		-- a label cut short by the button's width is read whole in the tooltip
+		showTip(self, self.tip or (self.label:IsTruncated() and self.label:GetText()) or nil)
+	end)
+	b:SetScript("OnLeave", function(self)
+		self.over = false
+		paintButton(self)
+		hideTip(self)
+	end)
+	b:SetScript("OnClick", function(self)
+		ns.guard("click", UI.act, self.action)
+	end)
+	return b
+end
+
+-- Shows a View action on a button.
+local function setButton(b, a, accent)
+	b.action, b.tip = a, a.tip
+	b.style = (a.id == "open" and "quiet") or (a.enabled and "primary" or "inert")
+	b.accent = accent
+	b.label:SetText(a.label)
+	paintButton(b)
+	b:Show()
 end
 
 -- The icon of a step: the recipe's own icon, else its product's, else a question mark.
@@ -195,20 +385,7 @@ local function newCard(parent)
 	-- the pulse: a wash and a rim in the step's colour, breathing behind the content
 	card.wash = card:CreateTexture(nil, "BORDER")
 	card.wash:SetAllPoints()
-	card.rim = {}
-	for k, side in ipairs({ "TOP", "BOTTOM", "LEFT", "RIGHT" }) do
-		local t = card:CreateTexture(nil, "BORDER")
-		if k <= 2 then
-			t:SetHeight(1)
-			t:SetPoint(side .. "LEFT")
-			t:SetPoint(side .. "RIGHT")
-		else
-			t:SetWidth(1)
-			t:SetPoint("TOP" .. side)
-			t:SetPoint("BOTTOM" .. side)
-		end
-		card.rim[k] = t
-	end
+	card.rim = edges(card)
 	card.stripe = card:CreateTexture(nil, "ARTWORK")
 	card.stripe:SetWidth(3)
 	card.stripe:SetPoint("TOPLEFT")
@@ -247,6 +424,7 @@ local function newCard(parent)
 		card.lines[k] = text(card, "GameFontHighlightSmall", 11)
 		card.lines[k]:SetWidth(INNER - PAD * 2)
 	end
+	card.buttons = { craft = newButton(card), open = newButton(card) }
 
 	-- slide: in from the right with a fade, out to the left
 	local ig = card:CreateAnimationGroup()
@@ -368,6 +546,33 @@ local function fillCard(card, c, consumed)
 			fs:Hide()
 		end
 	end
+
+	-- the buttons: Craft takes the row, Show recipe sits at its right when the view offers it
+	local craft, open = card.buttons.craft, card.buttons.open
+	craft:Hide()
+	open:Hide()
+	local byId = {}
+	for _, a in ipairs(c.actions or {}) do
+		byId[a.id] = a
+	end
+	if byId.craft then
+		top = top + 10
+		craft:ClearAllPoints()
+		craft:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		local row = INNER - 2 * PAD - 2
+		if byId.open then
+			open:ClearAllPoints()
+			open:SetPoint("TOPRIGHT", card, "TOPRIGHT", -PAD, -top)
+			open:SetWidth(96)
+			craft:SetWidth(row - 96 - 6)
+			setButton(open, byId.open, ns.View.RGB.bone)
+		else
+			craft:SetWidth(row)
+		end
+		setButton(craft, byId.craft, ns.View.RGB[col] or ns.View.RGB.bone)
+		top = top + 24
+	end
+	UI.stats.actionsWhy = c.actionsWhy
 	local h = top + PAD
 	card:SetHeight(h)
 	return h
@@ -427,30 +632,99 @@ end
 
 ---------------------------------------------------------------------------------------------------------- dock
 
--- Docks the panel to the right of `target` (TSM's crafting frame or Blizzard's ProfessionsFrame), or leaves it
--- free and movable where the user put it when there is no window to dock to.
-function UI.dock(target)
+-- How far Blizzard's profession tabs stick out of the window's right edge. On this client they are side tabs
+-- anchored TOPLEFT to the frame's TOPRIGHT (Blizzard_Professions/Camelot/Blizzard_ProfessionsFrame.xml:
+-- ProfessionsOverviewTab and the rightProfessionTabs array), sized from their art, so the width is read from the
+-- frames. Reading only: Blizzard's frames are never changed.
+local function sideTabsWidth(target)
+	local widest = 0
+	local function see(tab)
+		if type(tab) == "table" and tab.IsShown and tab:IsShown() then
+			local w = tab:GetWidth()
+			if not secret(w) and type(w) == "number" and w > widest then
+				widest = w
+			end
+		end
+	end
+	see(target.ProfessionsOverviewTab)
+	for _, tab in ipairs(type(target.rightProfessionTabs) == "table" and target.rightProfessionTabs or {}) do
+		see(tab)
+	end
+	return widest
+end
+
+-- Sizes the panel to what it shows, up to the docked window's height, and shows the scroll bar only on overflow.
+function UI.fit()
+	local f = UI.frame
+	if not f or not f.chrome then
+		return
+	end
+	local fit = ns.View.fit(f.contentHeight, f.chrome, f.limit or FREE_HEIGHT)
+	f:SetSize(fit.scroll and WIDTH or NARROW, fit.height)
+	f.scroll:ClearAllPoints()
+	f.scroll:SetPoint("TOPLEFT", PAD - 2, -f.top)
+	f.scroll:SetPoint("BOTTOMRIGHT", fit.scroll and -26 or -(PAD - 2), 8)
+	if f.scroll.ScrollBar then
+		f.scroll.ScrollBar:SetShown(fit.scroll)
+	end
+	if not fit.scroll then
+		f.scroll:SetVerticalScroll(0)
+	end
+	UI.stats.fit = { height = fit.height, scroll = fit.scroll, content = f.contentHeight, limit = f.limit }
+end
+
+-- Docks the panel to the right of `target` (TSM's crafting frame or Blizzard's ProfessionsFrame, `kind` "tsm" or
+-- "blizzard"), or leaves it free and movable where the user put it when there is no window to dock to. Beside
+-- Blizzard's window it stands clear of the profession tabs on that window's right edge.
+function UI.dock(target, kind)
 	local f = UI.frame
 	if not f then
 		return
 	end
+	local limit, gap = FREE_HEIGHT, 0
 	if target then
 		local h = target:GetHeight()
-		f:SetHeight((h and h > 0) and math.max(300, math.min(600, h)) or 420)
+		limit = (h and h > 0) and math.max(200, math.min(600, h)) or FREE_HEIGHT
+		gap = DOCK_GAP
+		if kind == "blizzard" then
+			local tabs = sideTabsWidth(target)
+			gap = gap + (tabs > 0 and tabs + TAB_GAP or 0)
+		end
+	end
+	if f.limit ~= limit then
+		f.limit = limit
+		UI.fit()
 	end
 	-- false = free, so the first call with no target still anchors the panel
 	local key = target or false
-	if f.dockedTo == key then
+	if f.dockedTo == key and f.dockGap == gap then
 		return
 	end
 	f:ClearAllPoints()
 	if target then
-		f:SetPoint("TOPLEFT", target, "TOPRIGHT", 2, 0)
+		f:SetPoint("TOPLEFT", target, "TOPRIGHT", gap, 0)
 	else
-		f:SetPoint("CENTER", UIParent, "CENTER", 300, 0)
-		f:SetHeight(420)
+		-- by its top, so the panel does not jump when its height follows the content
+		f:SetPoint("TOP", UIParent, "CENTER", 300, FREE_HEIGHT / 2)
 	end
-	f.dockedTo = key
+	f.dockedTo, f.dockGap = key, gap
+	UI.stats.dockGap = gap
+end
+
+-- Shows the panel, or its handle when the user hid it; neither while no profession is open. `byUser` plays the
+-- short fade of a change the user asked for.
+function UI.setShown(shown, open, byUser)
+	local f, h = UI.frame, UI.handle
+	if not f then
+		return
+	end
+	local coming = (open and shown) and f or ((open and not shown) and h or nil)
+	local animate = byUser and coming and not coming:IsShown()
+	f:SetShown(open and shown)
+	h:SetShown(open and not shown)
+	if animate then
+		coming.appear:Play()
+	end
 end
 
 -- Records which window the panel sat beside (selftest ui.lastDock and ui.docks).
@@ -488,11 +762,30 @@ function UI.create()
 	f.skill = text(f, "GameFontHighlight", 13)
 	f.skill:SetPoint("TOPRIGHT", -30, -PAD)
 	f.skill:SetJustifyH("RIGHT")
-	local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-	close:SetPoint("TOPRIGHT", 2, 2)
-	close:SetScript("OnClick", function()
-		ns.setShown(false)
+	f.appear = appear(f)
+
+	-- the hide control: a minimise bar, because the panel folds to its handle rather than closing
+	local hide = CreateFrame("Button", nil, f)
+	hide:SetSize(22, 22)
+	hide:SetPoint("TOPRIGHT", -5, -7)
+	hide.bar = hide:CreateTexture(nil, "ARTWORK")
+	hide.bar:SetSize(10, 2)
+	hide.bar:SetPoint("CENTER", 0, -3)
+	fill(hide.bar, "ash")
+	hide:SetScript("OnEnter", function(self)
+		fill(self.bar, "bone")
+		showTip(self, "Hide the plan. The tab left here brings it back.")
 	end)
+	hide:SetScript("OnLeave", function(self)
+		fill(self.bar, "ash")
+		hideTip(self)
+	end)
+	hide:SetScript("OnClick", function(self)
+		UI.stats.clicks.hide = UI.stats.clicks.hide + 1
+		hideTip(self)
+		ns.setShown(false, true)
+	end)
+	f.hide = hide
 
 	local bar = CreateFrame("StatusBar", nil, f)
 	bar:SetPoint("TOPLEFT", PAD, -34)
@@ -511,9 +804,11 @@ function UI.create()
 	f.bar = bar
 
 	f.stale = text(f, "GameFontHighlightSmall", 10)
-	f.stale:SetWidth(WIDTH - 2 * PAD)
+	f.stale:SetWidth(NARROW - 2 * PAD)
 
 	local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+	-- the template hides its bar when nothing scrolls (SecureScrollTemplates.lua); UI.fit also sets it outright
+	scroll.scrollBarHideable = true
 	scroll:SetPoint("BOTTOMRIGHT", -26, 8)
 	local child = CreateFrame("Frame", nil, scroll)
 	child:SetSize(INNER, 10)
@@ -540,6 +835,63 @@ function UI.create()
 	f.rule = child:CreateTexture(nil, "ARTWORK")
 	f.rule:SetHeight(1)
 	fill(f.rule, "line")
+
+	-- the handle: what stays at the panel's corner while it is hidden, and brings it back with one click
+	local h = CreateFrame("Button", "SkillupHelperHandle", UIParent)
+	h:SetSize(26, 96)
+	h:SetFrameStrata("HIGH")
+	h:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
+	h.bg = h:CreateTexture(nil, "BACKGROUND")
+	h.bg:SetAllPoints()
+	fill(h.bg, "ink")
+	h.edge = edges(h)
+	paintEdges(h.edge, rgb("line"))
+	h.stripe = h:CreateTexture(nil, "ARTWORK")
+	h.stripe:SetWidth(3)
+	h.stripe:SetPoint("TOPLEFT")
+	h.stripe:SetPoint("BOTTOMLEFT")
+	fill(h.stripe, "gold")
+	h.icon = h:CreateTexture(nil, "ARTWORK")
+	h.icon:SetSize(16, 16)
+	h.icon:SetPoint("TOP", 1, -7)
+	h.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+	h.icon:SetTexture(HANDLE_ICON)
+	h.label = text(h, "GameFontHighlightSmall", 11)
+	h.label:SetWordWrap(false)
+	h.label:SetJustifyH("CENTER")
+	h.label:SetText("Skill-up")
+	setColor(h.label, "ash")
+	if h.label.SetRotation then
+		-- read top to bottom, like the spine of a book
+		h.label:SetPoint("CENTER", 1, -10)
+		h.label:SetRotation(-math.pi / 2)
+		UI.stats.handle = "icon and label"
+	else
+		h.label:Hide()
+		h:SetHeight(30)
+		UI.stats.handle = "icon only (FontString:SetRotation missing)"
+	end
+	h:SetScript("OnEnter", function(self)
+		local r, g, b = rgb(self.color or "gold")
+		paintEdges(self.edge, r, g, b, 1)
+		setColor(self.label, "bone")
+		showTip(self, "Show the skill-up plan")
+	end)
+	h:SetScript("OnLeave", function(self)
+		paintEdges(self.edge, rgb("line"))
+		setColor(self.label, "ash")
+		hideTip(self)
+	end)
+	h:SetScript("OnClick", function(self)
+		UI.stats.clicks.show = UI.stats.clicks.show + 1
+		hideTip(self)
+		paintEdges(self.edge, rgb("line"))
+		setColor(self.label, "ash")
+		ns.setShown(true, true)
+	end)
+	h.appear = appear(h)
+	h:Hide()
+	UI.handle = h
 	UI.frame = f
 	return f
 end
@@ -588,10 +940,11 @@ end
 -- Draws a description. prev is the last one drawn, for the transition and the consumed-material diff.
 function UI.draw(d, prev)
 	local f = UI.frame
-	local top = drawHeader(f, d)
-	f.scroll:ClearAllPoints()
-	f.scroll:SetPoint("TOPLEFT", PAD - 2, -top)
-	f.scroll:SetPoint("BOTTOMRIGHT", -26, 8)
+	f.top = drawHeader(f, d)
+	-- the handle wears the colour of the step it hides
+	local handle = UI.handle
+	handle.color = d.next and d.next.color or "gold"
+	fill(handle.stripe, handle.color)
 
 	local y = 0
 	if d.state == "message" or d.notice or d.empty then
@@ -704,7 +1057,11 @@ function UI.draw(d, prev)
 	for i = #d.footer + 1, #f.footer do
 		f.footer[i]:Hide()
 	end
-	f.child:SetHeight(math.max(10, y + 4))
+	f.contentHeight = math.max(10, y + 4)
+	f.child:SetHeight(f.contentHeight)
+	-- header above, 8 below, and 2 of slack so a rounded string height never leaves a pixel to scroll
+	f.chrome = f.top + 8 + 2
+	UI.fit()
 end
 
 function UI.show(model)

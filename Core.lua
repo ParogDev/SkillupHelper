@@ -77,6 +77,14 @@ local function refreshSelftest()
 		played = ui.played,
 		lastDock = ui.lastDock,
 		docks = ui.docks,
+		dockGap = ui.dockGap,
+		fit = ui.fit,
+		handle = ui.handle,
+		clicks = ui.clicks,
+		actionsWhy = ui.actionsWhy,
+		lastCraft = ui.lastCraft,
+		lastCraftError = ui.lastCraftError,
+		lastOpenError = ui.lastOpenError,
 	}
 	db.selftest = st
 end
@@ -174,13 +182,12 @@ function ns.settings()
 	return { effort = db and db.effort, sellShare = db and db.sellShare }
 end
 
-function ns.setShown(shown)
+-- Shows the panel or folds it to its handle (the choice is kept). byUser: a click, so the change fades in.
+function ns.setShown(shown, byUser)
 	if db then
 		db.shown = shown
 	end
-	if ns.UI.frame then
-		ns.UI.frame:SetShown(shown)
-	end
+	ns.UI.setShown(shown, ns.tradeSkillOpen == true, byUser)
 	if shown then
 		ns.refresh()
 	end
@@ -210,7 +217,11 @@ end
 -- While a profession is open, follow the user flipping between TSM's UI and the WoW UI.
 local function redock()
 	local target, kind = ns.dockTarget()
-	ns.UI.dock(target)
+	ns.UI.dock(target, kind)
+	if ns.dockKind ~= nil and ns.dockKind ~= kind then
+		-- Show recipe is offered beside Blizzard's window only: redraw the card for the new window
+		ns.refresh()
+	end
 	ns.dockKind = kind
 	if ns.UI.frame and ns.UI.frame:IsShown() then
 		ns.UI.noteDock(kind)
@@ -222,7 +233,7 @@ local function open()
 	if not ns.guard("create", ns.UI.create) then
 		return
 	end
-	ns.UI.frame:SetShown(db == nil or db.shown)
+	ns.UI.setShown(db == nil or db.shown, true)
 	redock()
 	stopTicker()
 	ticker = C_Timer.NewTicker(0.5, redock)
@@ -232,9 +243,7 @@ end
 local function close()
 	ns.tradeSkillOpen = false
 	stopTicker()
-	if ns.UI.frame then
-		ns.UI.frame:Hide()
-	end
+	ns.UI.setShown(false, false)
 end
 
 local f = CreateFrame("Frame")
@@ -259,7 +268,17 @@ end
 local okCrafted, errCrafted = pcall(f.RegisterEvent, f, "TRADE_SKILL_ITEM_CRAFTED_RESULT")
 ns.craftedEvent = okCrafted and "registered"
 	or ("TRADE_SKILL_ITEM_CRAFTED_RESULT not registered: " .. tostring(errCrafted))
-f:SetScript("OnEvent", function(_, event, arg1)
+-- A craft the client refuses raises no Lua error (pcall sees nothing): it fires one of these, naming the addon.
+for _, e in ipairs({ "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN" }) do
+	pcall(f.RegisterEvent, f, e)
+end
+f:SetScript("OnEvent", function(_, event, arg1, arg2)
+	if event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" then
+		if arg1 == ADDON then
+			ns.UI.stats.lastCraftError = ("%s: the client refused %s"):format(event, tostring(arg2))
+		end
+		return
+	end
 	if event == "ADDON_LOADED" then
 		if arg1 == ADDON then
 			SkillupHelperDB = ns.initDB(SkillupHelperDB)

@@ -406,22 +406,60 @@ describe("TSM docking", function()
 			ClearAllPoints = function()
 				points = {}
 			end,
-			SetPoint = function(_, p, rel)
-				points[#points + 1] = { p, rel }
+			SetPoint = function(_, p, rel, _, x)
+				points[#points + 1] = { p, rel, x }
 			end,
-			SetHeight = function() end,
 		}
 		_G.UIParent = {}
 		ns.UI.dock(nil)
-		assert.same({ { "CENTER", _G.UIParent } }, points)
+		-- by its top: the panel's height follows its content
+		assert.same({ { "TOP", _G.UIParent, 300 } }, points)
 		local target = {
 			GetHeight = function()
 				return 0
 			end,
 		}
-		ns.UI.dock(target)
-		ns.UI.dock(target)
-		assert.same({ { "TOPLEFT", target } }, points)
+		ns.UI.dock(target, "tsm")
+		ns.UI.dock(target, "tsm")
+		assert.same({ { "TOPLEFT", target, 2 } }, points)
+	end)
+
+	it("stands clear of the profession tabs on the right edge of Blizzard's window", function()
+		local ns = load({})
+		local points = {}
+		ns.UI.frame = {
+			ClearAllPoints = function()
+				points = {}
+			end,
+			SetPoint = function(_, p, rel, _, x)
+				points[#points + 1] = { p, rel, x }
+			end,
+		}
+		local function tab(shown, width)
+			return {
+				IsShown = function()
+					return shown
+				end,
+				GetWidth = function()
+					return width
+				end,
+			}
+		end
+		local target = {
+			GetHeight = function()
+				return 500
+			end,
+			ProfessionsOverviewTab = tab(true, 40),
+			rightProfessionTabs = { tab(true, 44), tab(false, 90) },
+		}
+		ns.UI.dock(target, "blizzard")
+		-- the widest shown tab, the gap to the window and a gap to the tabs
+		assert.same({ { "TOPLEFT", target, 2 + 44 + 4 } }, points)
+		assert.equal(50, ns.UI.stats.dockGap)
+		-- the same frame without tabs to read (another client build) keeps the small gap
+		target.ProfessionsOverviewTab, target.rightProfessionTabs = nil, nil
+		ns.UI.dock(target, "blizzard")
+		assert.same({ { "TOPLEFT", target, 2 } }, points)
 	end)
 
 	it("names a missing TSM_API", function()
