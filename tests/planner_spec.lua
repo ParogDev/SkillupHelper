@@ -284,7 +284,7 @@ describe("Planner scenarios", function()
 		assert.is_true(n >= 3)
 	end)
 
-	it("S6 passes 2 to 4 stay within the 2 ms budget on the Leatherworking fixture with 80 options", function()
+	it("S6 passes 2 to 4 stay under 3 ms (budget 2 ms plus half) on the Leatherworking fixture", function()
 		local recipes = {}
 		for s, r in pairs(F.LEATHER) do
 			recipes[s] = r
@@ -312,9 +312,13 @@ describe("Planner scenarios", function()
 		-- The budget is 2 ms a bag update. The fastest of several batches is the measurement: other
 		-- work on the CI runner only ever adds time, so the minimum is the closest to what the code
 		-- costs. One batch of 20 read 2.244 ms there and under 2 ms on the re-run; the same box
-		-- reads 1.1 ms quiet and 1.5 ms busy, so the limit is the budget plus half for a slower or busy machine.
+		-- reads 1.1 ms quiet and 1.5 ms busy, so the limit is the budget plus half (3 ms) for a
+		-- slower or busy machine.
 		local budget, slack = 2, 1.5
 		local batches, runs = 9, 20
+		-- one untimed call and a collection, so neither first-call cost nor old garbage is timed
+		P.finish(ctx, base, input.have)
+		collectgarbage()
 		local times = {}
 		for b = 1, batches do
 			local t0 = os.clock()
@@ -324,7 +328,7 @@ describe("Planner scenarios", function()
 			times[b] = (os.clock() - t0) * 1000 / runs
 		end
 		table.sort(times)
-		local best, median = times[1], times[(batches + 1) / 2]
+		local best, median = times[1], times[math.floor(batches / 2) + 1]
 		print(
 			("S6: passes 2 to 4 took %.3f ms a run at best, %.3f ms median, over %d options"):format(
 				best,
