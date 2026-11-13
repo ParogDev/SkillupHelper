@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.13
+
+- The panel has four tabs under the skill bar: Plan, Shopping, Alts and More. The tab you pick stays picked.
+- Plan holds the Next card and every later step; the "and N more steps" cut is gone, the list scrolls.
+- Shopping holds the stops by place and city with their total, the Add to AH list button, and a Stock section with
+  the Keep, Spare and from-stock lines.
+- Alts lists the reagents the plan takes from your other characters, one section per character, with Queue on each
+  row and Queue all.
+- More holds what the plan is unsure of: price-file coverage, shortcuts and trainer recipes not confirmed yet. A red
+  dot on the tab means a trainer visit is due.
+- The Next card links to Shopping and Alts ("Shopping: 3 stops, 12s >") instead of repeating them.
+
 ## 0.2.12
 
 - Reagents on your other characters count. TSM's inventory tracking says what each alt on your faction and realm

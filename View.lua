@@ -7,9 +7,11 @@ local _, ns = ...
 local V = {}
 ns.View = V
 
-V.MAX_LATER = 6
-V.MAX_FOOTER = 6
 V.MAX_MATS = 8
+V.MAX_LINKS = 2 -- link rows on the Next card, one per off-card tab
+-- The panel's tabs, in strip order.
+V.TABS = { "plan", "shopping", "alts", "more" }
+V.TAB_LABEL = { plan = "Plan", shopping = "Shopping", alts = "Alts", more = "More" }
 V.MIN_HEIGHT = 96
 
 -- Colours as r, g, b. The four difficulty colours are the game's own; the rest is the panel's palette.
@@ -255,7 +257,7 @@ function V.shortcutRows(cuts, env)
 	return out
 end
 
--- What the plan is sure of, as footer lines: the shortcuts it left out, and trainer recipes not confirmed yet.
+-- What the plan is sure of, as the More tab's data lines: the shortcuts it left out, and trainer recipes not confirmed yet.
 function V.routeLines(p)
 	local out = {}
 	if (p.shortcuts or 0) > 0 then
@@ -493,8 +495,8 @@ local VERDICT_TEXT = {
 	alternative = "the stock option",
 }
 
--- Quiet lines under the steps: what to keep, what is left over, what stock crafts would cost.
-local function footerLines(p, env)
+-- The Shopping tab's Stock lines: what to keep, what is left over, what stock crafts would cost.
+local function stockLines(p, env)
 	local out = {}
 	for _, h in ipairs(p.hold or {}) do
 		out[#out + 1] = ("Keep %d %s for %s at %d"):format(h.count, env.nameOf(h.item), h.name, h.at)
@@ -515,13 +517,6 @@ local function footerLines(p, env)
 		elseif VERDICT_TEXT[e.verdict] and e.verdict ~= "alternative" then
 			out[#out + 1] = ("%s x%d from stock: %s"):format(e.name, e.crafts, VERDICT_TEXT[e.verdict])
 		end
-	end
-	if #out > V.MAX_FOOTER then
-		local more = #out - V.MAX_FOOTER
-		for k = #out, V.MAX_FOOTER + 1, -1 do
-			out[k] = nil
-		end
-		out[#out + 1] = ("and %d more"):format(more)
 	end
 	return out
 end
@@ -1313,9 +1308,169 @@ function V.fit(content, chrome, limit)
 	return { height = limit, scroll = true }
 end
 
+------------------------------------------------------------------------------------------------------------ tabs
+
+-- The Alts tab: the reagents the plan takes from other characters (plan.mail { { who, item, count } }), one group
+-- per character, each row with its queue state and a Queue / Queued button, and "Queue all" while any row is not
+-- queued. incoming: the lines of mail already queued to this character (V.mailQueueLines).
+-- Returns { title, groups = { { who, rows = { { item, name, count, right, tone, action } }, all } }, incoming, empty,
+-- open } (open: rows not queued yet).
+function V.altsView(mail, env)
+	local out = { groups = {}, incoming = {}, open = 0 }
+	local index, items, units = {}, 0, 0
+	for _, e in ipairs(mail or {}) do
+		local g = index[e.who]
+		if not g then
+			g = { who = e.who, rows = {}, rest = {} }
+			index[e.who] = g
+			out.groups[#out.groups + 1] = g
+		end
+		local queued = env.queued and env.queued(e.who, e.item, e.count) or false
+		local part = { alt = e.who, item = e.item, count = e.count }
+		local row = { item = e.item, name = env.nameOf(e.item), count = e.count }
+		if queued then
+			row.right, row.tone = ("%d, queued"):format(e.count), "green"
+			row.action = {
+				id = "mailUnqueue",
+				rows = { part },
+				enabled = true,
+				label = "Queued",
+				tip = "Click to drop it from the mail queue",
+			}
+		else
+			row.right, row.tone = ("%d, not queued"):format(e.count), "gold"
+			row.action = {
+				id = "mailQueue",
+				rows = { part },
+				enabled = true,
+				label = "Queue",
+				tip = ("On %s, at a mailbox, this becomes a filled mail to you."):format(e.who),
+			}
+			g.rest[#g.rest + 1] = part
+			out.open = out.open + 1
+		end
+		g.rows[#g.rows + 1] = row
+		items, units = items + 1, units + e.count
+	end
+	for _, g in ipairs(out.groups) do
+		if #g.rest > 0 then
+			g.all = {
+				id = "mailQueue",
+				rows = g.rest,
+				enabled = true,
+				label = ("Queue all from %s"):format(g.who),
+			}
+		end
+		g.rest = nil
+	end
+	out.incoming = V.mailQueueLines(env.mailQueue and env.mailQueue() or nil, env)
+	if #out.groups == 0 then
+		out.empty = "The plan takes nothing from your other characters."
+	else
+		out.title = ("Counted in the plan: %d reagent%s on %d character%s"):format(
+			units,
+			units == 1 and "" or "s",
+			#out.groups,
+			#out.groups == 1 and "" or "s"
+		)
+	end
+	return out
+end
+
+-- The Shopping tab's head line: "Total 3g 12s, 2 stops" (+ "N unknown").
+local function shoppingTitle(blocks, env)
+	local total, unknown = 0, 0
+	for _, b in ipairs(blocks) do
+		total = total + (b.total or 0)
+		unknown = unknown + (b.unknown or 0)
+	end
+	return ("Total %s, %d stop%s%s"):format(
+		env.money(total),
+		#blocks,
+		#blocks == 1 and "" or "s",
+		unknown > 0 and (", %d price%s unknown"):format(unknown, unknown == 1 and "" or "s") or ""
+	)
+end
+
+-- The Next card's link rows: one per off-card tab that holds something for this step, { tab, text, tone, action }.
+local function cardLinks(d)
+	local out = {}
+	local shop = d.shopping
+	if shop.blocks and #shop.blocks > 0 then
+		out[#out + 1] = {
+			tab = "shopping",
+			tone = "gold",
+			text = ("Shopping: %s"):format(shop.title:gsub("^Total ", "")),
+		}
+	end
+	local alts = d.alts
+	if #alts.groups > 0 then
+		local first, rows, units = alts.groups[1], 0, 0
+		for _, g in ipairs(alts.groups) do
+			for _, r in ipairs(g.rows) do
+				rows, units = rows + 1, units + r.count
+			end
+		end
+		local what = rows == 1 and ("%d %s on %s"):format(first.rows[1].count, first.rows[1].name, first.who)
+			or ("%d reagents on %s"):format(units, #alts.groups == 1 and first.who or (#alts.groups .. " characters"))
+		out[#out + 1] = {
+			tab = "alts",
+			tone = alts.open > 0 and "gold" or "green",
+			text = ("Alts: %s, %s"):format(what, alts.open > 0 and "not queued" or "queued"),
+		}
+	end
+	for k = #out, V.MAX_LINKS + 1, -1 do
+		out[k] = nil
+	end
+	for _, l in ipairs(out) do
+		l.action = { id = "tab", tab = l.tab, enabled = true, label = l.text }
+	end
+	return out
+end
+
+-- d.tabs: { { id, label, count, warn, empty } } in strip order. count: what the tab lists (stops, alt reagents);
+-- warn: the tab holds something to act on; empty: nothing there (the tab stays, dimmed).
+local function tabsOf(d)
+	local s, a, more = d.shopping, d.alts, d.more
+	local stops = s.blocks and #s.blocks or 0
+	local altRows = 0
+	for _, g in ipairs(a.groups) do
+		altRows = altRows + #g.rows
+	end
+	a.count = altRows
+	local list = {
+		{ id = "plan", empty = d.next == nil and #d.later == 0 },
+		{ id = "shopping", count = stops > 0 and stops or nil, empty = stops == 0 and #s.stock == 0 },
+		{
+			id = "alts",
+			count = altRows > 0 and altRows or nil,
+			warn = a.open > 0,
+			empty = altRows == 0 and #a.incoming == 0,
+		},
+		{ id = "more", warn = more.warn, empty = #more.data == 0 },
+	}
+	for _, t in ipairs(list) do
+		t.label = V.TAB_LABEL[t.id]
+		t.warn = t.warn or nil
+	end
+	return list
+end
+
+-- Which tab the panel shows: the saved one, or Plan for an unknown id.
+function V.tabOf(saved)
+	for _, id in ipairs(V.TABS) do
+		if saved == id then
+			return id
+		end
+	end
+	return "plan"
+end
+
 -- env: nameOf(item, fallback) -> string, money(copper) -> string, have(item) -> count; optional craftable(spell) ->
 -- crafts the client allows now (nil and why when the recipe is not learned) and dock ("blizzard", "tsm", "free").
--- Returns { state, profession, skill, cap, header, runway, next, later, footer, notice, message }.
+-- Returns { state, profession, skill, cap, header, runway, next, later, notice, message, tabs, shopping, alts, more }.
+-- The Plan tab draws next and later; shopping = { title, blocks, trip, stock, empty }, alts = V.altsView,
+-- more = { data, warn, empty }.
 function V.describe(m, env)
 	m = m or {}
 	if m.why and not m.skill then
@@ -1324,7 +1479,6 @@ function V.describe(m, env)
 			message = m.why,
 			tone = m.state == "not now" and "ash" or "warn",
 			later = {},
-			footer = {},
 		}
 	end
 	local d = {
@@ -1334,8 +1488,9 @@ function V.describe(m, env)
 		cap = m.maxSkill,
 		header = { title = m.profession or "?", skill = ("%d / %d"):format(m.skill or 0, m.maxSkill or 0) },
 		later = {},
-		footer = {},
 		notice = m.why,
+		shopping = { stock = {} },
+		more = { data = {} },
 	}
 	local p = m.planner
 	if p then
@@ -1357,9 +1512,10 @@ function V.describe(m, env)
 			d.capBlock = cb
 			d.notice = d.notice and (cb .. "\n" .. d.notice) or cb
 		end
+		local sh = d.shopping
 		if d.next and shop then
-			-- one block per place in travel order; the AH block is also what "Add to AH list" keeps
-			d.next.blocks = shop
+			-- one block per place in travel order, on the Shopping tab; the AH block is also what "Add to AH list" keeps
+			sh.blocks = shop
 			-- the list "Add to AH list" keeps: plan.trip when the trip starts now (as before), else the AH block
 			if p.trip and p.trip.fromStep == 1 then
 				d.next.trip = V.tripBlock(p.trip, env, saved)
@@ -1373,37 +1529,33 @@ function V.describe(m, env)
 			d.next.trip = V.tripBlock(p.trip, env, saved)
 			if d.next.trip then
 				d.next.trip.prof = p.profKey
-				d.next.blocks = { d.next.trip }
+				sh.blocks = { d.next.trip }
 			end
 		elseif p.trip and not shop then
-			d.footer[#d.footer + 1] = ("AH trip at step %d: %s, covers to %d"):format(
+			sh.tripLine = ("AH trip at step %d: %s, covers to %d"):format(
 				p.trip.fromStep,
 				env.money(p.trip.total),
 				math.floor(p.trip.to or 0)
 			)
 		end
+		-- every step: the Plan tab scrolls
 		for i = 2, #p.steps do
-			if #d.later >= V.MAX_LATER then
-				d.later[#d.later + 1] =
-					{ n = nil, color = "ash", text = ("and %d more steps"):format(#p.steps - i + 1) }
-				break
-			end
 			local row = laterRow(i, p.steps[i], env)
 			row.open = V.rowOpen(p.steps[i], env)
 			d.later[#d.later + 1] = row
 		end
-		local tripLine = d.footer[1]
-		d.footer = footerLines(p, env)
-		if tripLine then
-			table.insert(d.footer, 1, tripLine)
-		end
+		sh.stock = stockLines(p, env)
+		local data = d.more.data
 		local cov = p.coverage and p.coverage.to
 		if type(cov) == "number" and (not m.maxSkill or cov < m.maxSkill) then
-			table.insert(d.footer, 1, ("Data/Plan.lua covers to %d"):format(cov))
+			data[#data + 1] = ("Data/Plan.lua covers to %d"):format(cov)
 		end
 		for _, line in ipairs(V.routeLines(p)) do
-			d.footer[#d.footer + 1] = line
+			data[#data + 1] = line
 		end
+		-- "Visit your trainer once": something to act on
+		d.more.warn = p.unconfirmed ~= nil and p.unconfirmed > 0 or nil
+		d.alts = V.altsView(p.mail, env)
 		if not d.next then
 			d.empty = V.atCapLine(m) or "Nothing gives skill in range: every known recipe is grey."
 		end
@@ -1412,14 +1564,11 @@ function V.describe(m, env)
 		d.notice = d.notice or m.plannerWhy or m.planWhy
 		d.next = legacyCard(m, env)
 		for _, e in ipairs(m.fromStock or {}) do
-			if #d.later >= V.MAX_LATER then
-				break
-			end
 			local crafts = e.crafts == math.huge and "vendor mats" or ("x%d"):format(e.crafts)
 			d.later[#d.later + 1] = { color = e.color, text = ("%s %s, from stock"):format(e.name, crafts) }
 		end
 		for _, b in ipairs(m.buyRecipes or {}) do
-			d.footer[#d.footer + 1] = ("Worth buying: %s, %s, for %d to %d"):format(
+			d.shopping.stock[#d.shopping.stock + 1] = ("Worth buying: %s, %s, for %d to %d"):format(
 				b.itemName or env.nameOf(b.item, b.recipe),
 				env.money(b.price),
 				b.from,
@@ -1430,6 +1579,16 @@ function V.describe(m, env)
 			d.empty = "No plan step for this skill."
 		end
 	end
+	d.alts = d.alts or V.altsView(nil, env)
+	local sh = d.shopping
+	if sh.blocks then
+		sh.title = shoppingTitle(sh.blocks, env)
+	elseif #sh.stock == 0 and not sh.tripLine then
+		sh.empty = "Nothing to buy: the bags and bank cover the plan."
+	end
+	if #d.more.data == 0 then
+		d.more.empty = "Nothing to report about the plan's data."
+	end
 	local nx = d.next
 	if nx and nx.kind == "craft" and nx.thresholds then
 		d.runway = V.colourTarget(m.skill, nx.thresholds[1], nx.thresholds[2])
@@ -1437,20 +1596,16 @@ function V.describe(m, env)
 	if nx then
 		-- actions read every reagent (a buy row past the cut still blocks Craft); only the display is cut
 		nx.actions, nx.actionsWhy = V.actions(nx, env)
-		local ta = V.tripAction(nx.trip)
-		if ta then
-			nx.actions = nx.actions or {}
-			table.insert(nx.actions, 1, ta)
-		end
+		-- "Add to AH list" sits on the Shopping tab, over the blocks it keeps
+		sh.trip = V.tripAction(nx.trip)
 		local ma = V.mailAction(nx)
 		if ma then
 			nx.actions = nx.actions or {}
 			table.insert(nx.actions, 1, ma)
 		end
+		nx.links = cardLinks(d)
 	end
-	for _, line in ipairs(V.mailQueueLines(env.mailQueue and env.mailQueue() or nil, env)) do
-		d.footer[#d.footer + 1] = line
-	end
+	d.tabs = tabsOf(d)
 	if nx and #nx.mats > V.MAX_MATS then
 		for k = #nx.mats, V.MAX_MATS + 1, -1 do
 			nx.mats[k] = nil
@@ -1485,11 +1640,8 @@ function V.text(d)
 		for _, mt in ipairs(nx.mats) do
 			add(("%s %s"):format(mt.name, mt.right))
 		end
-		for _, b in ipairs(nx.blocks or {}) do
-			add(b.title)
-			for _, r in ipairs(b.rows) do
-				add(("  %s %s"):format(r.name, r.right))
-			end
+		for _, l in ipairs(nx.links or {}) do
+			add(("[%s >]"):format(l.text))
 		end
 		for _, n in ipairs(nx.notes) do
 			add(n)
@@ -1510,8 +1662,43 @@ function V.text(d)
 				.. (r.open and (" [" .. r.open.label .. "]") or "")
 		)
 	end
-	for _, f in ipairs(d.footer) do
-		add(f)
+	local sh = d.shopping or {}
+	add("-- Shopping")
+	add(sh.title)
+	add(sh.tripLine)
+	if sh.trip then
+		add(("[%s]"):format(sh.trip.label))
 	end
+	for _, b in ipairs(sh.blocks or {}) do
+		add(b.title)
+		for _, r in ipairs(b.rows) do
+			add(("  %s %s"):format(r.name, r.right))
+		end
+	end
+	for _, s in ipairs(sh.stock or {}) do
+		add(s)
+	end
+	add(sh.empty)
+	local alts = d.alts or { groups = {}, incoming = {} }
+	add("-- Alts")
+	add(alts.title)
+	for _, g in ipairs(alts.groups) do
+		add(g.who)
+		for _, r in ipairs(g.rows) do
+			add(("  %s %s [%s]"):format(r.name, r.right, r.action.label))
+		end
+		if g.all then
+			add(("[%s]"):format(g.all.label))
+		end
+	end
+	for _, s in ipairs(alts.incoming) do
+		add(s)
+	end
+	add(alts.empty)
+	add("-- More")
+	for _, s in ipairs(d.more and d.more.data or {}) do
+		add(s)
+	end
+	add(d.more and d.more.empty)
 	return out
 end

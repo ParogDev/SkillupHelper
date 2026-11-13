@@ -1,6 +1,7 @@
--- The side panel: draws View.describe's description. A header with the skill and a runway bar to the next colour
--- change, the Next card (two of them, swapped when the skill passes a step), the later steps as compact rows and
--- quiet footer lines, in a scroll frame. Rows are pooled; frames are made only when a pool is short.
+-- The side panel: draws View.describe's description. A header with the skill, a runway bar to the next colour change
+-- and a tab strip (Plan, Shopping, Alts, More), then the shown tab in a scroll frame. Plan holds the Next card (two
+-- of them, swapped when the skill passes a step) and every later step as a compact row. Rows are pooled; frames are
+-- made only when a pool is short.
 local _, ns = ...
 local UI = {}
 ns.UI = UI
@@ -8,6 +9,7 @@ ns.UI = UI
 -- The panel is WIDTH wide with its scroll bar and NARROW without: the content column never moves.
 local WIDTH, NARROW, INNER = 340, 316, 296
 local PAD = 12
+local TAB_W, TAB_H, TAB_SPACE = 70, 22, 4 -- the tab strip's segments
 local FREE_HEIGHT = 480 -- the tallest the panel gets with no window to dock to
 local DOCK_GAP, TAB_GAP = 2, 4
 local WHITE = "Interface\\Buttons\\WHITE8X8"
@@ -17,7 +19,9 @@ local CARD_LINES = 6 -- note lines under a card (notes, other ways, the stock op
 
 -- Panel diagnostics for the selftest.
 UI.stats = {
-	layout = "cards",
+	layout = "tabs",
+	tab = "plan",
+	views = {},
 	animations = 0,
 	played = {},
 	docks = {},
@@ -273,6 +277,10 @@ function UI.act(a)
 	local stats = UI.stats
 	if type(a) == "table" and type(a.id) == "string" and a.id:sub(1, 2) == "ah" then
 		return UI.ahAct(a)
+	end
+	if type(a) == "table" and a.id == "tab" then
+		stats.clicks.tab = (stats.clicks.tab or 0) + 1
+		return UI.setTab(a.tab)
 	end
 	if type(a) == "table" and a.id == "buy" then
 		return a.enabled and buy(a) or false
@@ -765,9 +773,8 @@ local function newCard(parent)
 		card.lines[k] = text(card, "GameFontHighlightSmall", 11)
 		card.lines[k]:SetWidth(INNER - PAD * 2)
 	end
-	card.blockTitles = {}
-	card.tripRows = {}
-	card.buttons = { trip = newButton(card), buy = newButton(card), craft = newButton(card), open = newButton(card) }
+	card.links = {}
+	card.buttons = { buy = newButton(card), craft = newButton(card), open = newButton(card) }
 	card.buttons.mail = newButton(card)
 	card.guide = newStrip(card)
 
@@ -862,43 +869,27 @@ local function fillCard(card, c, consumed)
 		card.mats[i]:Hide()
 	end
 
-	-- the shopping list: one block per place in travel order (or the AH trip alone), spares for bad luck included
-	local nTrip, nTitle = 0, 0
-	for _, blk in ipairs(c.blocks or {}) do
-		nTitle = nTitle + 1
-		local title = card.blockTitles[nTitle]
-		if not title then
-			title = text(card, "GameFontHighlightSmall", 11)
-			title:SetWidth(INNER - PAD * 2)
-			card.blockTitles[nTitle] = title
+	-- link rows: one per tab that holds more for this step (Shopping, Alts); a click switches to that tab
+	for i, l in ipairs(c.links or {}) do
+		local lb = card.links[i]
+		if not lb then
+			lb = newButton(card)
+			lb.label:SetJustifyH("LEFT")
+			card.links[i] = lb
 		end
-		top = top + 8
-		title:ClearAllPoints()
-		title:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
-		title:SetText(blk.title)
-		setColor(title, "gold")
-		title:Show()
-		top = top + title:GetStringHeight() + 4
-		for _, tr in ipairs(blk.rows) do
-			nTrip = nTrip + 1
-			local row = card.tripRows[nTrip] or newMatRow(card)
-			card.tripRows[nTrip] = row
-			row:ClearAllPoints()
-			row:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 10, -top)
-			row.name:SetText(tr.name)
-			setColor(row.name, "bone")
-			row.right:SetText(tr.right)
-			setColor(row.right, "bone")
-			fill(row.mark, "gold")
-			row:Show()
-			top = top + 16
-		end
+		top = top + (i == 1 and 8 or 3)
+		lb:ClearAllPoints()
+		lb:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		lb:SetSize(INNER - 2 * PAD - 2, 18)
+		setButton(lb, l.action, ns.View.RGB[l.tone] or ns.View.RGB.ash)
+		lb.label:SetText(l.text .. "  >")
+		lb.style = "quiet"
+		paintButton(lb)
+		setColor(lb.label, l.tone or "ash")
+		top = top + 18
 	end
-	for i = nTitle + 1, #card.blockTitles do
-		card.blockTitles[i]:Hide()
-	end
-	for i = nTrip + 1, #card.tripRows do
-		card.tripRows[i]:Hide()
+	for i = #(c.links or {}) + 1, #card.links do
+		card.links[i]:Hide()
 	end
 
 	local extra = {}
@@ -1028,11 +1019,9 @@ local function fillCard(card, c, consumed)
 	-- the buttons: Buy (vendor reagents the step lacks) takes a row of its own above; Craft takes the next row, Show
 	-- recipe sits at its right when the view offers it
 	local craft, open, buyButton = card.buttons.craft, card.buttons.open, card.buttons.buy
-	local tripButton = card.buttons.trip
 	craft:Hide()
 	open:Hide()
 	buyButton:Hide()
-	tripButton:Hide()
 	card.buttons.mail:Hide()
 	local byId = {}
 	for _, a in ipairs(c.actions or {}) do
@@ -1067,15 +1056,6 @@ local function fillCard(card, c, consumed)
 		mb:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
 		mb:SetWidth(INNER - 2 * PAD - 2)
 		setButton(mb, ma, ma.id == "mailQueue" and ns.View.RGB.gold or ns.View.RGB.ash)
-		top = top + 20
-	end
-	local ta = byId.trip or byId.untrip
-	if ta then
-		top = top + 10
-		tripButton:ClearAllPoints()
-		tripButton:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
-		tripButton:SetWidth(INNER - 2 * PAD - 2)
-		setButton(tripButton, ta, ta.id == "trip" and ns.View.RGB.gold or ns.View.RGB.ash)
 		top = top + 20
 	end
 	if byId.buy then
@@ -1134,12 +1114,6 @@ local function newLaterRow(parent)
 	row.text:SetWordWrap(false)
 	row.text:SetJustifyV("MIDDLE")
 	return row
-end
-
-local function footerLine(parent)
-	local fs = text(parent, "GameFontHighlightSmall", 10)
-	fs:SetWidth(INNER - 8)
-	return fs
 end
 
 ---------------------------------------------------------------------------------------------------------- runway
@@ -1345,10 +1319,57 @@ function UI.create()
 	-- the template hides its bar when nothing scrolls (SecureScrollTemplates.lua); UI.fit also sets it outright
 	scroll.scrollBarHideable = true
 	scroll:SetPoint("BOTTOMRIGHT", -26, 8)
-	local child = CreateFrame("Frame", nil, scroll)
-	child:SetSize(INNER, 10)
+	-- one scroll child per tab: each keeps its pools and its scroll offset; only the shown tab's is the scroll child
+	f.views, f.offsets = {}, {}
+	for _, id in ipairs(ns.View.TABS) do
+		local v = CreateFrame("Frame", nil, scroll)
+		v:SetSize(INNER, 10)
+		v:Hide()
+		v.id = id
+		f.views[id] = v
+		f.offsets[id] = 0
+	end
+	local child = f.views.plan
 	scroll:SetScrollChild(child)
-	f.scroll, f.child = scroll, child
+	child:Show()
+	f.scroll, f.child, f.shownView = scroll, child, "plan"
+
+	-- the tab strip: four segments under the runway
+	f.tabs = {}
+	for i, id in ipairs(ns.View.TABS) do
+		local t = CreateFrame("Button", nil, f)
+		t:SetSize(TAB_W, TAB_H)
+		t.id = id
+		t.bg = t:CreateTexture(nil, "BACKGROUND")
+		t.bg:SetAllPoints()
+		t.line = t:CreateTexture(nil, "ARTWORK")
+		t.line:SetPoint("BOTTOMLEFT")
+		t.line:SetPoint("BOTTOMRIGHT")
+		t.label = text(t, "GameFontHighlightSmall", 11)
+		t.label:SetPoint("CENTER", 0, 1)
+		t.label:SetJustifyH("CENTER")
+		t.label:SetJustifyV("MIDDLE")
+		t.label:SetWordWrap(false)
+		t.pip = t:CreateTexture(nil, "OVERLAY")
+		t.pip:SetSize(6, 6)
+		t.pip:SetPoint("TOPRIGHT", -3, -3)
+		fill(t.pip, "warn")
+		t.pip:Hide()
+		t.action = { id = "tab", tab = id, enabled = true }
+		t:SetScript("OnClick", function(self)
+			ns.guard("click", UI.act, self.action)
+		end)
+		t:SetScript("OnEnter", function(self)
+			self.over = true
+			UI.paintTab(self)
+		end)
+		t:SetScript("OnLeave", function(self)
+			self.over = false
+			UI.paintTab(self)
+		end)
+		t.index = i
+		f.tabs[i] = t
+	end
 
 	-- the cards sit on a home anchor; a card sliding in starts right of it and re-anchors when done
 	child.home = CreateFrame("Frame", nil, child)
@@ -1366,10 +1387,12 @@ function UI.create()
 	f.message:SetWidth(INNER - 8)
 	f.thenLabel = text(child, "GameFontNormalSmall", 11)
 	f.thenLabel:SetText("Then")
-	f.later, f.footer = {}, {}
-	f.rule = child:CreateTexture(nil, "ARTWORK")
-	f.rule:SetHeight(1)
-	fill(f.rule, "line")
+	f.later = {}
+	-- the other tabs draw from pools of lines, rows and buttons (UI.drawList)
+	for _, id in ipairs({ "shopping", "alts", "more" }) do
+		local v = f.views[id]
+		v.pool = { fs = {}, rows = {}, buttons = {}, rules = {} }
+	end
 
 	-- the handle: what stays at the panel's corner while it is hidden, and brings it back with one click
 	local h = CreateFrame("Button", "SkillupHelperHandle", UIParent)
@@ -1431,7 +1454,244 @@ function UI.create()
 	return f
 end
 
--- Header, runway, stale line; returns the y offset where the scroll area starts.
+---------------------------------------------------------------------------------------------------------- tabs
+
+local function savedTab()
+	local db = SkillupHelperDB
+	return ns.View.tabOf(type(db) == "table" and type(db.ui) == "table" and db.ui.tab or nil)
+end
+
+-- Paints one segment of the tab strip: the shown tab on the card's surface with a 2-px underline in the step's
+-- colour, the others ash on a 1-px line; a tab with nothing in it is dimmed, one with something to act on wears a pip.
+function UI.paintTab(t)
+	local info = t.info
+	if not info then
+		return
+	end
+	local f = UI.frame
+	local on = f and f.shownView == t.id
+	local label = info.label
+	if info.count then
+		local r, g, b = rgb("gold")
+		local hex = ("%02x%02x%02x"):format(math.floor(r * 255), math.floor(g * 255), math.floor(b * 255))
+		label = ("%s |cff%s%d|r"):format(label, hex, info.count)
+	end
+	t.label:SetText(label)
+	if on then
+		fill(t.bg, "surface", 0.95)
+		fill(t.line, t.accent or "gold")
+		t.line:SetHeight(2)
+		setColor(t.label, "bone")
+	else
+		fill(t.bg, "line", t.over and 0.5 or 0)
+		fill(t.line, "line")
+		t.line:SetHeight(1)
+		setColor(t.label, (t.over and "bone") or "ash", info.empty and 0.5 or 1)
+	end
+	t.pip:SetShown(info.warn == true)
+end
+
+-- A list view (Shopping, Alts, More) from items: { kind = "head"|"line"|"row"|"button"|"gap", ... }. Rows are
+-- { name, right, color, tone, mark, action }: a row with an action carries a small button at its right. Returns
+-- the view's height. Frames come from the view's pools.
+function UI.drawList(v, items)
+	local pool = v.pool
+	local used = { fs = 0, rows = 0, buttons = 0 }
+	local y = 0
+	local function take(kind, make)
+		used[kind] = used[kind] + 1
+		local x = pool[kind][used[kind]]
+		if not x then
+			x = make()
+			pool[kind][used[kind]] = x
+		end
+		return x
+	end
+	for _, it in ipairs(items) do
+		if it.kind == "gap" then
+			y = y + (it.h or 8)
+		elseif it.kind == "head" or it.kind == "line" then
+			local fs = take("fs", function()
+				return text(v, "GameFontHighlightSmall", 11)
+			end)
+			fs:SetFontObject(it.kind == "head" and "GameFontNormalSmall" or "GameFontHighlightSmall")
+			fs:SetFontHeight(it.size or 11)
+			fs:SetWidth(INNER - 8 - (it.indent or 0))
+			fs:ClearAllPoints()
+			fs:SetPoint("TOPLEFT", 4 + (it.indent or 0), -y)
+			fs:SetText(it.text)
+			setColor(fs, it.color or (it.kind == "head" and "gold" or "ash"))
+			fs:Show()
+			y = y + fs:GetStringHeight() + (it.kind == "head" and 4 or 3)
+		elseif it.kind == "row" then
+			local row = take("rows", function()
+				local r = newMatRow(v)
+				r:SetWidth(INNER - 14)
+				r.use = newButton(r)
+				r.use:SetHeight(16)
+				r.use:SetPoint("RIGHT", 0, 0)
+				return r
+			end)
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", 14, -y)
+			row.name:SetText(it.name)
+			setColor(row.name, it.color or "bone")
+			row.right:SetText(it.right or "")
+			setColor(row.right, it.tone or "bone")
+			fill(row.mark, it.mark or it.tone or "ash")
+			row.right:ClearAllPoints()
+			if it.action then
+				setButton(row.use, it.action, ns.View.RGB[it.tone] or ns.View.RGB.ash)
+				row.use.style = it.action.id == "mailQueue" and "primary" or "quiet"
+				paintButton(row.use)
+				row.use:SetWidth(math.max(52, (row.use.label:GetStringWidth() or 0) + 16))
+				row.right:SetPoint("TOPRIGHT", row.use, "TOPLEFT", -6, -2)
+			else
+				row.use:Hide()
+				row.right:SetPoint("TOPRIGHT", 0, 0)
+			end
+			row:Show()
+			y = y + (it.action and 18 or 16)
+		elseif it.kind == "button" then
+			local b = take("buttons", function()
+				return newButton(v)
+			end)
+			y = y + 4
+			b:ClearAllPoints()
+			b:SetPoint("TOPLEFT", 4, -y)
+			b:SetSize(INNER - 8, 22)
+			setButton(b, it.action, ns.View.RGB[it.accent or "gold"] or ns.View.RGB.gold)
+			if it.quiet then
+				b.style = "quiet"
+				paintButton(b)
+			end
+			y = y + 22 + 4
+		end
+	end
+	for kind, n in pairs(used) do
+		for i = n + 1, #pool[kind] do
+			pool[kind][i]:Hide()
+		end
+	end
+	return math.max(10, y + 4)
+end
+
+-- The Shopping tab as list items: the total and the trip button, a block per place and city, then Stock.
+local function shoppingItems(s)
+	local out = {}
+	if s.title then
+		out[#out + 1] = { kind = "line", text = s.title, color = "bone", size = 12 }
+	end
+	if s.tripLine then
+		out[#out + 1] = { kind = "line", text = s.tripLine }
+	end
+	if s.trip then
+		out[#out + 1] = { kind = "button", action = s.trip, accent = s.trip.id == "trip" and "gold" or "ash" }
+	end
+	for _, b in ipairs(s.blocks or {}) do
+		out[#out + 1] = { kind = "gap", h = 6 }
+		out[#out + 1] = { kind = "head", text = b.title }
+		for _, r in ipairs(b.rows) do
+			out[#out + 1] = { kind = "row", name = r.name, right = r.right, mark = "gold" }
+		end
+	end
+	if #(s.stock or {}) > 0 then
+		out[#out + 1] = { kind = "gap", h = 10 }
+		out[#out + 1] = { kind = "head", text = ("Stock (%d)"):format(#s.stock), color = "ash" }
+		for _, line in ipairs(s.stock) do
+			out[#out + 1] = { kind = "line", text = line, size = 10 }
+		end
+	end
+	if s.empty then
+		out[#out + 1] = { kind = "line", text = s.empty }
+	end
+	return out
+end
+
+-- The Alts tab: a section per character, a row per reagent with Queue / Queued, Queue all; then the mail queued to you.
+local function altsItems(a)
+	local out = {}
+	if a.title then
+		out[#out + 1] = { kind = "line", text = a.title, color = "bone", size = 12 }
+	end
+	for _, g in ipairs(a.groups) do
+		out[#out + 1] = { kind = "gap", h = 6 }
+		out[#out + 1] = { kind = "head", text = g.who }
+		for _, r in ipairs(g.rows) do
+			out[#out + 1] = { kind = "row", name = r.name, right = r.right, tone = r.tone, action = r.action }
+		end
+		if g.all then
+			out[#out + 1] = { kind = "button", action = g.all, accent = "gold" }
+		end
+	end
+	if #a.incoming > 0 then
+		out[#out + 1] = { kind = "gap", h = 10 }
+		out[#out + 1] = { kind = "head", text = "In the mail queue", color = "ash" }
+		for _, line in ipairs(a.incoming) do
+			out[#out + 1] = { kind = "line", text = line, size = 10 }
+		end
+	end
+	if a.empty then
+		out[#out + 1] = { kind = "line", text = a.empty }
+	end
+	return out
+end
+
+local function moreItems(m)
+	local out = {}
+	if #m.data > 0 then
+		out[#out + 1] = { kind = "head", text = "Data", color = "ash" }
+		for _, line in ipairs(m.data) do
+			out[#out + 1] = { kind = "line", text = line }
+		end
+	end
+	if m.empty then
+		out[#out + 1] = { kind = "line", text = m.empty }
+	end
+	return out
+end
+
+-- Shows view `id` in the scroll frame: keeps the old view's offset, restores the new one's, sizes the panel.
+function UI.showView(id)
+	local f = UI.frame
+	if not f or not f.views[id] then
+		return
+	end
+	local old = f.shownView
+	if old ~= id then
+		f.offsets[old] = f.scroll:GetVerticalScroll()
+		f.views[old]:Hide()
+		f.scroll:SetScrollChild(f.views[id])
+		f.views[id]:Show()
+		f.shownView = id
+	end
+	f.contentHeight = f.heights and f.heights[id] or 10
+	UI.fit()
+	local range = f.scroll:GetVerticalScrollRange() or 0
+	f.scroll:SetVerticalScroll(math.max(0, math.min(f.offsets[id] or 0, range)))
+	for _, t in ipairs(f.tabs) do
+		UI.paintTab(t)
+	end
+	UI.stats.tab = id
+	local vs = UI.stats.views[id] or {}
+	UI.stats.views[id] = vs
+	vs.scroll = UI.stats.fit and UI.stats.fit.scroll
+end
+
+-- A click on a tab or a link row: saved per account (SkillupHelperDB.ui.tab), shown at once.
+function UI.setTab(id)
+	id = ns.View.tabOf(id)
+	if type(SkillupHelperDB) == "table" then
+		SkillupHelperDB.ui = type(SkillupHelperDB.ui) == "table" and SkillupHelperDB.ui or {}
+		SkillupHelperDB.ui.tab = id
+	end
+	if UI.frame and UI.last and UI.last.tabs then
+		UI.showView(id)
+	end
+	return true
+end
+
+-- Header, runway, tab strip, stale line; returns the y offset where the scroll area starts.
 local function drawHeader(f, d)
 	local h = d.header
 	f.title:SetText(h and h.title or "Skill-up helper")
@@ -1458,6 +1718,22 @@ local function drawHeader(f, d)
 		f.bar:Hide()
 		f.bar.label:Hide()
 		f.bar.band = nil
+	end
+	-- the tab strip: never scrolls; a message (no profession, a broken scan) has none
+	for i, t in ipairs(f.tabs) do
+		local info = d.tabs and d.tabs[i]
+		if info then
+			t.info, t.accent = info, d.next and d.next.color or "gold"
+			t:ClearAllPoints()
+			t:SetPoint("TOPLEFT", PAD + (i - 1) * (TAB_W + TAB_SPACE), -y)
+			UI.paintTab(t)
+			t:Show()
+		else
+			t:Hide()
+		end
+	end
+	if d.tabs then
+		y = y + TAB_H + 8
 	end
 	if h and h.stale then
 		f.stale:ClearAllPoints()
@@ -1586,34 +1862,25 @@ function UI.draw(d, prev)
 		f.later[i]:Hide()
 	end
 
-	if #d.footer > 0 then
-		y = y + 8
-		f.rule:ClearAllPoints()
-		f.rule:SetPoint("TOPLEFT", 4, -y)
-		f.rule:SetPoint("TOPRIGHT", -4, -y)
-		f.rule:Show()
-		y = y + 8
-	else
-		f.rule:Hide()
+	local heights = { plan = math.max(10, y + 4) }
+	if d.tabs then
+		heights.shopping = UI.drawList(f.views.shopping, shoppingItems(d.shopping))
+		heights.alts = UI.drawList(f.views.alts, altsItems(d.alts))
+		heights.more = UI.drawList(f.views.more, moreItems(d.more))
 	end
-	for i, line in ipairs(d.footer) do
-		local fs = f.footer[i] or footerLine(f.child)
-		f.footer[i] = fs
-		fs:ClearAllPoints()
-		fs:SetPoint("TOPLEFT", 4, -y)
-		fs:SetText(line)
-		setColor(fs, "ash")
-		fs:Show()
-		y = y + fs:GetStringHeight() + 3
+	for id, v in pairs(f.views) do
+		v:SetHeight(heights[id] or 10)
+		UI.stats.views[id] = { height = heights[id] }
 	end
-	for i = #d.footer + 1, #f.footer do
-		f.footer[i]:Hide()
-	end
-	f.contentHeight = math.max(10, y + 4)
-	f.child:SetHeight(f.contentHeight)
+	f.heights = heights
 	-- header above, 8 below, and 2 of slack so a rounded string height never leaves a pixel to scroll
 	f.chrome = f.top + 8 + 2
-	UI.fit()
+	-- the Plan tab starts at the top for every new step
+	if how == "advance" or how == "replace" then
+		f.offsets.plan = 0
+	end
+	-- a message has no tabs: the Plan view shows it, the saved tab stays for the next plan
+	UI.showView(d.tabs and savedTab() or "plan")
 end
 
 function UI.show(model)
