@@ -862,11 +862,11 @@ function V.atCapLine(m)
 	end
 	local per = V.LEVEL_CAPPED[m.professionID or false]
 		or (type(m.profession) == "string" and V.LEVEL_CAPPED[m.profession:lower()])
+	if per and cap < V.TOP_SKILL then
+		return ("At your cap (%d). %s rises %d per character level."):format(cap, m.profession or "This skill", per)
+	end
 	if cap >= V.TOP_SKILL then
 		return ("At the top skill (%d)."):format(cap)
-	end
-	if per then
-		return ("At your cap (%d). %s rises %d per character level."):format(cap, m.profession or "This skill", per)
 	end
 	return ("At your cap (%d): the next rank at the trainer raises it."):format(cap)
 end

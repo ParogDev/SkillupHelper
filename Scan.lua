@@ -181,10 +181,12 @@ function S.mergeProf(prof, live, info)
 	end
 	out.recipes = recipes
 	-- the planner caches by name: a profession without one keys by its id, never a shared "?"
-	local pname = info and clean(info.professionName)
+	-- (no name and no id: left nil, and runPlanner keys by this fresh table, so it never shares a slot)
+	local pname, pid = info and clean(info.professionName), info and clean(info.professionID)
 	out.name = out.name
 		or (type(pname) == "string" and pname)
-		or ("profession " .. tostring(info and clean(info.professionID)))
+		or (type(pid) == "number" and ("profession " .. pid))
+		or nil
 	out.liveAdded = added
 	return out
 end
@@ -300,7 +302,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 	local t0 = clock()
 	local now = GetTime and GetTime() or 0
 	-- caches are per profession name: the entry the scan passes is a fresh merge of the export and the client
-	local cacheKey = prof.name or "?"
+	local cacheKey = prof.name or prof
 	-- the recipes the plan may use, with the client-built ones' thresholds: a recipe learned (or a threshold the
 	-- client narrowed) since the last run prices its reagents and replans
 	local recipeKey = {}
@@ -578,8 +580,8 @@ function S.build(plan)
 	elseif model.planner then
 		-- no export for this profession: planned from the client's recipes and TSM's live prices alone, nothing broken
 		model.planner.clientOnly = true
-	elseif merged and ns.View and ns.View.atCapLine(model) then
-		-- planned from the client, at the live cap: not now, nothing broken
+	elseif merged and plan and ns.View and ns.View.atCapLine(model) then
+		-- planned from the client, at the live cap: not now, nothing broken (an absent Data/Plan.lua still says so)
 		model.planWhy = ns.View.atCapLine(model)
 	elseif not plan then
 		model.planWhy = "Data/Plan.lua absent: the price plan was not generated for this copy of the addon"
