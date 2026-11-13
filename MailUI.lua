@@ -1,7 +1,8 @@
 -- The mail queue on screen. On the main, the Next card's "Queue mail" button (UI.lua) saves which alt sends what.
 -- On the alt, at an open mailbox, a panel beside the MailFrame lists that alt's queue; its Fill button, under the
--- user's own click, opens the Send Mail tab, writes the recipient and subject and attaches whole stacks from the bags.
--- The user presses Blizzard's Send. This file never calls SendMail and sends no input.
+-- user's own click, opens the Send Mail tab, writes the recipient and subject and attaches stacks from the bags. A
+-- stack that holds more than the list wants is first split by its own click (Split, then Fill), so exactly the count
+-- goes. The user presses Blizzard's Send. This file never calls SendMail and sends no input.
 local _, ns = ...
 local M = {}
 ns.MailUI = M
@@ -81,6 +82,22 @@ local function live(item)
 	return { bags = bags, bank = math.max(0, all - bags), mail = mail, stacks = stacks }
 end
 
+-- The empty slots of plain bags (bag family 0, so any item fits): { { bag, slot } }, backpack first.
+local function freeSlots()
+	local out = {}
+	for bag = 0, NUM_BAG_SLOTS do
+		local free, family = C_Container.GetContainerNumFreeSlots(bag)
+		if (free or 0) > 0 and family == 0 then
+			for slot = 1, C_Container.GetContainerNumSlots(bag) or 0 do
+				if not C_Container.GetContainerItemInfo(bag, slot) then
+					out[#out + 1] = { bag = bag, slot = slot }
+				end
+			end
+		end
+	end
+	return out
+end
+
 local function attachedNow()
 	local out, any = {}, false
 	for i = 1, ns.Alts.MAX_ATTACH do
@@ -154,7 +171,8 @@ function M.draw()
 		note = state.note,
 		combat = InCombatLockdown and InCombatLockdown(),
 		busy = formBusy(),
-	}, { nameOf = K.itemName }, ns.Alts.pickStacks, ns.Alts.MAX_ATTACH)
+		free = #freeSlots(),
+	}, { nameOf = K.itemName }, ns.Alts.planAttach, ns.Alts.MAX_ATTACH)
 	local f = frame()
 	f:ClearAllPoints()
 	local anchor = (OpenMailFrame and OpenMailFrame:IsShown()) and OpenMailFrame or MailFrame
@@ -255,8 +273,14 @@ local function fillMail(a)
 	if not group then
 		return false
 	end
-	local fresh = ns.View.mailPanel({ group }, live, {}, { nameOf = tostring }, ns.Alts.pickStacks, ns.Alts.MAX_ATTACH)
+	local fresh = ns.View.mailPanel({ group }, live, {}, { nameOf = tostring }, ns.Alts.planAttach, ns.Alts.MAX_ATTACH)
 	local picks = fresh.groups[1] and fresh.groups[1].fill.picks or {}
+	if ns.Alts.splitOf(picks) then
+		-- the bags changed since the draw and a stack holds more than is wanted again: never attach it whole
+		state.note = { to = a.to, text = "A stack holds more than the list wants: split it first.", tone = "warn" }
+		M.draw()
+		return false
+	end
 	if #picks == 0 then
 		state.note = { to = a.to, text = "Nothing attached: the bags changed. Click again.", tone = "warn" }
 		M.draw()
@@ -272,11 +296,11 @@ local function fillMail(a)
 		return false
 	end
 	SendMailNameEditBox:SetText(a.to)
-	local n = 0
+	local n, units = 0, 0
 	for _, s in ipairs(picks) do
 		local ok, err = pcall(C_Container.UseContainerItem, s.bag, s.slot)
 		if ok then
-			n = n + 1
+			n, units = n + 1, units + s.take
 		else
 			stats.lastFillError = "UseContainerItem: " .. tostring(err)
 		end
@@ -286,12 +310,68 @@ local function fillMail(a)
 		M.draw()
 		return false
 	end
-	SendMailSubjectEditBox:SetText(("SkillupHelper: %d reagent stack%s"):format(n, n == 1 and "" or "s"))
+	SendMailSubjectEditBox:SetText(("SkillupHelper: %d reagent%s"):format(units, units == 1 and "" or "s"))
 	stats.fills = stats.fills + 1
 	-- pending holds until the send succeeds or fails, or the mailbox closes: the form empties on a send too
 	state.pending, state.note, state.attached = a.to, nil, nil
 	M.draw()
 	return n > 0
+end
+
+-- Split: one user click, step 1 of 2. Takes exactly take units off the stack onto the cursor and puts them in an
+-- empty bag slot, as the game's own stack-split window does with the user's next click. The next draw sees a stack
+-- of exactly that many and Fill attaches it whole. Anything left on the cursor goes back.
+local function splitStack(a)
+	if InCombatLockdown and InCombatLockdown() then
+		return false
+	end
+	local function fail(why, text)
+		stats.lastSplitError = why
+		state.note = { to = a.to, text = text, tone = "warn" }
+		M.draw()
+		return false
+	end
+	if not stats.open then
+		return fail("mailbox closed at the click", "Open the mailbox, then click again.")
+	end
+	local info = C_Container.GetContainerItemInfo(a.bag, a.slot)
+	if
+		not info
+		or secret(info.itemID)
+		or secret(info.stackCount)
+		or info.itemID ~= a.item
+		or info.isLocked
+		or (info.stackCount or 1) <= a.take
+	then
+		return fail("the stack moved or changed since the draw", "The bags changed. Click again.")
+	end
+	if CursorHasItem and CursorHasItem() then
+		return fail("the cursor already held an item", "Put down what the cursor holds, then click again.")
+	end
+	local to = freeSlots()[1]
+	if not to then
+		return fail("no empty slot in a plain bag", "Free a bag slot, then click again.")
+	end
+	local ok, err = pcall(C_Container.SplitContainerItem, a.bag, a.slot, a.take)
+	if not ok then
+		return fail("SplitContainerItem: " .. tostring(err), "The split failed: " .. tostring(err))
+	end
+	if CursorHasItem and not CursorHasItem() then
+		return fail("SplitContainerItem left nothing on the cursor", "The game did not split the stack. Click again.")
+	end
+	ok, err = pcall(C_Container.PickupContainerItem, to.bag, to.slot)
+	if not ok or (CursorHasItem and CursorHasItem()) then
+		ClearCursor()
+		return fail(
+			"PickupContainerItem: " .. tostring(ok and "the split stayed on the cursor" or err),
+			"The split could not be put down; it went back to its stack."
+		)
+	end
+	stats.splits = (stats.splits or 0) + 1
+	stats.lastSplitError = nil
+	state.note = nil
+	M.draw()
+	return true
 end
 
 function M.act(a)
@@ -322,6 +402,8 @@ function M.act(a)
 		return true
 	elseif a.id == "mailFill" then
 		return a.enabled and fillMail(a) or false
+	elseif a.id == "mailSplit" then
+		return a.enabled and splitStack(a) or false
 	else
 		return false
 	end
@@ -332,7 +414,14 @@ end
 ------------------------------------------------------------------------------------------------------------ events
 
 local ev = CreateFrame("Frame")
-for _, e in ipairs({ "MAIL_SHOW", "MAIL_CLOSED", "MAIL_SEND_INFO_UPDATE", "MAIL_SEND_SUCCESS", "MAIL_FAILED" }) do
+for _, e in ipairs({
+	"MAIL_SHOW",
+	"MAIL_CLOSED",
+	"MAIL_SEND_INFO_UPDATE",
+	"MAIL_SEND_SUCCESS",
+	"MAIL_FAILED",
+	"BAG_UPDATE_DELAYED",
+}) do
 	local ok, err = pcall(ev.RegisterEvent, ev, e)
 	if not ok then
 		stats.eventErrors = stats.eventErrors or {}
@@ -368,6 +457,11 @@ ev:SetScript("OnEvent", function(_, event)
 		end
 		state.pending, state.attached = nil, nil
 		ns.guard("mail draw", M.draw)
+	elseif event == "BAG_UPDATE_DELAYED" then
+		-- a split landed (or the bags changed): the next step reads the new stacks
+		if stats.open then
+			ns.guard("mail draw", M.draw)
+		end
 	elseif event == "MAIL_FAILED" then
 		if state.pending then
 			stats.failed = stats.failed + 1

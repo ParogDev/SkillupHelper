@@ -171,10 +171,12 @@ function A.forAlt(queue, alt)
 	return out
 end
 
--- Whole stacks that cover count with the least overshoot: the smallest stack that covers what is left, else the
--- largest and go on. stacks: { { bag, slot, n } }; max: free attachment slots. Returns the picks (largest first) and
--- the units they hold; fewer than count when the bags hold less or the slots run out.
-function A.pickStacks(stacks, count, max)
+-- The attachments that send exactly count: a stack that holds exactly what is left goes whole, else the smallest
+-- stack that holds more gives a split of what is left, else the largest goes whole and the loop goes on. So at most
+-- one pick is a split, and it comes last. stacks: { { bag, slot, n } }; max: free attachment slots. Returns the
+-- picks { bag, slot, n, take } (take < n marks the split) and the units they send; fewer than count when the bags
+-- hold less or the slots run out.
+function A.planAttach(stacks, count, max)
 	local pool = {}
 	for k, s in ipairs(stacks) do
 		pool[k] = s
@@ -197,15 +199,21 @@ function A.pickStacks(stacks, count, max)
 				break
 			end
 		end
-		at = at or #pool
-		local s = table.remove(pool, at)
-		picks[#picks + 1] = s
-		got = got + s.n
+		local s = table.remove(pool, at or #pool)
+		local take = math.min(s.n, want)
+		picks[#picks + 1] = { bag = s.bag, slot = s.slot, n = s.n, take = take }
+		got = got + take
 	end
-	table.sort(picks, function(a, b)
-		return a.n > b.n
-	end)
 	return picks, got
+end
+
+-- The split among the picks, or nil.
+function A.splitOf(picks)
+	for _, p in ipairs(picks) do
+		if p.take < p.n then
+			return p
+		end
+	end
 end
 
 -- After a sent mail: the units attached ({ [item] = units }) leave the alt's queue to the recipient; a row whose

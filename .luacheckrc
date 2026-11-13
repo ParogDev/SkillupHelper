@@ -54,7 +54,7 @@ read_globals[#read_globals + 1] = "TSM_API"
 for _, g in ipairs({
 	"MailFrame", "OpenMailFrame", "SendMailFrame", "SendMailNameEditBox", "SendMailSubjectEditBox",
 	"MailFrameTab_OnClick", "GetSendMailItem", "UnitFactionGroup", "GetRealmName", "InCombatLockdown",
-	"NUM_BAG_SLOTS", "C_Container", "issecretvalue", "UnitName", "C_Item",
+	"NUM_BAG_SLOTS", "C_Container", "issecretvalue", "UnitName", "C_Item", "CursorHasItem", "ClearCursor",
 }) do
 	read_globals[#read_globals + 1] = g
 end

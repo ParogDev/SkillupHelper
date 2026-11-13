@@ -96,29 +96,65 @@ describe("Alts mail queue", function()
 	end)
 end)
 
-describe("Alts.pickStacks", function()
+describe("Alts.planAttach", function()
 	local A = load().Alts
 	local function s(n, slot)
 		return { bag = 0, slot = slot, n = n }
 	end
-	it("takes the smallest stack that covers the count", function()
-		local picks, got = A.pickStacks({ s(20, 1), s(5, 2), s(3, 3) }, 4, 12)
-		assert.equal(1, #picks)
-		assert.equal(5, got)
+	local function takes(picks)
+		local out = {}
+		for k, p in ipairs(picks) do
+			out[k] = p.take .. "/" .. p.n
+		end
+		return out
+	end
+	it("splits exactly the count from the smallest stack that holds more", function()
+		local picks, got = A.planAttach({ s(20, 1), s(5, 2), s(3, 3) }, 4, 12)
+		assert.same({ "4/5" }, takes(picks))
+		assert.equal(4, got)
+		assert.equal(2, A.splitOf(picks).slot)
 	end)
-	it("takes the largest stacks, then the smallest that covers the rest", function()
-		local picks, got = A.pickStacks({ s(20, 1), s(20, 2), s(4, 3), s(1, 4) }, 43, 12)
-		assert.same({ 20, 20, 4 }, { picks[1].n, picks[2].n, picks[3].n })
-		assert.equal(44, got)
+	it("sends 3 from a lone stack of 20, not the 20", function()
+		local picks, got = A.planAttach({ s(20, 1) }, 3, 12)
+		assert.same({ "3/20" }, takes(picks))
+		assert.equal(3, got)
 	end)
-	it("stops at the attachment slots and at what the bags hold", function()
+	it("takes a stack of exactly the count whole, with no split", function()
+		local picks, got = A.planAttach({ s(20, 1), s(4, 2) }, 4, 12)
+		assert.same({ "4/4" }, takes(picks))
+		assert.equal(4, got)
+		assert.is_nil(A.splitOf(picks))
+	end)
+	it("takes the largest stacks whole, then splits the rest last", function()
+		local picks, got = A.planAttach({ s(20, 1), s(20, 2), s(4, 3), s(1, 4) }, 43, 12)
+		assert.same({ "20/20", "20/20", "3/4" }, takes(picks))
+		assert.equal(43, got)
+		assert.equal(picks[3], A.splitOf(picks))
+	end)
+	it("sends what the bags hold when that is less than the count, with no split", function()
+		local picks, got = A.planAttach({ s(5, 1), s(2, 2) }, 10, 12)
+		assert.same({ "5/5", "2/2" }, takes(picks))
+		assert.equal(7, got)
+		assert.is_nil(A.splitOf(picks))
+	end)
+	it("stops at the attachment slots", function()
 		local stacks = {}
 		for k = 1, 15 do
 			stacks[k] = s(1, k)
 		end
-		local picks, got = A.pickStacks(stacks, 20, 12)
+		local picks, got = A.planAttach(stacks, 20, 12)
 		assert.equal(12, #picks)
 		assert.equal(12, got)
+	end)
+	it("plans nothing for no stacks or a zero count", function()
+		assert.same({}, (A.planAttach({}, 3, 12)))
+		assert.same({}, (A.planAttach({ s(5, 1) }, 0, 12)))
+	end)
+	it("does not change the stacks it is given", function()
+		local stacks = { s(20, 1) }
+		A.planAttach(stacks, 3, 12)
+		assert.equal(20, stacks[1].n)
+		assert.is_nil(stacks[1].take)
 	end)
 end)
 
@@ -170,7 +206,7 @@ describe("View mail models", function()
 		assert.equal("2 queued on Al", V.mailWords(r, q))
 		assert.is_true(r.queued)
 	end)
-	it("builds the mailbox panel: whole-stack overshoot, bank, nowhere, and the fill states", function()
+	it("builds the mailbox panel: an exact split, bank, nowhere, and the fill states", function()
 		local groups =
 			{ { to = "Me", rows = { { item = 1, count = 3 }, { item = 2, count = 2 }, { item = 3, count = 1 } } } }
 		local liveData = {
@@ -182,18 +218,39 @@ describe("View mail models", function()
 			return liveData[i]
 		end
 		local A = load().Alts
-		local d = V.mailPanel(groups, live, {}, env, A.pickStacks, 12)
+		-- step 1: the stack of 20 holds more than the 3 wanted, so the button splits 3 off first
+		local d = V.mailPanel(groups, live, { free = 2 }, env, A.planAttach, 12)
 		local g = d.groups[1]
-		assert.equal("sends 20, wants 3", g.rows[1].right)
+		assert.equal("3 in bags, split from 20", g.rows[1].right)
 		assert.equal("2 in bank: take them out", g.rows[2].right)
 		assert.equal("none left here", g.rows[3].right)
+		assert.equal("In the bank: take them out, then come back.", g.note.text)
+		assert.equal("mailSplit", g.fill.id)
 		assert.is_true(g.fill.enabled)
-		assert.equal("Fill mail to Me: 1 stack", g.fill.label)
-		assert.matches("Stacks go whole", g.note.text)
-		d = V.mailPanel(groups, live, { pending = "Me" }, env, A.pickStacks, 12)
+		assert.equal("Split 3 item1 from 20", g.fill.label)
+		assert.same({ 1, 0, 1, 20, 3 }, { g.fill.item, g.fill.bag, g.fill.slot, g.fill.n, g.fill.take })
+		-- no empty bag slot: the split waits
+		g = V.mailPanel(groups, live, { free = 0 }, env, A.planAttach, 12).groups[1]
+		assert.equal("mailSplit", g.fill.id)
+		assert.is_false(g.fill.enabled)
+		assert.equal("Free a bag slot to split 3 item1", g.fill.label)
+		-- combat and a pending mail come before the split
+		assert.equal(
+			"In combat",
+			V.mailPanel(groups, live, { combat = true, free = 2 }, env, A.planAttach, 12).groups[1].fill.label
+		)
+		-- step 2: after the split the bags hold 17 and 3; Fill attaches the 3 whole
+		liveData[1] = { bags = 20, stacks = { { bag = 0, slot = 1, n = 17 }, { bag = 0, slot = 2, n = 3 } } }
+		g = V.mailPanel(groups, live, { free = 1 }, env, A.planAttach, 12).groups[1]
+		assert.equal("3 in bags", g.rows[1].right)
+		assert.equal("mailFill", g.fill.id)
+		assert.is_true(g.fill.enabled)
+		assert.equal("Fill mail to Me: 1 attachment", g.fill.label)
+		assert.same({ { bag = 0, slot = 2, n = 3, take = 3, item = 1 } }, g.fill.picks)
+		d = V.mailPanel(groups, live, { pending = "Me" }, env, A.planAttach, 12)
 		assert.equal("Now press Send", d.groups[1].fill.label)
 		assert.is_false(d.groups[1].fill.enabled)
-		d = V.mailPanel({}, live, {}, env, A.pickStacks, 12)
+		d = V.mailPanel({}, live, {}, env, A.planAttach, 12)
 		assert.equal("Nothing left to mail from this character.", d.empty)
 	end)
 end)

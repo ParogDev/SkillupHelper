@@ -801,9 +801,11 @@ function V.mailQueueLines(rows, env)
 end
 
 -- The panel beside the mailbox on an alt. groups: Alts.forAlt's list; live(item) -> { bags, bank, mail, stacks }
--- (stacks: { { bag, slot, n } } in the bags); state: { pending = recipient, note = { text, tone }, combat, busy }.
--- Returns { title, groups = { { to, title, rows, note, fill, drop } }, empty } with fill an action
--- { id, to, enabled, label, picks }; picks: the stacks a click attaches (whole stacks, at most max).
+-- (stacks: { { bag, slot, n } } in the bags); state: { pending = recipient, note = { text, tone }, combat, busy,
+-- free = empty bag slots }. Returns { title, groups = { { to, title, rows, note, fill, drop } }, empty } with fill
+-- an action { id, to, enabled, label, picks }; picks: what a click attaches, at most max: { bag, slot, n, take, item }
+-- with take < n on the one split of a row (pick: Alts.planAttach). While a pick is a split, fill is the first step
+-- instead: { id = "mailSplit", to, item, bag, slot, n, take }, a click that splits take into an empty bag slot.
 function V.mailPanel(groups, live, state, env, pick, max)
 	state = state or {}
 	local out = { groups = {} }
@@ -811,18 +813,18 @@ function V.mailPanel(groups, live, state, env, pick, max)
 	for _, g in ipairs(groups or {}) do
 		local og = { to = g.to, rows = {} }
 		local stacks, wantMore = {}, false
-		local over, away = nil, nil
+		local away = nil
 		for _, e in ipairs(g.rows) do
 			local l = live(e.item) or {}
 			local bags, bank, mail = l.bags or 0, l.bank or 0, l.mail or 0
 			local row = { item = e.item, name = env.nameOf(e.item), count = e.count, color = "bone" }
-			local picks, got = pick(l.stacks or {}, e.count, max)
+			local picks = pick(l.stacks or {}, e.count, max)
 			if bags >= e.count then
-				if got > e.count then
-					row.right, row.tone = ("sends %d, wants %d"):format(got, e.count), "gold"
-					over = over or row
-				else
-					row.right, row.tone = ("%d in bags"):format(e.count), "green"
+				row.right, row.tone = ("%d in bags"):format(e.count), "green"
+				for _, s in ipairs(picks) do
+					if s.take < s.n then
+						row.right = ("%d in bags, split from %d"):format(e.count, s.n)
+					end
 				end
 			elseif bags > 0 then
 				local rest = bank > 0 and ("%d in bank"):format(math.min(bank, e.count - bags))
@@ -842,7 +844,7 @@ function V.mailPanel(groups, live, state, env, pick, max)
 				away = away or ("Not on this character any more. Drop the list, or queue it again on %s."):format(g.to)
 			end
 			for _, s in ipairs(picks) do
-				stacks[#stacks + 1] = { bag = s.bag, slot = s.slot, n = s.n, item = e.item }
+				stacks[#stacks + 1] = { bag = s.bag, slot = s.slot, n = s.n, take = s.take, item = e.item }
 			end
 			items = items + 1
 			og.rows[#og.rows + 1] = row
@@ -856,6 +858,12 @@ function V.mailPanel(groups, live, state, env, pick, max)
 			send[k] = stacks[k]
 		end
 		og.title = ("To %s: %d item%s"):format(g.to, #g.rows, #g.rows == 1 and "" or "s")
+		local split
+		for _, s in ipairs(send) do
+			if s.take < s.n then
+				split = split or s
+			end
+		end
 		local fill = { id = "mailFill", to = g.to, picks = send, enabled = false }
 		if state.combat then
 			fill.label = "In combat"
@@ -863,14 +871,30 @@ function V.mailPanel(groups, live, state, env, pick, max)
 			fill.label = "Now press Send"
 		elseif state.pending then
 			fill.label = "Wait: another mail is being filled"
+		elseif split then
+			-- step 1 of 2: the split goes to an empty bag slot; the next draw picks it whole
+			fill = {
+				id = "mailSplit",
+				to = g.to,
+				item = split.item,
+				bag = split.bag,
+				slot = split.slot,
+				n = split.n,
+				take = split.take,
+				enabled = (state.free or 0) > 0,
+			}
+			local name = env.nameOf(split.item)
+			fill.label = fill.enabled and ("Split %d %s from %d"):format(split.take, name, split.n)
+				or ("Free a bag slot to split %d %s"):format(split.take, name)
+			fill.tip = "Step 1 of 2: puts exactly that many in an empty bag slot. Then Fill attaches them."
 		elseif state.busy then
 			fill.label = "Send Mail form is in use: clear it first"
 		elseif #send == 0 then
 			fill.label = ("Nothing in bags for %s"):format(g.to)
 		else
 			fill.enabled = true
-			fill.label = wantMore and ("Fill mail 1 of %d to %s: %d stacks"):format(mailN, g.to, #send)
-				or ("Fill mail to %s: %d stack%s"):format(g.to, #send, #send == 1 and "" or "s")
+			fill.label = wantMore and ("Fill mail 1 of %d to %s: %d attachments"):format(mailN, g.to, #send)
+				or ("Fill mail to %s: %d attachment%s"):format(g.to, #send, #send == 1 and "" or "s")
 		end
 		og.fill = fill
 		og.drop = {
@@ -885,14 +909,6 @@ function V.mailPanel(groups, live, state, env, pick, max)
 		elseif wantMore then
 			og.note =
 				{ text = "12 stacks fit in one mail. Send this one, then click again for the rest.", tone = "ash" }
-		elseif over then
-			og.note = {
-				text = ("Stacks go whole: %s sends %s. To send fewer, split the stack in your bags first."):format(
-					over.name,
-					over.right:match("^sends (%d+)") or "more"
-				),
-				tone = "ash",
-			}
 		elseif away then
 			og.note = { text = away, tone = "warn" }
 		end
