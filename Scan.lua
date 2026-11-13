@@ -211,6 +211,7 @@ local priceCache, baseCache = {}, {}
 
 function S.resetCaches()
 	priceCache, baseCache = {}, {}
+	S.altCache = nil
 end
 
 local function clock()
@@ -395,6 +396,19 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		end
 	end
 	table.sort(haveKey)
+	-- the alts' units from TSM: read again with new prices (a new item set) or once a minute (mail on its way)
+	local ac = S.altCache
+	if not ac or ac.stamp ~= pc.stamp or now - ac.at > 60 then
+		ac = { stamp = pc.stamp, at = now }
+		if ns.Alts then
+			ac.stock, ac.status = ns.Alts.read(pc.price)
+			ac.key = ns.Alts.key(ac.stock)
+		else
+			ac.stock, ac.status, ac.key = {}, { why = "Alts.lua not loaded" }, ""
+		end
+		S.altCache = ac
+	end
+	haveKey[#haveKey + 1] = "alts:" .. ac.key
 	-- the AH trip list the user keeps for this profession: its steps are committed until their target is reached
 	-- (planner rule 3); a list saved before 0.2.6 has only route and to
 	local saved = settings.trips and settings.trips[prof.name]
@@ -426,7 +440,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 	-- BAG_UPDATE_DELAYED fires for every bag change, most of them not in a reagent: same counts, same plan
 	S.stockRuns = S.stockRuns or 0
 	if bc.haveKey ~= haveKey or not bc.result then
-		bc.haveKey, bc.result = haveKey, ns.Planner.finish(bc.ctx, bc.baseline, have, { commit = commit, gold = gold })
+		bc.haveKey, bc.result =
+			haveKey, ns.Planner.finish(bc.ctx, bc.baseline, have, { commit = commit, gold = gold, alts = ac.stock })
 		bc.ms = clock() - t0
 		S.stockRuns = S.stockRuns + 1
 	end

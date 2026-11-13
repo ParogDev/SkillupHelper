@@ -1304,8 +1304,11 @@ end
 
 -- Pass 2 to 4 for the formula run, compared with the flat run. Cheap: rerun on every bag update.
 -- commits: the steps the user bought for (rule 3), { { spell, to } }.
-local function finishCore(ctx, baseline, have, commits)
+-- own: the units on this character (bags and bank); have also counts the alts' (P.finish), which steps may use but
+-- which are no leftover to sell here and no craft to make now.
+local function finishCore(ctx, baseline, have, commits, own)
 	have = have or {}
+	own = own or have
 	local chance = baseline.formula.chance
 	local base, committed = commitLevels(ctx, baseline.formula, commits, chance)
 	local route = next(committed) and committed or nil
@@ -1377,7 +1380,7 @@ local function finishCore(ctx, baseline, have, commits)
 					price = b.price,
 					where = "ah",
 					learn = b.learn,
-					owned = (have[b.item] or 0) > 0 or nil, -- in the bags already: learn it, no AH
+					owned = (own[b.item] or 0) > 0 or nil, -- in the bags already: learn it, no AH
 					saves = b.saves,
 					fillsGap = b.fillsGap,
 					alt = b.instead and { spell = b.instead, name = b.insteadName, extra = b.saves } or nil,
@@ -1583,10 +1586,11 @@ local function finishCore(ctx, baseline, have, commits)
 		end
 	end
 	for _, i in ipairs(sortedKeys(pool)) do
-		local q = math.floor(pool[i] + EPS)
+		-- steps take this character's units first, so what is left here is the pool less the alts' share
+		local q = math.floor(math.min(pool[i], own[i] or 0) + EPS)
 		if
 			q >= 1
-			and (have[i] or 0) > 0
+			and (own[i] or 0) > 0
 			and not isVendor(ctx, i)
 			and not patterns[i]
 			and (st.rem[i] or 0) >= 1 - EPS
@@ -1634,8 +1638,8 @@ local function finishCore(ctx, baseline, have, commits)
 			for i, n in pairs(o.mats) do
 				if not isVendor(ctx, i) then
 					any = true
-					crafts = math.min(crafts, math.floor((have[i] or 0) / n + EPS))
-					spare = math.min(spare, math.floor(math.max(0, pool[i] or 0) / n + EPS))
+					crafts = math.min(crafts, math.floor((own[i] or 0) / n + EPS))
+					spare = math.min(spare, math.floor(math.max(0, math.min(pool[i] or 0, own[i] or 0)) / n + EPS))
 				end
 			end
 			local c, p = trueCostPt(ctx, o, ctx.skill, have, st, chance)
@@ -1976,11 +1980,71 @@ function P.shoppingOf(ctx, steps, trip)
 	return shop
 end
 
+-- Which of the units each craft step uses must come from an alt: steps take this character's units first, in plan
+-- order, then each alt's, the largest holder first. Sets u.mail = { { who, count } } on the step's used rows and
+-- returns plan.mail = { { who, item, count } } (who, item order). alts: Alts.stock's shape.
+function P.mailFrom(steps, own, alts)
+	local left, from = {}, {}
+	for i, q in pairs(own or {}) do
+		left[i] = q
+	end
+	for i, list in pairs(alts or {}) do
+		from[i] = {}
+		for k, a in ipairs(list) do
+			from[i][k] = { who = a.who, n = a.n }
+		end
+	end
+	local total = {}
+	for _, step in ipairs(steps) do
+		for _, u in ipairs(step.kind == "craft" and step.used or {}) do
+			local need = u.count - math.min(left[u.item] or 0, u.count)
+			left[u.item] = math.max(0, (left[u.item] or 0) - u.count)
+			for _, a in ipairs(need > 0 and from[u.item] or {}) do
+				local take = math.min(a.n, need)
+				if take > 0 then
+					a.n, need = a.n - take, need - take
+					u.mail = u.mail or {}
+					u.mail[#u.mail + 1] = { who = a.who, count = take }
+					local key = a.who .. "\0" .. u.item
+					total[key] = total[key] or { who = a.who, item = u.item, count = 0 }
+					total[key].count = total[key].count + take
+				end
+			end
+		end
+	end
+	local out = {}
+	for _, m in pairs(total) do
+		out[#out + 1] = m
+	end
+	table.sort(out, function(a, b)
+		if a.who ~= b.who then
+			return a.who < b.who
+		end
+		return a.item < b.item
+	end)
+	return out
+end
+
 -- Pass 2 to 4, then the AH trip and the shopping list. opts: commit (the steps of the saved trip, { { spell, to } }:
--- rule 3), gold (copper on hand: the trip stops where it runs out).
+-- rule 3), gold (copper on hand: the trip stops where it runs out), alts (the alts' units, Alts.stock's shape
+-- { [item] = { { who, n } } }: the plan counts them as stock and names what to mail in plan.mail).
 function P.finish(ctx, baseline, have, opts)
 	opts = opts or {}
-	local plan = finishCore(ctx, baseline, have or {}, opts.commit)
+	have = have or {}
+	local all = have
+	if opts.alts and next(opts.alts) then
+		all = {}
+		for i, q in pairs(have) do
+			all[i] = q
+		end
+		for i, list in pairs(opts.alts) do
+			for _, a in ipairs(list) do
+				all[i] = (all[i] or 0) + a.n
+			end
+		end
+	end
+	local plan = finishCore(ctx, baseline, all, opts.commit, have)
+	plan.mail = P.mailFrom(plan.steps, have, opts.alts)
 	plan.luck = ctx.z
 	plan.trip = tripOf(ctx, plan.steps, baseline.formula.chance, opts.gold)
 	plan.shopping = P.shoppingOf(ctx, plan.steps, plan.trip)
@@ -1990,5 +2054,10 @@ end
 -- The whole planner in one call (tests, and the panel when nothing is cached).
 function P.run(input)
 	local ctx = P.prepare(input)
-	return P.finish(ctx, P.baseline(ctx, input.chance), input.have, { commit = input.commit, gold = input.gold })
+	return P.finish(
+		ctx,
+		P.baseline(ctx, input.chance),
+		input.have,
+		{ commit = input.commit, gold = input.gold, alts = input.alts }
+	)
 end

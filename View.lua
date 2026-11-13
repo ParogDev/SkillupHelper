@@ -292,6 +292,10 @@ local function craftMats(st, env, listed)
 	for _, u in ipairs(st.used or {}) do
 		local r = row(u.item)
 		r.need = r.need + u.count
+		for _, m in ipairs(u.mail or {}) do
+			r.mail = r.mail or {}
+			r.mail[#r.mail + 1] = { who = m.who, count = m.count }
+		end
 	end
 	for _, b in ipairs(st.buy or {}) do
 		local r = row(b.item)
@@ -307,8 +311,27 @@ local function craftMats(st, env, listed)
 		else
 			r.right = ("%d/%d"):format(math.min(r.have, r.need), r.need)
 		end
+		if r.mail then
+			r.right = r.right .. ", " .. V.mailWords(r, env)
+		end
 	end
 	return order
+end
+
+-- "3 on Altname", "3 queued on Altname" or "3 on 2 alts" for a material row whose units the plan takes from alts;
+-- sets r.mailCount, r.queued (every alt's part queued) and r.mailTip (one line per alt).
+function V.mailWords(r, env)
+	local n, queued, tip = 0, true, {}
+	for _, m in ipairs(r.mail) do
+		n = n + m.count
+		if not (env.queued and env.queued(m.who, r.item, m.count)) then
+			queued = false
+		end
+		tip[#tip + 1] = ("%s %d"):format(m.who, m.count)
+	end
+	r.mailCount, r.queued, r.mailTip = n, queued, table.concat(tip, ", ")
+	local where = #r.mail == 1 and r.mail[1].who or ("%d alts"):format(#r.mail)
+	return ("%d %son %s"):format(n, queued and "queued " or "", where)
 end
 
 -- The Next card of a planner step.
@@ -725,6 +748,174 @@ function V.tripAction(block)
 		label = ("Add to AH list, %d items"):format(#block.rows),
 		tip = "Keeps this list: at the auction house it becomes buy rows.",
 	}
+end
+
+-- The mail-queue button of a Next card whose rows take units from alts: "Queue mail" while any part is not queued,
+-- else the queued state (a click drops it). rows: { { alt, item, count } } for the click.
+function V.mailAction(card)
+	local rows, alts, n, all = {}, {}, 0, true
+	for _, r in ipairs(card and card.mats or {}) do
+		for _, m in ipairs(r.mail or {}) do
+			rows[#rows + 1] = { alt = m.who, item = r.item, count = m.count }
+			if not alts[m.who] then
+				alts[m.who] = true
+				alts[#alts + 1] = m.who
+			end
+			n = n + m.count
+		end
+		if r.mail and not r.queued then
+			all = false
+		end
+	end
+	if #rows == 0 then
+		return nil
+	end
+	local from = #alts == 1 and alts[1] or ("%d alts"):format(#alts)
+	if all then
+		return {
+			id = "mailUnqueue",
+			rows = rows,
+			enabled = true,
+			label = ("Mail queued on %s (click to drop it)"):format(from),
+		}
+	end
+	return {
+		id = "mailQueue",
+		rows = rows,
+		enabled = true,
+		label = ("Queue mail: %d reagent%s from %s"):format(n, n == 1 and "" or "s", from),
+		tip = ("Keeps this list: on %s, at a mailbox, it becomes a filled mail to you."):format(from),
+	}
+end
+
+-- Footer lines of the mail queued to this character: one per alt. rows: Alts.toMe's list.
+function V.mailQueueLines(rows, env)
+	local out, by, order = {}, {}, {}
+	for _, e in ipairs(rows or {}) do
+		if not by[e.alt] then
+			by[e.alt] = {}
+			order[#order + 1] = e.alt
+		end
+		local list = by[e.alt]
+		list[#list + 1] = ("%d %s"):format(e.count, env.nameOf(e.item))
+	end
+	for _, alt in ipairs(order) do
+		out[#out + 1] = ("Mail queue: %s sends %s"):format(alt, table.concat(by[alt], ", "))
+	end
+	return out
+end
+
+-- The panel beside the mailbox on an alt. groups: Alts.forAlt's list; live(item) -> { bags, bank, mail, stacks }
+-- (stacks: { { bag, slot, n } } in the bags); state: { pending = recipient, note = { text, tone }, combat, busy }.
+-- Returns { title, groups = { { to, title, rows, note, fill, drop } }, empty } with fill an action
+-- { id, to, enabled, label, picks }; picks: the stacks a click attaches (whole stacks, at most max).
+function V.mailPanel(groups, live, state, env, pick, max)
+	state = state or {}
+	local out = { groups = {} }
+	local items, total = 0, 0
+	for _, g in ipairs(groups or {}) do
+		local og = { to = g.to, rows = {} }
+		local stacks, wantMore = {}, false
+		local over, away = nil, nil
+		for _, e in ipairs(g.rows) do
+			local l = live(e.item) or {}
+			local bags, bank, mail = l.bags or 0, l.bank or 0, l.mail or 0
+			local row = { item = e.item, name = env.nameOf(e.item), count = e.count, color = "bone" }
+			local picks, got = pick(l.stacks or {}, e.count, max)
+			if bags >= e.count then
+				if got > e.count then
+					row.right, row.tone = ("sends %d, wants %d"):format(got, e.count), "gold"
+					over = over or row
+				else
+					row.right, row.tone = ("%d in bags"):format(e.count), "green"
+				end
+			elseif bags > 0 then
+				local rest = bank > 0 and ("%d in bank"):format(math.min(bank, e.count - bags))
+					or (mail > 0 and ("%d in mail"):format(math.min(mail, e.count - bags)))
+				row.right = rest and ("%d in bags, %s"):format(bags, rest) or ("%d of %d in bags"):format(bags, e.count)
+				row.tone = "bone"
+			elseif bank > 0 then
+				row.right, row.tone, row.color =
+					("%d in bank: take them out"):format(math.min(bank, e.count)), "warn", "ash"
+				away = away or "In the bank: take them out, then come back."
+			elseif mail > 0 then
+				row.right, row.tone, row.color =
+					("%d in mail: open it first"):format(math.min(mail, e.count)), "warn", "ash"
+				away = away or "In your mailbox: open that mail first."
+			else
+				row.right, row.tone, row.color = "none left here", "warn", "ash"
+				away = away or ("Not on this character any more. Drop the list, or queue it again on %s."):format(g.to)
+			end
+			for _, s in ipairs(picks) do
+				stacks[#stacks + 1] = { bag = s.bag, slot = s.slot, n = s.n, item = e.item }
+			end
+			items = items + 1
+			og.rows[#og.rows + 1] = row
+		end
+		if #stacks > max then
+			wantMore = true
+		end
+		local mailN = math.ceil(#stacks / max)
+		local send = {}
+		for k = 1, math.min(#stacks, max) do
+			send[k] = stacks[k]
+		end
+		og.title = ("To %s: %d item%s"):format(g.to, #g.rows, #g.rows == 1 and "" or "s")
+		local fill = { id = "mailFill", to = g.to, picks = send, enabled = false }
+		if state.combat then
+			fill.label = "In combat"
+		elseif state.pending == g.to then
+			fill.label = "Now press Send"
+		elseif state.pending then
+			fill.label = "Wait: another mail is being filled"
+		elseif state.busy then
+			fill.label = "Send Mail form is in use: clear it first"
+		elseif #send == 0 then
+			fill.label = ("Nothing in bags for %s"):format(g.to)
+		else
+			fill.enabled = true
+			fill.label = wantMore and ("Fill mail 1 of %d to %s: %d stacks"):format(mailN, g.to, #send)
+				or ("Fill mail to %s: %d stack%s"):format(g.to, #send, #send == 1 and "" or "s")
+		end
+		og.fill = fill
+		og.drop = {
+			id = "mailDrop",
+			to = g.to,
+			enabled = true,
+			label = "Drop",
+			tip = ("Drops %s's list from this character's queue."):format(g.to),
+		}
+		if state.note and state.note.to == g.to then
+			og.note = { text = state.note.text, tone = state.note.tone }
+		elseif wantMore then
+			og.note =
+				{ text = "12 stacks fit in one mail. Send this one, then click again for the rest.", tone = "ash" }
+		elseif over then
+			og.note = {
+				text = ("Stacks go whole: %s sends %s. To send fewer, split the stack in your bags first."):format(
+					over.name,
+					over.right:match("^sends (%d+)") or "more"
+				),
+				tone = "ash",
+			}
+		elseif away then
+			og.note = { text = away, tone = "warn" }
+		end
+		total = total + 1
+		out.groups[#out.groups + 1] = og
+	end
+	if #out.groups == 0 then
+		out.title = "SkillupHelper: mail queue done"
+		out.empty = "Nothing left to mail from this character."
+	else
+		out.title = ("SkillupHelper mail queue: %d item%s to %d character%s"):format(
+			items,
+			items == 1 and "" or "s",
+			total,
+			total == 1 and "" or "s"
+		)
+	end
+	return out
 end
 
 local PLACE = { trainer = "Trainer", vendor = "Vendor", ah = "Auction House" }
@@ -1251,6 +1442,14 @@ function V.describe(m, env)
 			nx.actions = nx.actions or {}
 			table.insert(nx.actions, 1, ta)
 		end
+		local ma = V.mailAction(nx)
+		if ma then
+			nx.actions = nx.actions or {}
+			table.insert(nx.actions, 1, ma)
+		end
+	end
+	for _, line in ipairs(V.mailQueueLines(env.mailQueue and env.mailQueue() or nil, env)) do
+		d.footer[#d.footer + 1] = line
 	end
 	if nx and #nx.mats > V.MAX_MATS then
 		for k = #nx.mats, V.MAX_MATS + 1, -1 do

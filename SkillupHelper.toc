@@ -17,7 +17,9 @@ Guide.lua
 Planner.lua
 Scan.lua
 TSM.lua
+Alts.lua
 View.lua
 UI.lua
 GuideUI.lua
+MailUI.lua
 Core.lua

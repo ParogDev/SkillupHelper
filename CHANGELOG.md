@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.12
+
+- Reagents on your other characters count. TSM's inventory tracking says what each alt on your faction and realm
+  holds in bags, bank and mail, and the plan uses those units before it buys. A material row says "3 on Altname".
+- "Queue mail" on the Next card keeps a list of what each alt should send you. On that alt, at a mailbox, a panel
+  beside the mail window lists it. Its Fill button opens Send Mail, writes your name and attaches whole stacks from
+  the bags; you press Send. The addon never sends mail by itself. Stacks in the bank or the mailbox are named, not
+  attached.
+- New files (Alts.lua, MailUI.lua): restart the game client once, a /reload does not load them.
+
 ## 0.2.11
 
 - Show recipe is instant when the profession window is open: it selects the recipe in the list instead of asking the
