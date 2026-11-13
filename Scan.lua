@@ -517,6 +517,7 @@ function S.build(plan)
 	end
 	local model = {
 		profession = info.professionName,
+		professionID = info.professionID,
 		skill = skill,
 		maxSkill = info.maxSkillLevel,
 		idSource = idSource,

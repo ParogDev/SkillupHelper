@@ -848,6 +848,24 @@ function V.capBlockLine(cb)
 	)
 end
 
+-- Poisons (SkillLine 40) has no trainer ranks: its cap is 5 per character level, up to 300.
+V.LEVEL_CAPPED = { [40] = 5, poisons = 5 }
+
+-- Why the plan is empty when the skill sits at its live cap (nil when it does not): "At your cap (175). Poisons rises
+-- 5 per character level." A level-capped skill says so; any other waits for the next rank at the trainer.
+function V.atCapLine(m)
+	local skill, cap = m and m.skill, m and m.maxSkill
+	if type(skill) ~= "number" or type(cap) ~= "number" or skill < cap then
+		return nil
+	end
+	local per = V.LEVEL_CAPPED[m.professionID or false]
+		or (type(m.profession) == "string" and V.LEVEL_CAPPED[m.profession:lower()])
+	if per then
+		return ("At your cap (%d). %s rises %d per character level."):format(cap, m.profession or "This skill", per)
+	end
+	return ("At your cap (%d): the next rank at the trainer raises it."):format(cap)
+end
+
 ------------------------------------------------------------------------------------------------- the AH buy rows
 
 -- One AH list row (Logic.ahList) at the open AH. live: what the AH said about the item (UI.lua keeps it):
@@ -1133,7 +1151,7 @@ function V.describe(m, env)
 			d.footer[#d.footer + 1] = line
 		end
 		if not d.next then
-			d.empty = "Nothing gives skill in range: every known recipe is grey."
+			d.empty = V.atCapLine(m) or "Nothing gives skill in range: every known recipe is grey."
 		end
 	else
 		d.state = "legacy"
