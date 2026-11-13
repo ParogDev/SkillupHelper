@@ -1289,6 +1289,72 @@ describe("Alternatives and exclusions", function()
 		assert.same({ 2 }, craftSpells(plan))
 	end)
 
+	describe("a swap (Use this on an Other way row)", function()
+		it("plans the chosen recipe on every level of the replaced one and names what it replaced", function()
+			local plan = P.run(input(THREE, ALL, { exclude = { swap = { [1] = 2 } } }))
+			assert.same({ 2 }, craftSpells(plan))
+			local st = plan.steps[1]
+			assert.same({ 1, "R1" }, { st.swapFrom, st.swapFromName })
+			-- the replaced recipe is the step's "Back to", not one of its other ways
+			for _, o in ipairs(st.others or {}) do
+				assert.is_not.equal(1, o.spell)
+			end
+		end)
+
+		it("a swap to a recipe with no cost there changes nothing", function()
+			local plan = P.run(input(THREE, ALL, { exclude = { swap = { [1] = 99 } } }))
+			assert.same({ 1 }, craftSpells(plan))
+			assert.is_nil(plan.steps[1].swapFrom)
+		end)
+
+		it("owned reagents of another recipe never take a swapped level (stock pass)", function()
+			local plan = P.run(input(THREE, ALL, { exclude = { swap = { [1] = 2 } }, have = { [M3] = 50 } }))
+			assert.same({ 2 }, craftSpells(plan))
+			-- without the swap, the free M3 stock is used
+			local free = P.run(input(THREE, ALL, { have = { [M3] = 50 } }))
+			assert.same({ 3 }, craftSpells(free))
+		end)
+
+		it("follows a chain to its last link and ignores a loop", function()
+			local plan = P.run(input(THREE, ALL, { exclude = { swap = { [1] = 2, [2] = 3 } } }))
+			assert.same({ 3 }, craftSpells(plan))
+			plan = P.run(input(THREE, ALL, { exclude = { swap = { [1] = 2, [2] = 1 } } }))
+			assert.equal(1, #craftSpells(plan))
+		end)
+
+		it("a swap to a recipe item buys the recipe, whatever it saves", function()
+			local recipes = {
+				[1] = recipe("R1", M1),
+				[4] = recipe("Pattern", M2, { src = "item", item = PAT, learn = 100 }),
+			}
+			local plan = P.run(input(recipes, { [1] = true }))
+			assert.same({ 1 }, craftSpells(plan))
+			plan = P.run(input(recipes, { [1] = true }, { exclude = { swap = { [1] = 4 } } }))
+			assert.same({ 4 }, craftSpells(plan))
+			local buy
+			for _, b in ipairs(plan.buys) do
+				if b.spell == 4 then
+					buy = b
+				end
+			end
+			assert.same({ PAT, true }, { buy and buy.item, buy and buy.swap })
+			-- a swap to a pattern learned past the cap takes no level: nothing is bought for it
+			recipes[4].learn = 200
+			plan = P.run(input(recipes, { [1] = true }, { exclude = { swap = { [1] = 4 } } }))
+			assert.same({ 1 }, craftSpells(plan))
+			for _, b in ipairs(plan.buys) do
+				assert.is_not.equal(4, b.spell)
+			end
+		end)
+
+		it("marks a gated alternative, so the view offers no Use this for it", function()
+			local recipes = { [1] = recipe("R1", M1), [2] = recipe("R2", M2, { src = "special" }) }
+			local plan = P.run(input(recipes, { [1] = true }))
+			local st = plan.steps[1]
+			assert.same({ 2, true }, { st.others[1].spell, st.others[1].gated })
+		end)
+	end)
+
 	it("an excluded option never appears in steps (not now, AH patterns, dungeon patterns)", function()
 		local recipes = {
 			[1] = recipe("R1", M1),

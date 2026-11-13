@@ -226,6 +226,45 @@ function UI.noteBags()
 	end
 end
 
+-- Selects a recipe in Blizzard's open crafting page without a server trip: RecipeList:SelectRecipe fires
+-- OnRecipeSelected -> CraftingPage:SelectRecipe. Returns the element data, or nil when the list does not hold the
+-- recipe (another profession, filtered, collapsed) or the page is not up (TSM's window, another tab).
+local function selectInList(spell)
+	local frame = ProfessionsFrame
+	local page = frame and frame:IsShown() and frame.CraftingPage
+	local list = page and page:IsShown() and page.RecipeList
+	if not (list and list.SelectRecipe and list.ScrollBox) then
+		return nil, "crafting page not shown"
+	end
+	local info = C_TradeSkillUI.GetRecipeInfo(spell)
+	if type(info) ~= "table" then
+		return nil, "no recipe info"
+	end
+	local data = list:SelectRecipe(info, false)
+	if not data then
+		return nil, "not in the list"
+	end
+	list.ScrollBox:ScrollToElementData(data)
+	return data
+end
+
+-- "Show recipe": select it in the open list (instant), else C_TradeSkillUI.OpenRecipe (a server round trip that
+-- rebuilds the whole list). stats.lastOpen names the path that ran and why the fast one was skipped.
+function UI.showRecipe(spell)
+	local stats = UI.stats
+	local ok, data, why = pcall(selectInList, spell)
+	if ok and data then
+		stats.lastOpen = { path = "list", spell = spell }
+		stats.lastOpenError = nil
+		return true
+	end
+	local skipped = ok and why or ("RecipeList:SelectRecipe: " .. tostring(data))
+	local ok2, err = pcall(C_TradeSkillUI.OpenRecipe, spell)
+	stats.lastOpen = { path = "OpenRecipe", spell = spell, why = skipped }
+	stats.lastOpenError = not ok2 and ("C_TradeSkillUI.OpenRecipe: " .. tostring(err)) or nil
+	return ok2
+end
+
 -- A click on a card button. Each client call runs under pcall and leaves its result in UI.stats (selftest ui).
 -- Only ever called from a button's OnClick: a craft needs the user's own click.
 function UI.act(a)
@@ -252,11 +291,15 @@ function UI.act(a)
 			return ns.useShortcut(a.spell, true)
 		end
 		return ns.hideShortcut(a.spell)
+	elseif a.id == "swap" or a.id == "unswap" then
+		stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
+		if a.id == "swap" then
+			return not secret(a.from) and ns.useSwap(a.from, a.spell) or false
+		end
+		return ns.clearSwap(a.spell)
 	elseif a.id == "open" then
 		stats.clicks.open = stats.clicks.open + 1
-		local ok, err = pcall(C_TradeSkillUI.OpenRecipe, a.spell)
-		stats.lastOpenError = not ok and ("C_TradeSkillUI.OpenRecipe: " .. tostring(err)) or nil
-		return ok
+		return UI.showRecipe(a.spell)
 	elseif a.id ~= "craft" then
 		return false
 	end
@@ -855,8 +898,11 @@ local function fillCard(card, c, consumed)
 	for _, n in ipairs(c.notes) do
 		extra[#extra + 1] = { n, "bone" }
 	end
-	for _, o in ipairs(c.others or {}) do
-		extra[#extra + 1] = { o, "ash" }
+	-- the alternatives are rows with a "Use this" button below (c.otherRows); plain lines only without them
+	if not c.otherRows then
+		for _, o in ipairs(c.others or {}) do
+			extra[#extra + 1] = { o, "ash" }
+		end
 	end
 	if c.alt then
 		extra[#extra + 1] = { c.alt, "bone" }
@@ -885,6 +931,50 @@ local function fillCard(card, c, consumed)
 		else
 			fs:Hide()
 		end
+	end
+
+	-- the alternatives: "Other way: ..." with "Use this" under it; a swapped step first shows "Back to Y"
+	card.otherRowFrames = card.otherRowFrames or {}
+	local rows = {}
+	if c.swapBack then
+		rows[1] = { text = c.swapBack.text, use = c.swapBack.use, color = "gold" }
+	end
+	for _, other in ipairs(c.otherRows or {}) do
+		rows[#rows + 1] = { text = other.text, use = other.use, color = "ash" }
+	end
+	for k, line in ipairs(rows) do
+		local row = card.otherRowFrames[k]
+		if not row then
+			row = { fs = text(card, "GameFontHighlightSmall", 11), use = newButton(card) }
+			row.use:SetSize(70, 18)
+			card.otherRowFrames[k] = row
+		end
+		top = top + 3
+		row.fs:SetWidth(INNER - PAD * 2 - 4)
+		row.fs:ClearAllPoints()
+		row.fs:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		row.fs:SetText(line.text)
+		setColor(row.fs, line.color)
+		row.fs:Show()
+		top = top + row.fs:GetStringHeight()
+		if line.use then
+			-- the button under its line, as wide as its label ("Back to <recipe name>" can be long)
+			top = top + 2
+			setButton(row.use, line.use, ns.View.RGB[line.color] or ns.View.RGB.ash)
+			row.use.style = line.color == "gold" and "primary" or "quiet"
+			paintButton(row.use)
+			local w = row.use.label:GetStringWidth() or 0
+			row.use:SetSize(math.max(70, math.min(INNER - PAD * 2 - 4, w + 16)), 18)
+			row.use:ClearAllPoints()
+			row.use:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+			top = top + 18
+		else
+			row.use:Hide()
+		end
+	end
+	for i = #rows + 1, #card.otherRowFrames do
+		card.otherRowFrames[i].fs:Hide()
+		card.otherRowFrames[i].use:Hide()
 	end
 
 	-- the shortcuts: a gated recipe that would save money here or fill this gap, with "Use it" and "Hide"

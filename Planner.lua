@@ -498,7 +498,8 @@ local function smooth(ctx, levels, chance)
 				local save, repl = 0, {}
 				for s = b.from, b.to do
 					local c, p = costPt(ctx, a, s, cum, nil, chance)
-					if not c then
+					-- a level the user's swap picked is never smoothed away
+					if not c or levels[s].picked then
 						repl = nil
 						break
 					end
@@ -525,8 +526,38 @@ local function smooth(ctx, levels, chance)
 	return levels
 end
 
+-- The user's swaps (input.exclude.swap[Y] = X, "use X instead of Y"): the option that replaces best at level s, the
+-- cheapest variant of X with a cost there, following a chain Y -> X -> Z to its last link that has one. Returns
+-- o, c, p, net, or nil when no swap applies at s.
+local function swapAt(ctx, opts, best, s, cum, chance)
+	local swap = ctx.exclude and ctx.exclude.swap
+	if not swap then
+		return nil
+	end
+	local spell, seen = best.spell, {}
+	local po, pc, pp, pnet
+	while swap[spell] and not seen[spell] do
+		seen[spell] = true
+		spell = swap[spell]
+		local bo, bc, bp, bnet
+		for _, o in ipairs(opts) do
+			if o.spell == spell then
+				local c, p, net = costPt(ctx, o, s, cum[o], nil, chance)
+				if c and better(c, p, net, bc, bp, bnet) then
+					bo, bc, bp, bnet = o, c, p, net
+				end
+			end
+		end
+		if bo then
+			po, pc, pp, pnet = bo, bc, bp, bnet
+		end
+	end
+	return po, pc, pp, pnet
+end
+
 -- Cheapest option per level. Each level also keeps every spell's cost there (costs[spell], its cheapest variant):
--- the alternatives (step.others) come from it.
+-- the alternatives (step.others) come from it. A level the user's swap decided is `picked` (swapFrom: the spell it
+-- replaced): smoothing and the stock pass leave it alone.
 local function forward(ctx, opts, chance)
 	local levels, cum = {}, {}
 	for s = ctx.skill, ctx.cap - 1 do
@@ -549,7 +580,14 @@ local function forward(ctx, opts, chance)
 				costs[o.spell] = c
 			end
 		end
+		local so, sc, sp = nil, nil, nil
 		if best then
+			so, sc, sp = swapAt(ctx, opts, best, s, cum, chance)
+		end
+		if so and so.spell ~= best.spell then
+			cum[so] = (cum[so] or 0) + 1 / sp
+			levels[s] = { o = so, c = sc, p = sp, costs = costs, picked = true, swapFrom = best.spell }
+		elseif best then
 			cum[best] = (cum[best] or 0) + 1 / bp
 			levels[s] = { o = best, c = bc, p = bp, costs = costs }
 		else
@@ -569,8 +607,23 @@ local function baselineFor(ctx, chance)
 			cands[#cands + 1] = o
 		end
 	end
-	local levels = forward(ctx, opts, chance)
+	-- a recipe item the user swapped to ("Use this") is bought whatever it saves
 	local buys, bought = {}, {}
+	local swapTo = {}
+	for _, to in pairs(ctx.exclude and ctx.exclude.swap or {}) do
+		swapTo[to] = true
+	end
+	for _, c in ipairs(cands) do
+		if swapTo[c.spell] then
+			opts[#opts + 1] = c
+			if not bought[c.spell] then
+				bought[c.spell] = true
+				buys[#buys + 1] =
+					{ spell = c.spell, item = c.recipeItem, price = c.recipePrice, learn = c.at, swap = true }
+			end
+		end
+	end
+	local levels = forward(ctx, opts, chance)
 	for _ = 1, P.MAX_RECIPE_BUYS do
 		local best, bestSave
 		for _, c in ipairs(cands) do
@@ -619,7 +672,20 @@ local function baselineFor(ctx, chance)
 			insteadName = (not fillsGap and instead) and instead.name or nil,
 		}
 	end
-	return { levels = levels, opts = opts, buys = buys, chance = chance }
+	-- a swap's recipe buy stands only when the swap took a level (a stale or costless swap buys nothing)
+	local used = {}
+	for s = ctx.skill, ctx.cap - 1 do
+		if levels[s] then
+			used[levels[s].o.spell] = true
+		end
+	end
+	local kept = {}
+	for _, b in ipairs(buys) do
+		if not b.swap or used[b.spell] then
+			kept[#kept + 1] = b
+		end
+	end
+	return { levels = levels, opts = opts, buys = kept, chance = chance }
 end
 
 -- Pass 1, both chance models. Cached by the caller: it changes only with skill, cap, recipes or prices.
@@ -697,7 +763,9 @@ local function stockPass(ctx, base, have, route)
 			local numer = (net > 0 and net or 0) + ctx.effort * (1 + o.precrafts)
 			for s = math.max(ctx.skill, o.at == -math.huge and ctx.skill or math.ceil(o.at)), ctx.cap - 1 do
 				local lv = base.levels[s]
-				if (not lv or o ~= lv.o) and not (lv and (lv.committed or (route and route[lv.o.spell]))) then
+				if
+					(not lv or o ~= lv.o) and not (lv and (lv.committed or lv.picked or (route and route[lv.o.spell])))
+				then
 					local p = chance(s, o.y, o.g) * o.k
 					if p <= 0 then
 						break
@@ -1072,8 +1140,9 @@ local function othersOf(ctx, base, step, info)
 		local f = math.max(0, math.min(step.to, s + 1) - math.max(step.from, s))
 		local now = {}
 		for spell, c in pairs(lv.costs) do
-			-- an alternative covers the whole step: a spell missing at any level drops out
-			if spell ~= step.spell and (not extra or extra[spell]) then
+			-- an alternative covers the whole step: a spell missing at any level drops out. The spell a swap replaced
+			-- is not an alternative: the step offers "Back to" it (step.swapFrom).
+			if spell ~= step.spell and spell ~= step.swapFrom and (not extra or extra[spell]) then
 				now[spell] = (extra and extra[spell] or 0) + f * (c - lv.c)
 			end
 		end
@@ -1093,6 +1162,8 @@ local function othersOf(ctx, base, step, info)
 				src = o and o.src,
 				teacher = o and o.teacher,
 				unchecked = o and o.unchecked,
+				-- gated: shown, never switched to ("Use it" on a shortcut is the way in)
+				gated = o and o.gated,
 			}
 		end
 	end
@@ -1646,6 +1717,12 @@ local function finishCore(ctx, baseline, have, commits)
 	local cutSpells = {}
 	for _, step in ipairs(steps) do
 		if step.kind == "craft" then
+			-- a step on a level the user's swap picked: the spell it replaced, for "Back to"
+			local at = base.levels[math.floor(step.from)]
+			if at and at.picked and at.o.spell == step.spell then
+				step.swapFrom = at.swapFrom
+				step.swapFromName = info[at.swapFrom] and info[at.swapFrom].name or nil
+			end
 			step.others, step.shortcuts = othersOf(ctx, base, step, info)
 		elseif step.kind == "gap" then
 			step.shortcuts = gapFills(ctx, step, chance)

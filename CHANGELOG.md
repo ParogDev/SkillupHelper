@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.11
+
+- Show recipe is instant when the profession window is open: it selects the recipe in the list instead of asking the
+  server to reopen the window. It still asks the server when the recipe is filtered out or TSM's window is up.
+- Each "Other way" on the Next card has a Use this button: the plan crafts that recipe wherever it would have crafted
+  this one. The step then says it is your choice and offers Back to, which lets the plan pick again.
+- In an instance, where the game hides recipe colours, the scan no longer reads them; the selftest now lists the
+  learned recipes it could not plan, by reason.
+
 ## 0.2.10
 
 - Every recipe you know joins the plan, read from the game: a pattern learned after the price file was made, or a
