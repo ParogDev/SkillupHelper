@@ -52,9 +52,12 @@ These rules hold for every plan, every replan and every alternative the panel of
    city the order is trainer, vendor, auction house. A city is the town of the nearest known NPC serving the row
    (a seed's place, or for an NPC you opened, the seed town nearby or the map's name); rows with no known town come
    last. Never vendor, AH, vendor in one city.
-8. **Taught where?** A recipe or rank taught by a special NPC (a dungeon teacher) is never a trainer step, and is
-   left out unless enabled. A trainer recipe the addon hasn't yet seen at a trainer is "not checked" and loses near
-   ties.
+8. **Only recipes you can surely get.** The plan uses recipes you know, recipes a trainer you opened teaches,
+   auto-learned ones and patterns with a price. A recipe from a special NPC (a dungeon teacher), a quest, or a
+   trainer recipe no trainer you opened lists is a **shortcut**: never planned, but shown on the step it would make
+   cheaper ("Shortcut: X saves 1g 10s (needs: …)") or the gap it would fill, with **Use it** (plan with it from now
+   on; `/skillup allow <spellID>` toggles it) and **Hide** (never offer it). Until you open a trainer of the
+   profession, trainer recipes are planned and the footer says how many are unconfirmed.
 
 ## Limits
 
