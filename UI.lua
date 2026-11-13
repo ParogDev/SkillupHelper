@@ -158,6 +158,8 @@ function UI.env()
 		bagRoom = UI.bagRoom,
 		savedTrip = ns.savedTrip,
 		where = ns.GuideUI and ns.GuideUI.where or nil,
+		queued = ns.MailUI and ns.MailUI.queued or nil,
+		mailQueue = ns.MailUI and ns.MailUI.toMe or nil,
 	}
 end
 
@@ -274,6 +276,10 @@ function UI.act(a)
 	end
 	if type(a) == "table" and a.id == "buy" then
 		return a.enabled and buy(a) or false
+	end
+	if type(a) == "table" and type(a.id) == "string" and a.id:sub(1, 4) == "mail" and ns.MailUI then
+		stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
+		return ns.MailUI.act(a)
 	end
 	if type(a) == "table" and (a.id == "trip" or a.id == "untrip") then
 		stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
@@ -762,6 +768,7 @@ local function newCard(parent)
 	card.blockTitles = {}
 	card.tripRows = {}
 	card.buttons = { trip = newButton(card), buy = newButton(card), craft = newButton(card), open = newButton(card) }
+	card.buttons.mail = newButton(card)
 	card.guide = newStrip(card)
 
 	-- slide: in from the right with a fade, out to the left
@@ -1026,6 +1033,7 @@ local function fillCard(card, c, consumed)
 	open:Hide()
 	buyButton:Hide()
 	tripButton:Hide()
+	card.buttons.mail:Hide()
 	local byId = {}
 	for _, a in ipairs(c.actions or {}) do
 		byId[a.id] = a
@@ -1050,6 +1058,17 @@ local function fillCard(card, c, consumed)
 		card.guide:Hide()
 	end
 
+	-- the mail queue: reagents the plan takes from alts (MailUI.lua)
+	local ma = byId.mailQueue or byId.mailUnqueue
+	if ma then
+		local mb = card.buttons.mail
+		top = top + 10
+		mb:ClearAllPoints()
+		mb:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		mb:SetWidth(INNER - 2 * PAD - 2)
+		setButton(mb, ma, ma.id == "mailQueue" and ns.View.RGB.gold or ns.View.RGB.ash)
+		top = top + 20
+	end
 	local ta = byId.trip or byId.untrip
 	if ta then
 		top = top + 10
@@ -1916,6 +1935,21 @@ function UI.ahAct(a)
 end
 
 local AH_WIDTH = 300
+
+-- The drawing helpers MailUI.lua builds its mailbox panel with, so it looks like the AH list.
+UI.kit = {
+	PAD = PAD,
+	WIDTH = AH_WIDTH,
+	text = text,
+	setColor = setColor,
+	fill = fill,
+	edges = edges,
+	paintEdges = paintEdges,
+	rgb = rgb,
+	newButton = newButton,
+	setButton = setButton,
+	itemName = itemName,
+}
 
 local function ahRowFrame(parent)
 	local row = CreateFrame("Frame", nil, parent)

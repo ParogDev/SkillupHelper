@@ -124,6 +124,9 @@ local function refreshSelftest()
 		lastAhError = ui.lastAhError,
 	}
 	st.ahSkip = db.ahSkip
+	-- the alts' reagents (counts and the broken link only: no character names in the selftest) and the mail queue
+	st.alts = ns.Scan.altCache and ns.Scan.altCache.status or "not read yet (open a profession window)"
+	st.mail = ns.MailUI and ns.MailUI.status()
 	db.selftest = st
 end
 

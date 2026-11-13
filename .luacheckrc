@@ -47,8 +47,17 @@ read_globals[#read_globals + 1] = "ProfessionsFrame"
 read_globals[#read_globals + 1] = "UIParent"
 read_globals[#read_globals + 1] = "GameTooltip"
 read_globals[#read_globals + 1] = "debugstack"
--- TradeSkillMaster's public API (a required dependency).
+-- TradeSkillMaster's public API (a required dependency), and its saved settings' character list (read only).
 read_globals[#read_globals + 1] = "TSM_API"
+-- The mailbox (MailUI.lua) and the alts' names (Alts.lua): FrameXML frames and helpers, and the C API the
+-- standalone list lacks.
+for _, g in ipairs({
+	"MailFrame", "OpenMailFrame", "SendMailFrame", "SendMailNameEditBox", "SendMailSubjectEditBox",
+	"MailFrameTab_OnClick", "GetSendMailItem", "UnitFactionGroup", "GetRealmName", "InCombatLockdown",
+	"NUM_BAG_SLOTS", "C_Container", "issecretvalue", "UnitName", "C_Item",
+}) do
+	read_globals[#read_globals + 1] = g
+end
 
 globals = { "SkillupHelper", "SkillupHelperDB", "SLASH_SKILLUPHELPER1", "SlashCmdList" }
 
