@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.14
+
+- The mail queue sends exactly what the plan wants, not whole stacks. When a stack holds more, the mailbox panel's
+  button first reads "Split 3 Itemname from 20": that click puts 3 in an empty bag slot. The button then turns into
+  Fill, which attaches those 3. Each step is your click, and you still press Send yourself. Splitting needs one free
+  slot in a plain bag.
+
 ## 0.2.13
 
 - The panel has four tabs under the skill bar: Plan, Shopping, Alts and More. The tab you pick stays picked.
