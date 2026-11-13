@@ -850,6 +850,8 @@ end
 
 -- Poisons (SkillLine 40) has no trainer ranks: its cap is 5 per character level, up to 300.
 V.LEVEL_CAPPED = { [40] = 5, poisons = 5 }
+-- The highest skill any profession reaches on this client.
+V.TOP_SKILL = 300
 
 -- Why the plan is empty when the skill sits at its live cap (nil when it does not): "At your cap (175). Poisons rises
 -- 5 per character level." A level-capped skill says so; any other waits for the next rank at the trainer.
@@ -860,6 +862,9 @@ function V.atCapLine(m)
 	end
 	local per = V.LEVEL_CAPPED[m.professionID or false]
 		or (type(m.profession) == "string" and V.LEVEL_CAPPED[m.profession:lower()])
+	if cap >= V.TOP_SKILL then
+		return ("At the top skill (%d)."):format(cap)
+	end
 	if per then
 		return ("At your cap (%d). %s rises %d per character level."):format(cap, m.profession or "This skill", per)
 	end

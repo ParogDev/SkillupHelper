@@ -542,6 +542,10 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 		close()
 	elseif ns.tradeSkillOpen then
 		ns.refresh()
+		if event == "NEW_RECIPE_LEARNED" then
+			-- the recipe list may not hold the new recipe yet: look again once the client has refreshed it
+			C_Timer.After(1.5, ns.refresh)
+		end
 	end
 end)
 

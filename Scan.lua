@@ -134,6 +134,10 @@ function S.liveEntry(r, seen)
 	if not r.reagents then
 		return nil, "no schematic"
 	end
+	if #r.reagents == 0 then
+		-- only optional or finishing slots: priced at nothing it would look free
+		return nil, "no basic reagents"
+	end
 	local mats = {}
 	for _, m in ipairs(r.reagents) do
 		mats[#mats + 1] = m.item
@@ -176,7 +180,11 @@ function S.mergeProf(prof, live, info)
 		end
 	end
 	out.recipes = recipes
-	out.name = out.name or (info and info.professionName) or "?"
+	-- the planner caches by name: a profession without one keys by its id, never a shared "?"
+	local pname = info and clean(info.professionName)
+	out.name = out.name
+		or (type(pname) == "string" and pname)
+		or ("profession " .. tostring(info and clean(info.professionID)))
 	out.liveAdded = added
 	return out
 end
@@ -570,6 +578,9 @@ function S.build(plan)
 	elseif model.planner then
 		-- no export for this profession: planned from the client's recipes and TSM's live prices alone, nothing broken
 		model.planner.clientOnly = true
+	elseif merged and ns.View and ns.View.atCapLine(model) then
+		-- planned from the client, at the live cap: not now, nothing broken
+		model.planWhy = ns.View.atCapLine(model)
 	elseif not plan then
 		model.planWhy = "Data/Plan.lua absent: the price plan was not generated for this copy of the addon"
 	else

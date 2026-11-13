@@ -294,6 +294,10 @@ describe("Yellow threshold of a recipe the export does not list", function()
 		assert.matches("grey", why)
 		local _, why2 = S.liveEntry({ name = "x", grey = 50 })
 		assert.matches("schematic", why2)
+		-- only optional or finishing slots: not planned as a free craft
+		local free, why3 = S.liveEntry({ name = "x", grey = 50, reagents = {} })
+		assert.is_nil(free)
+		assert.matches("no basic reagents", why3)
 	end)
 end)
 

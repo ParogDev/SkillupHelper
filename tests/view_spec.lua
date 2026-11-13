@@ -572,6 +572,7 @@ describe("Cap model on the panel", function()
 			"At your cap (150): the next rank at the trainer raises it.",
 			V.atCapLine({ skill = 150, maxSkill = 150, profession = "Cooking", professionID = 185 })
 		)
+		assert.equal("At the top skill (300).", V.atCapLine({ skill = 300, maxSkill = 300, profession = "Cooking" }))
 		assert.is_nil(V.atCapLine({ skill = 140, maxSkill = 150, profession = "Poisons" }))
 		assert.is_nil(V.atCapLine({}))
 	end)
