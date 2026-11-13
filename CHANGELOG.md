@@ -7,6 +7,7 @@
 - For those recipes the game gives the grey level but not where they turn yellow: the plan starts from a usual gap
   and tightens it with every colour the game shows as you level.
 - The price file is now optional: without one, the plan runs on the game's recipes and TSM's live prices.
+- At your cap the Next card says why nothing is planned. Poisons, now in the price file, rises 5 per character level.
 
 ## 0.2.9
 
