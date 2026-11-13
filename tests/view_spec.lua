@@ -592,6 +592,47 @@ describe("Cap model on the panel", function()
 		assert.matches("Other way: Pie", all, 1, true)
 	end)
 
+	it("gives each other way a Use this button, except a gated one and the and-more line", function()
+		local others = {
+			{ spell = 2, name = "Bread", extra = 120, src = "trainer" },
+			{ spell = 3, name = "Pie", extra = 50, src = "special", gated = true },
+			{ spell = 4, name = "Tea", extra = 300, src = "known" },
+			{ spell = 5, name = "Soup", extra = 400, src = "known" },
+		}
+		local d = show(plan({ craft(1, { others = others }) }))
+		local rows = d.next.otherRows
+		assert.equal(4, #rows)
+		assert.equal("Other way: Pie, +50c (special NPC / dungeon)", rows[1].text)
+		assert.is_nil(rows[1].use)
+		assert.same({ "swap", 2, 1, true, "Use this" }, {
+			rows[2].use.id,
+			rows[2].use.spell,
+			rows[2].use.from,
+			rows[2].use.enabled,
+			rows[2].use.label,
+		})
+		assert.same({ "swap", 4 }, { rows[3].use.id, rows[3].use.spell })
+		assert.equal("and 1 more ways", rows[4].text)
+		assert.is_nil(rows[4].use)
+		assert.is_nil(d.next.swapBack)
+	end)
+
+	it("a swapped step offers Back to the recipe it replaced, and its Use this replaces that one", function()
+		local others = { { spell = 3, name = "Tea", extra = 10, src = "known" } }
+		local d = show(plan({ craft(2, { others = others, swapFrom = 1, swapFromName = "Bread" }) }))
+		local back = d.next.swapBack
+		assert.equal("Your choice, instead of Bread", back.text)
+		assert.same({ "unswap", 1, "Back to Bread" }, { back.use.id, back.use.spell, back.use.label })
+		local use = d.next.otherRows[1].use
+		assert.same({ "swap", 3, 1 }, { use.id, use.spell, use.from })
+	end)
+
+	it("a committed step's other ways have no Use this", function()
+		local others = { { spell = 3, name = "Tea", extra = 10, src = "known" } }
+		local d = show(plan({ craft(2, { others = others, committed = true }) }))
+		assert.is_nil(d.next.otherRows[1].use)
+	end)
+
 	it("shows a step's shortcuts with Use it and Hide, marks the later row, and says why in the footer", function()
 		local cuts =
 			{ { spell = 6, name = "Pie", saves = 150, src = "trainer", needs = "no trainer you opened teaches it" } }

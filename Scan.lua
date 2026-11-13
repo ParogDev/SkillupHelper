@@ -256,7 +256,18 @@ function S.excludeKey(exclude)
 		table.concat(spells, ",")
 	)
 	-- gated recipes the user chose to use ("Use it" on a shortcut)
-	return #allowed > 0 and (key .. "/+" .. table.concat(allowed, ",")) or key
+	if #allowed > 0 then
+		key = key .. "/+" .. table.concat(allowed, ",")
+	end
+	-- swaps the user chose on a step ("Use this" on an Other way row): swap[Y] = X
+	local swaps = {}
+	for from, to in pairs(exclude.swap or {}) do
+		if to then
+			swaps[#swaps + 1] = tostring(from) .. ">" .. tostring(to)
+		end
+	end
+	table.sort(swaps)
+	return #swaps > 0 and (key .. "/~" .. table.concat(swaps, ",")) or key
 end
 
 -- Cache-key text of input.trainerSeen ({ [spellID or lowercased name] = true }), "-" when nil.
@@ -479,8 +490,9 @@ function S.build(plan)
 				if not reagents then
 					counts.noSchematic = counts.noSchematic + 1
 				end
-				local difficulty = r.relativeDifficulty
-				if r.canSkillUp == false then
+				-- secret in an instance: no colour, the recipe still plans from its thresholds
+				local difficulty = clean(r.relativeDifficulty)
+				if clean(r.canSkillUp) == false then
 					difficulty = 3
 				end
 				if difficulty ~= nil then

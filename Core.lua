@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.10"
+ns.CODE_VERSION = "0.2.11"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -30,13 +30,15 @@ function ns.initDB(saved)
 end
 
 -- The cap model's SavedVariables, made on first use (ns.capTables): ranks[skillLineID][cap] learned at the trainer;
--- exclude = { dungeon, ahPatterns, special, notNow[spellID], allow[spellID] (gated recipes to use) };
+-- exclude = { dungeon, ahPatterns, special, notNow[spellID], allow[spellID] (gated recipes to use), swap[spellID] = spellID };
 -- trainerSeen[skillLineID][spellID or lowercased name] = true for the recipes an ordinary trainer lists.
 function ns.capTables(saved)
 	saved.ranks = type(saved.ranks) == "table" and saved.ranks or {}
 	saved.exclude = type(saved.exclude) == "table" and saved.exclude or {}
 	saved.exclude.notNow = type(saved.exclude.notNow) == "table" and saved.exclude.notNow or {}
 	saved.exclude.allow = type(saved.exclude.allow) == "table" and saved.exclude.allow or {}
+	-- swap[Y] = X: "use X instead of Y" (the Other way rows of a step)
+	saved.exclude.swap = type(saved.exclude.swap) == "table" and saved.exclude.swap or {}
 	saved.trainerSeen = type(saved.trainerSeen) == "table" and saved.trainerSeen or {}
 	-- colorSeen[spellID] = { o = highest skill seen orange, y = lowest seen yellow or green }, for learned recipes the
 	-- export does not list: it narrows their estimated yellow threshold (Scan.yellowOf)
@@ -110,6 +112,8 @@ local function refreshSelftest()
 		lastCraft = ui.lastCraft,
 		lastCraftError = ui.lastCraftError,
 		lastOpenError = ui.lastOpenError,
+		-- "Show recipe": path "list" (selected in the open window) or "OpenRecipe" (server trip), and why
+		lastOpen = ui.lastOpen,
 		merchant = ui.merchant,
 		lastBuy = ui.lastBuy,
 		lastBuyError = ui.lastBuyError,
@@ -190,6 +194,8 @@ function ns.scanSummary(model)
 			skipped = #p.skipped,
 			-- learned recipes planned from the client (not in the export); clientOnly: no export for the profession
 			liveRecipes = p.liveRecipes,
+			-- learned recipes the scan dropped (no schematic, no grey...), by reason: they are not in the plan
+			liveSkipped = model.counts and model.counts.liveSkipped,
 			clientOnly = p.clientOnly,
 			colourMismatch = #p.colourMismatch,
 			mismatches = p.colourMismatch,
@@ -666,6 +672,32 @@ function ns.hideShortcut(spell)
 	end
 	db.exclude.notNow[spell] = true
 	db.exclude.allow[spell] = nil
+	ns.refresh()
+	return true
+end
+
+-- An Other way row's "Use this": plan recipe `to` where the plan would craft `from` (exclude.swap[from] = to); a
+-- swap back the other way is dropped, so the two never loop. "Back to": the plan picks for `from` again. Both replan.
+function ns.useSwap(from, to)
+	if not (db and db.exclude and type(from) == "number" and type(to) == "number") or from == to then
+		return false
+	end
+	db.exclude.swap = type(db.exclude.swap) == "table" and db.exclude.swap or {}
+	db.exclude.swap[from] = to
+	if db.exclude.swap[to] == from then
+		db.exclude.swap[to] = nil
+	end
+	ns.refresh()
+	return true
+end
+
+function ns.clearSwap(from)
+	if not (db and db.exclude and type(from) == "number") then
+		return false
+	end
+	if type(db.exclude.swap) == "table" then
+		db.exclude.swap[from] = nil
+	end
 	ns.refresh()
 	return true
 end

@@ -169,6 +169,57 @@ function V.otherLines(others, env, max)
 	return out
 end
 
+-- A craft step's alternatives as rows { text, use = action or nil }: the text of V.otherLines, and a "Use this"
+-- button that switches the plan to it ({ id = "swap", spell = X, from = Y }: SkillupHelperDB.exclude.swap[Y] = X).
+-- Y is the spell the step was built on before any swap. A gated alternative, or a committed step (a saved AH trip),
+-- gets no button: shortcuts and trips have their own controls. The "and N more" line has no button.
+function V.otherRows(st, env, max)
+	local lines = V.otherLines(st.others, env, max)
+	local list = {}
+	for _, o in ipairs(st.others or {}) do
+		list[#list + 1] = o
+	end
+	table.sort(list, function(a, b)
+		return (a.extra or 0) < (b.extra or 0)
+	end)
+	local from = st.swapFrom or st.spell
+	local out = {}
+	for i, line in ipairs(lines) do
+		local o = list[i]
+		local row = { text = line }
+		if o and (not max or i <= max) and not o.gated and not st.committed and type(from) == "number" then
+			row.use = {
+				id = "swap",
+				spell = o.spell,
+				from = from,
+				enabled = true,
+				label = "Use this",
+				tip = ("Plan %s here instead (Back to undoes it)"):format(tostring(o.name or o.spell)),
+			}
+		end
+		out[#out + 1] = row
+	end
+	return out
+end
+
+-- The row of a step the user's swap built: "Your choice, instead of Y" with a "Back to Y" button, or nil.
+function V.swapBackRow(st)
+	if type(st.swapFrom) ~= "number" then
+		return nil
+	end
+	local name = tostring(st.swapFromName or ("spell " .. st.swapFrom))
+	return {
+		text = ("Your choice, instead of %s"):format(name),
+		use = {
+			id = "unswap",
+			spell = st.swapFrom,
+			enabled = true,
+			label = "Back to " .. name,
+			tip = "Let the plan pick the cheapest recipe here again",
+		},
+	}
+end
+
 -- A step's shortcuts (gated recipes: a special teacher, a quest, a trainer recipe no trainer was seen teaching) as
 -- rows with their two buttons: { text, use = action, hide = action }. A shortcut on a craft step saves money; one on
 -- a gap fills it.
@@ -324,6 +375,8 @@ local function nextCard(st, env, listed)
 		)
 	end
 	card.others = V.otherLines(st.others, env, 3)
+	card.otherRows = V.otherRows(st, env, 3)
+	card.swapBack = V.swapBackRow(st)
 	card.shortcuts = V.shortcutRows(st.shortcuts, env)
 	card.pre = {}
 	for _, p in ipairs(st.pre or {}) do
