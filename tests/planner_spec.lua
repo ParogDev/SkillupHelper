@@ -1338,6 +1338,13 @@ describe("Alternatives and exclusions", function()
 				end
 			end
 			assert.same({ PAT, true }, { buy and buy.item, buy and buy.swap })
+			-- a swap to a pattern learned past the cap takes no level: nothing is bought for it
+			recipes[4].learn = 200
+			plan = P.run(input(recipes, { [1] = true }, { exclude = { swap = { [1] = 4 } } }))
+			assert.same({ 1 }, craftSpells(plan))
+			for _, b in ipairs(plan.buys) do
+				assert.is_not.equal(4, b.spell)
+			end
 		end)
 
 		it("marks a gated alternative, so the view offers no Use this for it", function()

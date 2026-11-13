@@ -672,7 +672,20 @@ local function baselineFor(ctx, chance)
 			insteadName = (not fillsGap and instead) and instead.name or nil,
 		}
 	end
-	return { levels = levels, opts = opts, buys = buys, chance = chance }
+	-- a swap's recipe buy stands only when the swap took a level (a stale or costless swap buys nothing)
+	local used = {}
+	for s = ctx.skill, ctx.cap - 1 do
+		if levels[s] then
+			used[levels[s].o.spell] = true
+		end
+	end
+	local kept = {}
+	for _, b in ipairs(buys) do
+		if not b.swap or used[b.spell] then
+			kept[#kept + 1] = b
+		end
+	end
+	return { levels = levels, opts = opts, buys = kept, chance = chance }
 end
 
 -- Pass 1, both chance models. Cached by the caller: it changes only with skill, cap, recipes or prices.

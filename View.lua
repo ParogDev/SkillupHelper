@@ -141,15 +141,21 @@ local SRC_TEXT = {
 
 V.UNCHECKED = "not checked at a trainer"
 
+-- Alternatives cheapest first; a tie by spell, so the order is total.
+function V.byExtra(a, b)
+	if (a.extra or 0) ~= (b.extra or 0) then
+		return (a.extra or 0) < (b.extra or 0)
+	end
+	return (tonumber(a.spell) or 0) < (tonumber(b.spell) or 0)
+end
+
 -- A step's alternatives as lines: "Other way: Name, +1s 20c (trainer)", cheapest first, at most `max`.
 function V.otherLines(others, env, max)
 	local list = {}
 	for _, o in ipairs(others or {}) do
 		list[#list + 1] = o
 	end
-	table.sort(list, function(a, b)
-		return (a.extra or 0) < (b.extra or 0)
-	end)
+	table.sort(list, V.byExtra)
 	local out = {}
 	for i, o in ipairs(list) do
 		if max and i > max then
@@ -179,9 +185,8 @@ function V.otherRows(st, env, max)
 	for _, o in ipairs(st.others or {}) do
 		list[#list + 1] = o
 	end
-	table.sort(list, function(a, b)
-		return (a.extra or 0) < (b.extra or 0)
-	end)
+	-- the same total order as V.otherLines, so row i's button is row i's recipe
+	table.sort(list, V.byExtra)
 	local from = st.swapFrom or st.spell
 	local out = {}
 	for i, line in ipairs(lines) do
