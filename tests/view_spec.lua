@@ -558,6 +558,25 @@ describe("Cap model on the panel", function()
 		assert.equal("Artisan needs level unknown, you are unknown", ns.View.capBlockLine({ name = "Artisan" }))
 	end)
 
+	it("says why an empty plan is empty at the cap: Poisons rises with the character level", function()
+		local V = ns.View
+		assert.equal(
+			"At your cap (175). Poisons rises 5 per character level.",
+			V.atCapLine({ skill = 175, maxSkill = 175, profession = "Poisons", professionID = 40 })
+		)
+		assert.equal(
+			"At your cap (175). Poisons rises 5 per character level.",
+			V.atCapLine({ skill = 175, maxSkill = 175, profession = "Poisons" })
+		)
+		assert.equal(
+			"At your cap (150): the next rank at the trainer raises it.",
+			V.atCapLine({ skill = 150, maxSkill = 150, profession = "Cooking", professionID = 185 })
+		)
+		assert.equal("At the top skill (300).", V.atCapLine({ skill = 300, maxSkill = 300, profession = "Cooking" }))
+		assert.is_nil(V.atCapLine({ skill = 140, maxSkill = 150, profession = "Poisons" }))
+		assert.is_nil(V.atCapLine({}))
+	end)
+
 	it("lists other ways cheapest first, special teachers named", function()
 		local others = {
 			{ spell = 2, name = "Tea", extra = 900, src = "special", teacher = "a dungeon NPC" },

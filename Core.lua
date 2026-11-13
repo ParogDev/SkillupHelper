@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.9"
+ns.CODE_VERSION = "0.2.10"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -38,7 +38,14 @@ function ns.capTables(saved)
 	saved.exclude.notNow = type(saved.exclude.notNow) == "table" and saved.exclude.notNow or {}
 	saved.exclude.allow = type(saved.exclude.allow) == "table" and saved.exclude.allow or {}
 	saved.trainerSeen = type(saved.trainerSeen) == "table" and saved.trainerSeen or {}
+	-- colorSeen[spellID] = { o = highest skill seen orange, y = lowest seen yellow or green }, for learned recipes the
+	-- export does not list: it narrows their estimated yellow threshold (Scan.yellowOf)
+	saved.colorSeen = type(saved.colorSeen) == "table" and saved.colorSeen or {}
 	return saved
+end
+
+function ns.savedColorSeen()
+	return db and db.colorSeen or nil
 end
 
 -- What Data/Plan.lua holds, for the selftest; nil when the file is absent.
@@ -181,6 +188,9 @@ function ns.scanSummary(model)
 			hold = #p.hold,
 			leftovers = #p.leftovers,
 			skipped = #p.skipped,
+			-- learned recipes planned from the client (not in the export); clientOnly: no export for the profession
+			liveRecipes = p.liveRecipes,
+			clientOnly = p.clientOnly,
 			colourMismatch = #p.colourMismatch,
 			mismatches = p.colourMismatch,
 			priceSources = p.prices,
@@ -428,6 +438,8 @@ local REFRESH_EVENTS = {
 	"BAG_UPDATE_DELAYED",
 	"BANKFRAME_OPENED",
 	"SKILL_LINES_CHANGED",
+	-- a recipe learned with the window open (a pattern used, a trainer): it joins the plan at once
+	"NEW_RECIPE_LEARNED",
 }
 f:RegisterEvent("ADDON_LOADED")
 f:RegisterEvent("PLAYER_LOGIN")
@@ -530,6 +542,10 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 		close()
 	elseif ns.tradeSkillOpen then
 		ns.refresh()
+		if event == "NEW_RECIPE_LEARNED" then
+			-- the recipe list may not hold the new recipe yet: look again once the client has refreshed it
+			C_Timer.After(1.5, ns.refresh)
+		end
 	end
 end)
 

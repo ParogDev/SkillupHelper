@@ -259,6 +259,48 @@ describe("Scan and panel", function()
 	end)
 end)
 
+describe("Yellow threshold of a recipe the export does not list", function()
+	local S
+	before_each(function()
+		S = load({}).Scan
+	end)
+
+	it("starts at grey minus the usual span and narrows with the colours seen", function()
+		assert.equal(120, S.yellowOf(145, nil))
+		local seen = {}
+		assert.is_true(S.noteColor(seen, 1, 127, 0)) -- orange at 127: yellow is above
+		assert.is_false(S.noteColor(seen, 1, 126, 0))
+		assert.equal(128, S.yellowOf(145, seen[1]))
+		assert.is_true(S.noteColor(seen, 1, 131, 1)) -- yellow at 131: yellow is at or below
+		assert.equal(128, S.yellowOf(145, seen[1]))
+		assert.equal(131, S.yellowOf(160, seen[1]))
+		assert.is_false(S.noteColor(seen, 1, 131, 3)) -- grey says nothing about yellow
+	end)
+
+	it("builds an entry from the client, or names what is missing", function()
+		local e = S.liveEntry({
+			name = "Linen Bandage",
+			grey = 50,
+			skillUps = 1,
+			reagents = { { item = 2589, count = 1 } },
+			makes = 1251,
+			n = 1,
+		})
+		assert.same({ 2589, 1 }, e.mats)
+		assert.equal(1251, e.makes)
+		assert.equal(25, e.y)
+		local none, why = S.liveEntry({ name = "x", grey = 0, reagents = {} })
+		assert.is_nil(none)
+		assert.matches("grey", why)
+		local _, why2 = S.liveEntry({ name = "x", grey = 50 })
+		assert.matches("schematic", why2)
+		-- only optional or finishing slots: not planned as a free craft
+		local free, why3 = S.liveEntry({ name = "x", grey = 50, reagents = {} })
+		assert.is_nil(free)
+		assert.matches("no basic reagents", why3)
+	end)
+end)
+
 describe("Planner in the scan and the panel", function()
 	local F = dofile("tests/fixtures.lua")
 	local I = F.ITEM
@@ -384,6 +426,65 @@ describe("Planner in the scan and the panel", function()
 		end
 		assert.is_true(recipeBuys(p) > 0)
 		assert.equal(0, recipeBuys(p2))
+	end)
+
+	-- the client's schematic for a fixture recipe: its reagents and product
+	local function clientSchematics()
+		_G.C_TradeSkillUI.GetRecipeSchematic = function(id)
+			local r = F.COOKING[id]
+			local slots = {}
+			for k = 1, #r.mats - 1, 2 do
+				slots[#slots + 1] = { reagents = { { itemID = r.mats[k] } }, quantityRequired = r.mats[k + 1] }
+			end
+			return { reagentSlotSchematics = slots, outputItemID = r.makes, quantityMin = r.n }
+		end
+	end
+
+	it("plans a learned recipe the export does not list, from the client", function()
+		clientSchematics()
+		plan2.professions[185].recipes = {}
+		for spell, r in pairs(F.COOKING) do
+			if spell ~= 3398 then
+				plan2.professions[185].recipes[spell] = r
+			end
+		end
+		local m = ns.Scan.build(plan2)
+		assert.is_nil(m.plannerWhy)
+		assert.equal(1, m.counts.live)
+		assert.equal(1, m.planner.liveRecipes)
+		local names = {}
+		for _, s in ipairs(m.planner.steps) do
+			names[#names + 1] = s.name
+		end
+		assert.matches("Hot Lion Chops", table.concat(names, ","), 1, true)
+		-- the export itself is never changed
+		assert.is_nil(plan2.professions[185].recipes[3398])
+	end)
+
+	it("plans a profession the export never covered, from the client and TSM alone", function()
+		clientSchematics()
+		plan2.professions = {}
+		local m = ns.Scan.build(plan2)
+		assert.is_nil(m.plannerWhy)
+		assert.is_nil(m.planWhy)
+		assert.equal(4, m.counts.live)
+		assert.is_true(m.planner.clientOnly)
+		assert.is_true(#m.planner.steps > 0)
+		assert.equal("Cooking", m.planner.profKey)
+	end)
+
+	it("replans when a recipe is learned", function()
+		clientSchematics()
+		plan2.professions = {}
+		local before = ns.Scan.build(plan2).planner
+		F.COOKING_LEARNED[13028] = true
+		local ok, err = pcall(function()
+			local after = ns.Scan.build(plan2).planner
+			assert.equal(5, after.liveRecipes)
+			assert.is_not.equal(before.steps, after.steps)
+		end)
+		F.COOKING_LEARNED[13028] = nil
+		assert(ok, err)
 	end)
 
 	it("names a version 1 plan", function()
@@ -548,7 +649,7 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal(ns.CODE_VERSION, "0.2.9")
+		assert.equal(ns.CODE_VERSION, "0.2.10")
 	end)
 end)
 
