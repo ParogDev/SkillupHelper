@@ -239,6 +239,11 @@ describe("View mail models", function()
 			"In combat",
 			V.mailPanel(groups, live, { combat = true, free = 2 }, env, A.planAttach, 12).groups[1].fill.label
 		)
+		-- while the server confirms the split, a stack is locked: no second split, no fill
+		liveData[1] = { bags = 20, stacks = { { bag = 0, slot = 1, n = 17 } }, locked = true }
+		g = V.mailPanel(groups, live, { free = 1 }, env, A.planAttach, 12).groups[1]
+		assert.equal("Wait: the bags are updating", g.fill.label)
+		assert.is_false(g.fill.enabled)
 		-- step 2: after the split the bags hold 17 and 3; Fill attaches the 3 whole
 		liveData[1] = { bags = 20, stacks = { { bag = 0, slot = 1, n = 17 }, { bag = 0, slot = 2, n = 3 } } }
 		g = V.mailPanel(groups, live, { free = 1 }, env, A.planAttach, 12).groups[1]

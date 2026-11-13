@@ -800,12 +800,13 @@ function V.mailQueueLines(rows, env)
 	return out
 end
 
--- The panel beside the mailbox on an alt. groups: Alts.forAlt's list; live(item) -> { bags, bank, mail, stacks }
--- (stacks: { { bag, slot, n } } in the bags); state: { pending = recipient, note = { text, tone }, combat, busy,
--- free = empty bag slots }. Returns { title, groups = { { to, title, rows, note, fill, drop } }, empty } with fill
--- an action { id, to, enabled, label, picks }; picks: what a click attaches, at most max: { bag, slot, n, take, item }
--- with take < n on the one split of a row (pick: Alts.planAttach). While a pick is a split, fill is the first step
--- instead: { id = "mailSplit", to, item, bag, slot, n, take }, a click that splits take into an empty bag slot.
+-- The panel beside the mailbox on an alt. groups: Alts.forAlt's list; live(item) -> { bags, bank, mail, stacks,
+-- locked } (stacks: { { bag, slot, n } } in the bags, unlocked; locked: a stack of it is locked); state:
+-- { pending = recipient, note = { text, tone }, combat, busy, free = empty bag slots }. Returns { title, groups =
+-- { { to, title, rows, note, fill, drop } }, empty } with fill an action { id, to, enabled, label, picks }; picks:
+-- what a click attaches, at most max: { bag, slot, n, take, item } with take < n on the one split of a row (pick:
+-- Alts.planAttach). While a pick is a split, fill is the first step instead:
+-- { id = "mailSplit", to, item, bag, slot, n, take }, a click that splits take into an empty bag slot.
 function V.mailPanel(groups, live, state, env, pick, max)
 	state = state or {}
 	local out = { groups = {} }
@@ -813,9 +814,10 @@ function V.mailPanel(groups, live, state, env, pick, max)
 	for _, g in ipairs(groups or {}) do
 		local og = { to = g.to, rows = {} }
 		local stacks, wantMore = {}, false
-		local away = nil
+		local away, locked = nil, false
 		for _, e in ipairs(g.rows) do
 			local l = live(e.item) or {}
+			locked = locked or l.locked == true
 			local bags, bank, mail = l.bags or 0, l.bank or 0, l.mail or 0
 			local row = { item = e.item, name = env.nameOf(e.item), count = e.count, color = "bone" }
 			local picks = pick(l.stacks or {}, e.count, max)
@@ -871,6 +873,9 @@ function V.mailPanel(groups, live, state, env, pick, max)
 			fill.label = "Now press Send"
 		elseif state.pending then
 			fill.label = "Wait: another mail is being filled"
+		elseif locked then
+			-- a split or move the server has not confirmed: the stacks read now are not the ones a click would use
+			fill.label = "Wait: the bags are updating"
 		elseif split then
 			-- step 1 of 2: the split goes to an empty bag slot; the next draw picks it whole
 			fill = {

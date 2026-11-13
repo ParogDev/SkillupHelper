@@ -64,22 +64,20 @@ local function live(item)
 		local ok, n = pcall(TSM_API.GetMailQuantity, "i:" .. item)
 		mail = ok and type(n) == "number" and n or 0
 	end
-	local stacks = {}
+	local stacks, locked = {}, false
 	for bag = 0, NUM_BAG_SLOTS + 1 do
 		for slot = 1, C_Container.GetContainerNumSlots(bag) or 0 do
 			local info = C_Container.GetContainerItemInfo(bag, slot)
-			if
-				info
-				and not secret(info.itemID)
-				and not secret(info.stackCount)
-				and info.itemID == item
-				and not info.isLocked
-			then
-				stacks[#stacks + 1] = { bag = bag, slot = slot, n = info.stackCount or 1 }
+			if info and not secret(info.itemID) and not secret(info.stackCount) and info.itemID == item then
+				if info.isLocked then
+					locked = true -- a split or move the server has not confirmed yet
+				else
+					stacks[#stacks + 1] = { bag = bag, slot = slot, n = info.stackCount or 1 }
+				end
 			end
 		end
 	end
-	return { bags = bags, bank = math.max(0, all - bags), mail = mail, stacks = stacks }
+	return { bags = bags, bank = math.max(0, all - bags), mail = mail, stacks = stacks, locked = locked }
 end
 
 -- The empty slots of plain bags (bag family 0, so any item fits): { { bag, slot } }, backpack first.
@@ -96,6 +94,17 @@ local function freeSlots()
 		end
 	end
 	return out
+end
+
+local function freeCount()
+	local n = 0
+	for bag = 0, NUM_BAG_SLOTS do
+		local free, family = C_Container.GetContainerNumFreeSlots(bag)
+		if family == 0 then
+			n = n + (free or 0)
+		end
+	end
+	return n
 end
 
 local function attachedNow()
@@ -171,7 +180,7 @@ function M.draw()
 		note = state.note,
 		combat = InCombatLockdown and InCombatLockdown(),
 		busy = formBusy(),
-		free = #freeSlots(),
+		free = freeCount(),
 	}, { nameOf = K.itemName }, ns.Alts.planAttach, ns.Alts.MAX_ATTACH)
 	local f = frame()
 	f:ClearAllPoints()
@@ -357,7 +366,10 @@ local function splitStack(a)
 		return fail("SplitContainerItem: " .. tostring(err), "The split failed: " .. tostring(err))
 	end
 	if CursorHasItem and not CursorHasItem() then
-		return fail("SplitContainerItem left nothing on the cursor", "The game did not split the stack. Click again.")
+		return fail(
+			"SplitContainerItem left nothing on the cursor",
+			"The split did not reach the cursor. If it shows up there, put it in an empty bag slot, then Fill."
+		)
 	end
 	ok, err = pcall(C_Container.PickupContainerItem, to.bag, to.slot)
 	if not ok or (CursorHasItem and CursorHasItem()) then
