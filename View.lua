@@ -1400,7 +1400,7 @@ local function cardLinks(d)
 		out[#out + 1] = {
 			tab = "shopping",
 			tone = "gold",
-			text = ("Shopping: %s"):format(shop.title:gsub("^Total ", "")),
+			text = ("Shopping: %s"):format((shop.title:gsub("^Total ", ""))),
 		}
 	end
 	local alts = d.alts
@@ -1440,7 +1440,7 @@ local function tabsOf(d)
 	a.count = altRows
 	local list = {
 		{ id = "plan", empty = d.next == nil and #d.later == 0 },
-		{ id = "shopping", count = stops > 0 and stops or nil, empty = stops == 0 and #s.stock == 0 },
+		{ id = "shopping", count = stops > 0 and stops or nil, empty = stops == 0 and #s.stock == 0 and not s.tripLine },
 		{
 			id = "alts",
 			count = altRows > 0 and altRows or nil,

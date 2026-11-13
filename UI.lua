@@ -1658,8 +1658,9 @@ function UI.showView(id)
 		return
 	end
 	local old = f.shownView
+	-- a refresh of the same tab keeps where the user scrolled to
+	f.offsets[old] = f.scroll:GetVerticalScroll()
 	if old ~= id then
-		f.offsets[old] = f.scroll:GetVerticalScroll()
 		f.views[old]:Hide()
 		f.scroll:SetScrollChild(f.views[id])
 		f.views[id]:Show()
@@ -1878,6 +1879,9 @@ function UI.draw(d, prev)
 	-- the Plan tab starts at the top for every new step
 	if how == "advance" or how == "replace" then
 		f.offsets.plan = 0
+		if f.shownView == "plan" then
+			f.scroll:SetVerticalScroll(0)
+		end
 	end
 	-- a message has no tabs: the Plan view shows it, the saved tab stays for the next plan
 	UI.showView(d.tabs and savedTab() or "plan")
