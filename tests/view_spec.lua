@@ -573,6 +573,23 @@ describe("Cap model on the panel", function()
 		assert.matches("Other way: Pie", all, 1, true)
 	end)
 
+	it("shows a step's shortcuts with Use it and Hide, marks the later row, and says why in the footer", function()
+		local cuts =
+			{ { spell = 6, name = "Pie", saves = 150, src = "trainer", needs = "no trainer you opened teaches it" } }
+		local d = show(plan({ craft(1, { shortcuts = cuts }), craft(2, { shortcuts = cuts }) }, { shortcuts = 1 }))
+		local row = d.next.shortcuts[1]
+		assert.equal("Shortcut: Pie saves 1s 50c (needs: no trainer you opened teaches it)", row.text)
+		assert.same({ "useShortcut", 6, true }, { row.use.id, row.use.spell, row.use.enabled })
+		assert.same({ "hideShortcut", 6 }, { row.hide.id, row.hide.spell })
+		assert.matches("· shortcut$", d.later[1].text)
+		assert.matches("1 shortcut %(quest, dungeon or unchecked trainer%) marked on its step", d.footer[#d.footer])
+		local gap =
+			show(plan({ { kind = "gap", from = 10, to = 20, why = "x", shortcuts = { { spell = 7, name = "Tea" } } } }))
+		assert.equal("Fills this gap: Tea", gap.next.shortcuts[1].text)
+		local fresh = show(plan({ craft(1) }, { unconfirmed = 3 }))
+		assert.equal("Visit your trainer once: 3 trainer recipes not confirmed yet", fresh.footer[#fresh.footer])
+	end)
+
 	it("marks a trainer recipe not checked at a trainer", function()
 		local st = { kind = "train", name = "Goldthorn Tea", at = 215, unchecked = true }
 		local d = show(plan({ craft(1), st }))
