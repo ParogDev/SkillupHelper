@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.9
+
+- The plan uses only recipes you can surely get: known, taught by a trainer you opened, auto-learned, or a pattern
+  with a price. A trainer recipe no trainer you opened lists (often a quest reward) is no longer planned at a 10%
+  penalty; like a special NPC's recipe, it becomes a shortcut.
+- Shortcuts show on the Next card where they save money or fill a gap, with what they need, and two buttons: Use it
+  (plan with it; `/skillup allow <spellID>` toggles) and Hide. Later rows say "· shortcut", the footer counts them.
+- Before you open a trainer of the profession, the footer says how many trainer recipes are unconfirmed; the first
+  trainer visit replans.
+
 ## 0.2.8
 
 - The Next card has a guide strip: the guide chip's arrow, the place and the distance on one line under the card's

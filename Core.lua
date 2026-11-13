@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.8"
+ns.CODE_VERSION = "0.2.9"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -30,12 +30,13 @@ function ns.initDB(saved)
 end
 
 -- The cap model's SavedVariables, made on first use (ns.capTables): ranks[skillLineID][cap] learned at the trainer;
--- exclude = { dungeon, ahPatterns, special, notNow[spellID] }; trainerSeen[skillLineID][spellID or lowercased name]
--- = true for the recipes an ordinary trainer lists.
+-- exclude = { dungeon, ahPatterns, special, notNow[spellID], allow[spellID] (gated recipes to use) };
+-- trainerSeen[skillLineID][spellID or lowercased name] = true for the recipes an ordinary trainer lists.
 function ns.capTables(saved)
 	saved.ranks = type(saved.ranks) == "table" and saved.ranks or {}
 	saved.exclude = type(saved.exclude) == "table" and saved.exclude or {}
 	saved.exclude.notNow = type(saved.exclude.notNow) == "table" and saved.exclude.notNow or {}
+	saved.exclude.allow = type(saved.exclude.allow) == "table" and saved.exclude.allow or {}
 	saved.trainerSeen = type(saved.trainerSeen) == "table" and saved.trainerSeen or {}
 	return saved
 end
@@ -254,11 +255,18 @@ function ns.onTrainer()
 		ns.Scan.saveRanks(db.ranks, parsed.skillLine, parsed.ranks, time())
 	end
 	if parsed and parsed.skillLine and next(parsed.seen or {}) then
+		local first = db.trainerSeen[parsed.skillLine] == nil
 		local set = db.trainerSeen[parsed.skillLine] or {}
 		for key in pairs(parsed.seen) do
 			set[key] = true
 		end
 		db.trainerSeen[parsed.skillLine] = set
+		if first then
+			-- the planner's cache key carries trainerSeen: the next scan replans with only what a trainer teaches
+			print(
+				"SkillupHelper: trainer read. Recipes no trainer you've opened teaches are shortcuts now; another trainer can confirm them."
+			)
+		end
 	end
 	ns.lastTrainerRead = why
 end
@@ -584,6 +592,7 @@ function ns.capCommand(cmd, arg)
 		end
 	elseif spell then
 		ex.notNow[spell] = not ex.notNow[spell] or nil
+		ex.allow[spell] = nil
 	elseif word ~= "" then
 		print("SkillupHelper: /skillup exclude dungeon|ahpatterns|special|<spellID> (no argument lists them).")
 		return true
@@ -607,9 +616,41 @@ function ns.capCommand(cmd, arg)
 		list[#list + 1] = "spell " .. id
 	end
 	print("SkillupHelper: excluded from the plan: " .. (#list > 0 and table.concat(list, ", ") or "nothing") .. ".")
+	local allowed = {}
+	for id in pairs(ex.allow) do
+		allowed[#allowed + 1] = id
+	end
+	table.sort(allowed)
+	if #allowed > 0 then
+		print("SkillupHelper: shortcuts in use: spell " .. table.concat(allowed, ", spell ") .. ".")
+	end
 	if word ~= "" then
 		ns.refresh()
 	end
+	return true
+end
+
+-- A shortcut's buttons. "Use it": the plan may pick gated recipe `spell` (you can get it). "Hide": never offer it
+-- again (exclude.notNow, as /skillup exclude <spellID>). Both replan; /skillup allow <spellID> toggles the first.
+function ns.useShortcut(spell, on)
+	if not (db and db.exclude and type(spell) == "number") then
+		return false
+	end
+	db.exclude.allow[spell] = on and true or nil
+	if on then
+		db.exclude.notNow[spell] = nil
+	end
+	ns.refresh()
+	return true
+end
+
+function ns.hideShortcut(spell)
+	if not (db and db.exclude and type(spell) == "number") then
+		return false
+	end
+	db.exclude.notNow[spell] = true
+	db.exclude.allow[spell] = nil
+	ns.refresh()
 	return true
 end
 
@@ -620,6 +661,17 @@ function ns.command(msg)
 	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
 	if cmd == "ranks" or cmd == "exclude" then
 		return ns.capCommand(cmd, arg)
+	end
+	if cmd == "allow" then
+		local spell = tonumber(arg)
+		if not spell then
+			print("SkillupHelper: /skillup allow <spellID> lets the plan use a shortcut recipe (again to stop).")
+		elseif db and db.exclude and db.exclude.allow then
+			local on = not db.exclude.allow[spell]
+			ns.useShortcut(spell, on)
+			print(("SkillupHelper: spell %d %s."):format(spell, on and "may be planned" or "is a shortcut again"))
+		end
+		return true
 	end
 	if cmd == "luck" then
 		-- "/skillup luck 95": buys cover this percentile of crafts (50, 75, 80, 90, 95, 99; empty resets to 90)

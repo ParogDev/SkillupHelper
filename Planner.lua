@@ -17,9 +17,6 @@ P.CRAFT_SAVING = 0.2 -- craft an intermediate only when that saves this share of
 P.MAX_RECIPE_BUYS = 3
 P.WASTEFUL = 1.1 -- a from-stock recipe more than 10% over the plan's cost per point is "wasteful"
 P.CANDS_PER_LEVEL = 6 -- stock candidates kept per level for the greedy fill
--- a trainer recipe no ordinary trainer was seen to teach (input.trainerSeen) costs this share more per point, so a
--- route that does not depend on it wins a near tie
-P.UNCHECKED_PENALTY = 0.1
 -- Planner rules (README "Planner rules"):
 -- 1. Buy for bad luck: every step that buys sizes its crafts and buys at a percentile of the crafts it takes to reach
 --    its target (default p90, a setting: SkillupHelperDB.luck), never at the mean.
@@ -285,7 +282,8 @@ function P.prepare(input)
 		noRecipeBuys = input.noRecipeBuys == true,
 		z = P.zOf(input.luck) or P.TRIP_Z,
 		options = {},
-		hidden = {}, -- options the plan never picks (special teachers by default), listed in step.others
+		hidden = {}, -- gated options the plan never picks, offered in step.shortcuts and step.others
+		unconfirmed = 0, -- trainer recipes planned while no trainer of this profession was read yet
 		mismatch = {},
 		makers = {},
 	}
@@ -334,11 +332,20 @@ function P.prepare(input)
 			if not learned then
 				src = (r.src == "item" or r.src == "auto" or r.src == "special") and r.src or "trainer"
 			end
-			-- a trainer recipe no ordinary trainer was seen to teach is "not checked": allowed, at a penalty
+			-- a trainer recipe no ordinary trainer was seen to teach is "not checked": gated, like a special teacher's
 			local unchecked = src == "trainer"
 				and input.trainerSeen ~= nil
 				and not input.trainerSeen[spell]
 				and not (r.name and input.trainerSeen[string.lower(r.name)])
+			if src == "trainer" and input.trainerSeen == nil then
+				ctx.unconfirmed = ctx.unconfirmed + 1
+			end
+			-- gated: not sure to be obtainable (special teacher, quest, unchecked trainer recipe). The plan never picks
+			-- it unless the user said "use it" (exclude.allow[spell]) or enabled special teachers; it is offered as a
+			-- shortcut on the steps it would make cheaper, or on a gap it fills.
+			local allowed = input.exclude and input.exclude.allow and input.exclude.allow[spell] == true
+			local gated = not allowed
+				and (unchecked or (src == "special" and not (input.exclude and input.exclude.special == false)))
 			local at = -math.huge
 			if not learned then
 				at = r.learn or (src == "item" and 0 or y)
@@ -359,6 +366,8 @@ function P.prepare(input)
 				at = at,
 				train = src == "trainer",
 				unchecked = unchecked or nil,
+				gated = gated or nil,
+				allowed = allowed or nil,
 				teacher = src == "special" and r.teacher or nil,
 				recipeItem = r.item,
 				recipePrice = src == "item" and buyOf(ctx, r.item or -1) or nil,
@@ -386,12 +395,8 @@ function P.prepare(input)
 			if ok and differs then
 				list[#list + 1] = newOption(ctx, base, mats, pre, 2)
 			end
-			-- a special teacher (dungeon NPC, ...) only when input.exclude.special == false; else it is only shown
-			-- as an alternative (ctx.hidden)
-			local into = ctx.options
-			if src == "special" and not (input.exclude and input.exclude.special == false) then
-				into = ctx.hidden
-			end
+			-- a gated recipe is only shown, as a shortcut or an alternative (ctx.hidden)
+			local into = gated and ctx.hidden or ctx.options
 			for _, o in ipairs(list) do
 				into[#into + 1] = o
 			end
@@ -441,9 +446,6 @@ local function costPt(ctx, o, s, cum, cheap, chance)
 	end
 	local net = mat - backOf(o, cum)
 	local c = ((net > 0 and net or 0) + ctx.effort * (1 + o.precrafts)) / p
-	if o.unchecked then
-		c = c * (1 + P.UNCHECKED_PENALTY)
-	end
 	return c, p, net
 end
 P.costPt = costPt
@@ -1039,6 +1041,19 @@ local function commitLevels(ctx, base, commits, chance)
 end
 
 P.OTHERS = 3 -- alternatives kept per step
+P.SHORTCUTS = 2 -- shortcuts (gated recipes that save money or fill a gap) kept per step
+P.SHORTCUT_MIN = 100 -- copper: a gated recipe saving less than this over a step is not worth a detour
+
+-- A shortcut entry: the gated option o, what it saves over the step (nil on a gap), and what it takes to get it.
+local function shortcutOf(o, saves)
+	local needs
+	if o.src == "special" then
+		needs = o.teacher or "a special teacher"
+	elseif o.unchecked then
+		needs = "no trainer you opened teaches it"
+	end
+	return { spell = o.spell, name = o.name, saves = saves, src = o.src, needs = needs }
+end
 
 -- Other ways to cover a craft step: every spell the baseline priced at each of the step's levels, its extra cost over
 -- the step's points (each level weighted by the share of it the step covers), cheapest first, at most P.OTHERS.
@@ -1064,13 +1079,22 @@ local function othersOf(ctx, base, step, info)
 		end
 		extra = now
 	end
-	local out = {}
+	local out, cuts = {}, {}
 	for spell, x in pairs(extra or {}) do
 		local o = info[spell]
-		out[#out + 1] = { spell = spell, name = o and o.name, extra = math.max(0, x), src = o and o.src }
-	end
-	if #out == 0 then
-		return nil
+		if o and o.gated and x < -P.SHORTCUT_MIN then
+			-- a gated recipe that would make this step cheaper: a shortcut, with what it saves
+			cuts[#cuts + 1] = shortcutOf(o, -x)
+		else
+			out[#out + 1] = {
+				spell = spell,
+				name = o and o.name,
+				extra = math.max(0, x),
+				src = o and o.src,
+				teacher = o and o.teacher,
+				unchecked = o and o.unchecked,
+			}
+		end
 	end
 	table.sort(out, function(a, b)
 		if a.extra ~= b.extra then
@@ -1081,7 +1105,50 @@ local function othersOf(ctx, base, step, info)
 	for k = #out, P.OTHERS + 1, -1 do
 		out[k] = nil
 	end
-	return out
+	table.sort(cuts, function(a, b)
+		if a.saves ~= b.saves then
+			return a.saves > b.saves
+		end
+		return a.spell < b.spell
+	end)
+	for k = #cuts, P.SHORTCUTS + 1, -1 do
+		cuts[k] = nil
+	end
+	return #out > 0 and out or nil, #cuts > 0 and cuts or nil
+end
+
+-- Gated recipes that give skill at every level of a gap step: shortcuts that fill it (saves = nil), cheapest first.
+local function gapFills(ctx, step, chance)
+	local lo, hi = math.floor(step.from), math.min(math.ceil(step.to - EPS) - 1, ctx.cap - 1)
+	local cuts = {}
+	for _, o in ipairs(ctx.hidden or {}) do
+		if o.variant == 1 then
+			local total = 0
+			for s = lo, hi do
+				local c = costPt(ctx, o, s, 0, nil, chance)
+				if not c then
+					total = nil
+					break
+				end
+				total = total + c
+			end
+			if total then
+				local cut = shortcutOf(o, nil)
+				cut.cost = total
+				cuts[#cuts + 1] = cut
+			end
+		end
+	end
+	table.sort(cuts, function(a, b)
+		if a.cost ~= b.cost then
+			return a.cost < b.cost
+		end
+		return a.spell < b.spell
+	end)
+	for k = #cuts, P.SHORTCUTS + 1, -1 do
+		cuts[k] = nil
+	end
+	return #cuts > 0 and cuts or nil
 end
 
 -- The skill at the boundary before steps[i]: where the next step with a range starts (the plan's end after the last).
@@ -1576,11 +1643,24 @@ local function finishCore(ctx, baseline, have, commits)
 			info[o.spell] = info[o.spell] or o
 		end
 	end
+	local cutSpells = {}
 	for _, step in ipairs(steps) do
 		if step.kind == "craft" then
-			step.others = othersOf(ctx, base, step, info)
+			step.others, step.shortcuts = othersOf(ctx, base, step, info)
+		elseif step.kind == "gap" then
+			step.shortcuts = gapFills(ctx, step, chance)
+		end
+		for _, cut in ipairs(step.shortcuts or {}) do
+			cutSpells[cut.spell] = true
 		end
 	end
+	-- the plan uses only recipes it is sure of; this many gated ones would save money or fill a gap
+	local nCuts = 0
+	for _ in pairs(cutSpells) do
+		nCuts = nCuts + 1
+	end
+	plan.shortcuts = nCuts
+	plan.unconfirmed = ctx.unconfirmed > 0 and ctx.unconfirmed or nil
 	placeRanks(ctx, steps)
 	plan.liveCap = ctx.liveCap
 	plan.rankUps = ctx.rankUps

@@ -122,13 +122,22 @@ function S.excludeKey(exclude)
 		end
 	end
 	table.sort(spells)
-	return ("%s/%s/%s/%s"):format(
+	local allowed = {}
+	for spell, on in pairs(exclude.allow or {}) do
+		if on then
+			allowed[#allowed + 1] = tostring(spell)
+		end
+	end
+	table.sort(allowed)
+	local key = ("%s/%s/%s/%s"):format(
 		tostring(exclude.dungeon == true),
 		tostring(exclude.ahPatterns == true),
 		-- special teachers are excluded unless set to false
 		tostring(exclude.special ~= false),
 		table.concat(spells, ",")
 	)
+	-- gated recipes the user chose to use ("Use it" on a shortcut)
+	return #allowed > 0 and (key .. "/+" .. table.concat(allowed, ",")) or key
 end
 
 -- Cache-key text of input.trainerSeen ({ [spellID or lowercased name] = true }), "-" when nil.

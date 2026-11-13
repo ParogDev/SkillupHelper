@@ -1310,41 +1310,74 @@ describe("Alternatives and exclusions", function()
 		assert.same({ "4buyRecipe", "4craft" }, kinds({ dungeon = false }))
 	end)
 
-	it("a special teacher's recipe never appears by default, only as an alternative; enabling it plans it", function()
-		local recipes = { [1] = recipe("R1", M1), [5] = recipe("Dungeon Tea", M4, { src = "special", learn = 100 }) }
-		local plan = P.run(input(recipes, { [1] = true }))
-		assert.same({ 1 }, craftSpells(plan))
-		assert.equal(5, plan.steps[1].others[1].spell)
-		assert.equal("special", plan.steps[1].others[1].src)
-		plan = P.run(input(recipes, { [1] = true }, { exclude = { special = false } }))
-		assert.same({ 5 }, craftSpells(plan))
-		for _, st in ipairs(plan.steps) do
-			assert.is_not.equal("train", st.kind)
+	it(
+		"a special teacher's recipe is never planned by default, only offered as a shortcut; enabling it plans it",
+		function()
+			local recipes = {
+				[1] = recipe("R1", M1),
+				[5] = recipe("Dungeon Tea", M4, { src = "special", learn = 100, teacher = "a dungeon NPC" }),
+			}
+			local plan = P.run(input(recipes, { [1] = true }))
+			assert.same({ 1 }, craftSpells(plan))
+			local cut = plan.steps[1].shortcuts[1]
+			assert.equal(5, cut.spell)
+			assert.equal("special", cut.src)
+			assert.equal("a dungeon NPC", cut.needs)
+			assert.is_true(cut.saves > 0)
+			assert.equal(1, plan.shortcuts)
+			plan = P.run(input(recipes, { [1] = true }, { exclude = { special = false } }))
+			assert.same({ 5 }, craftSpells(plan))
+			for _, st in ipairs(plan.steps) do
+				assert.is_not.equal("train", st.kind)
+			end
+			-- "Use it" on this one recipe plans it too, special teachers still off
+			plan = P.run(input(recipes, { [1] = true }, { exclude = { allow = { [5] = true } } }))
+			assert.same({ 5 }, craftSpells(plan))
 		end
-	end)
+	)
 
-	it("an unchecked trainer recipe loses a near tie to a checked one", function()
-		-- R1 50 per craft, R6 48: within the unchecked penalty
-		local recipes = { [1] = recipe("R1", M1), [6] = recipe("R6", M6) }
-		local function run(seen)
-			return P.run(input(recipes, {}, { trainerSeen = seen }))
+	it("an unchecked trainer recipe is never planned, however cheap: it is a shortcut until used", function()
+		local recipes = { [1] = recipe("R1", M1), [6] = recipe("R6", M4) }
+		local function run(seen, exclude)
+			return P.run(input(recipes, {}, { trainerSeen = seen, exclude = exclude }))
 		end
-		assert.same({ 6 }, craftSpells(run(nil)))
+		-- no trainer read yet: every trainer recipe is planned, and the plan says how many are unconfirmed
+		local p0 = run(nil)
+		assert.same({ 6 }, craftSpells(p0))
+		assert.equal(2, p0.unconfirmed)
 		local p = run({ [1] = true })
 		assert.same({ 1 }, craftSpells(p))
 		assert.equal("train", p.steps[1].kind)
 		assert.is_nil(p.steps[2].unchecked)
+		assert.is_nil(p.unconfirmed)
+		local cut = p.steps[2].shortcuts[1]
+		assert.equal(6, cut.spell)
+		assert.equal("no trainer you opened teaches it", cut.needs)
+		assert.is_true(cut.saves > 0)
 		-- a lowercased name counts as seen too
 		assert.same({ 1 }, craftSpells(run({ r1 = true })))
-		-- far cheaper, the unchecked one still wins, marked
-		recipes[6] = recipe("R6", M4)
-		local q = run({ [1] = true })
+		-- "Use it": planned, still marked not checked
+		local q = run({ [1] = true }, { allow = { [6] = true } })
 		assert.same({ 6 }, craftSpells(q))
 		for _, st in ipairs(q.steps) do
 			if st.spell == 6 then
 				assert.is_true(st.unchecked)
 			end
 		end
+		-- "Hide": gone from the shortcuts
+		local h = run({ [1] = true }, { notNow = { [6] = true } })
+		assert.is_nil(h.steps[2].shortcuts)
+		assert.equal(0, h.shortcuts)
+	end)
+
+	it("a gap only a gated recipe covers offers it as a shortcut that fills the gap", function()
+		local recipes = { [6] = recipe("R6", M4) }
+		local p = P.run(input(recipes, {}, { trainerSeen = { [99] = true } }))
+		local gap = p.steps[1]
+		assert.equal("gap", gap.kind)
+		assert.equal(6, gap.shortcuts[1].spell)
+		assert.is_nil(gap.shortcuts[1].saves)
+		assert.equal(1, p.shortcuts)
 	end)
 end)
 
