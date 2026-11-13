@@ -1042,7 +1042,7 @@ end
 
 P.OTHERS = 3 -- alternatives kept per step
 P.SHORTCUTS = 2 -- shortcuts (gated recipes that save money or fill a gap) kept per step
-P.SHORTCUT_MIN = 1 -- copper: a gated recipe saving less than this over a step is no shortcut
+P.SHORTCUT_MIN = 100 -- copper: a gated recipe saving less than this over a step is not worth a detour
 
 -- A shortcut entry: the gated option o, what it saves over the step (nil on a gap), and what it takes to get it.
 local function shortcutOf(o, saves)

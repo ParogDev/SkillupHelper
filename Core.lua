@@ -264,7 +264,7 @@ function ns.onTrainer()
 		if first then
 			-- the planner's cache key carries trainerSeen: the next scan replans with only what a trainer teaches
 			print(
-				"SkillupHelper: read what this trainer teaches. Trainer recipes it doesn't teach are now shortcuts, not plan steps."
+				"SkillupHelper: trainer read. Recipes no trainer you've opened teaches are shortcuts now; another trainer can confirm them."
 			)
 		end
 	end

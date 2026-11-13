@@ -203,7 +203,9 @@ end
 function V.routeLines(p)
 	local out = {}
 	if (p.shortcuts or 0) > 0 then
-		out[#out + 1] = ("Planned with recipes you can surely get. %d shortcut%s (quest, dungeon or unchecked trainer) marked on %s"):format(
+		-- before a trainer was read the plan also uses unconfirmed trainer recipes: no claim of certainty then
+		out[#out + 1] = ("%s%d shortcut%s (quest, dungeon or unchecked trainer) marked on %s"):format(
+			p.unconfirmed and "" or "Planned with recipes you can surely get. ",
 			p.shortcuts,
 			p.shortcuts == 1 and "" or "s",
 			p.shortcuts == 1 and "its step" or "their steps"
