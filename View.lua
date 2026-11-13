@@ -169,6 +169,55 @@ function V.otherLines(others, env, max)
 	return out
 end
 
+-- A step's shortcuts (gated recipes: a special teacher, a quest, a trainer recipe no trainer was seen teaching) as
+-- rows with their two buttons: { text, use = action, hide = action }. A shortcut on a craft step saves money; one on
+-- a gap fills it.
+function V.shortcutRows(cuts, env)
+	local out = {}
+	for _, c in ipairs(cuts or {}) do
+		local what = c.saves and ("Shortcut: %s saves %s"):format(tostring(c.name or c.spell), env.money(c.saves))
+			or ("Fills this gap: %s"):format(tostring(c.name or c.spell))
+		local text = c.needs and ("%s (needs: %s)"):format(what, tostring(c.needs)) or what
+		out[#out + 1] = {
+			text = text,
+			use = {
+				id = "useShortcut",
+				spell = c.spell,
+				enabled = true,
+				label = "Use it",
+				tip = "You can get this recipe: let the plan use it",
+			},
+			hide = {
+				id = "hideShortcut",
+				spell = c.spell,
+				enabled = true,
+				label = "Hide",
+				tip = "Never offer this recipe (/skillup exclude " .. tostring(c.spell) .. " brings it back)",
+			},
+		}
+	end
+	return out
+end
+
+-- What the plan is sure of, as footer lines: the shortcuts it left out, and trainer recipes not confirmed yet.
+function V.routeLines(p)
+	local out = {}
+	if (p.shortcuts or 0) > 0 then
+		out[#out + 1] = ("Planned with recipes you can surely get. %d shortcut%s (quest, dungeon or unchecked trainer) marked on %s"):format(
+			p.shortcuts,
+			p.shortcuts == 1 and "" or "s",
+			p.shortcuts == 1 and "its step" or "their steps"
+		)
+	end
+	if p.unconfirmed then
+		out[#out + 1] = ("Visit your trainer once: %d trainer recipe%s not confirmed yet"):format(
+			p.unconfirmed,
+			p.unconfirmed == 1 and "" or "s"
+		)
+	end
+	return out
+end
+
 -- The materials of a craft step: what it takes from the bags (have/need) and what it buys (where, price). listed:
 -- the items on the plan's shopping list (a set), whose buy rows point to it instead of naming a place and a price.
 local function craftMats(st, env, listed)
@@ -227,6 +276,7 @@ local function nextCard(st, env, listed)
 		card.color = "warn"
 		card.name = ("Nothing gives skill from %d to %d"):format(st.from, st.to)
 		card.verb = st.why
+		card.shortcuts = V.shortcutRows(st.shortcuts, env)
 		return card
 	elseif st.kind == "train" then
 		card.color = "gold"
@@ -272,6 +322,7 @@ local function nextCard(st, env, listed)
 		)
 	end
 	card.others = V.otherLines(st.others, env, 3)
+	card.shortcuts = V.shortcutRows(st.shortcuts, env)
 	card.pre = {}
 	for _, p in ipairs(st.pre or {}) do
 		local name = env.nameOf(p.item)
@@ -312,7 +363,12 @@ end
 -- One later step as a compact row: { n, color, text, right }.
 local function laterRow(n, st, env)
 	if st.kind == "gap" then
-		return { n = n, color = "warn", text = "No recipe gives skill", right = ("%d to %d"):format(st.from, st.to) }
+		return {
+			n = n,
+			color = "warn",
+			text = "No recipe gives skill" .. (st.shortcuts and " (a shortcut fills it)" or ""),
+			right = ("%d to %d"):format(st.from, st.to),
+		}
 	elseif st.kind == "trainRank" then
 		return {
 			n = n,
@@ -338,7 +394,13 @@ local function laterRow(n, st, env)
 	return {
 		n = n,
 		color = st.color or "grey",
-		text = ("%dx %s%s"):format(st.crafts, st.name, st.source == "stock" and ", from stock" or ""),
+		text = ("%dx %s%s%s"):format(
+			st.crafts,
+			st.name,
+			st.source == "stock" and ", from stock" or "",
+			-- the shortcut itself (what it saves, what it needs) shows on the Next card
+			st.shortcuts and " · shortcut" or ""
+		),
 		right = ("%d to %d"):format(math.floor(st.from), math.floor(st.to)),
 	}
 end
@@ -1064,6 +1126,9 @@ function V.describe(m, env)
 		local cov = p.coverage and p.coverage.to
 		if type(cov) == "number" and (not m.maxSkill or cov < m.maxSkill) then
 			table.insert(d.footer, 1, ("Data/Plan.lua covers to %d"):format(cov))
+		end
+		for _, line in ipairs(V.routeLines(p)) do
+			d.footer[#d.footer + 1] = line
 		end
 		if not d.next then
 			d.empty = "Nothing gives skill in range: every known recipe is grey."

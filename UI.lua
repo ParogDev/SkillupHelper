@@ -246,7 +246,13 @@ function UI.act(a)
 	if type(a) ~= "table" or not a.enabled or secret(a.spell) or type(a.spell) ~= "number" then
 		return false
 	end
-	if a.id == "open" then
+	if a.id == "useShortcut" or a.id == "hideShortcut" then
+		stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
+		if a.id == "useShortcut" then
+			return ns.useShortcut(a.spell, true)
+		end
+		return ns.hideShortcut(a.spell)
+	elseif a.id == "open" then
 		stats.clicks.open = stats.clicks.open + 1
 		local ok, err = pcall(C_TradeSkillUI.OpenRecipe, a.spell)
 		stats.lastOpenError = not ok and ("C_TradeSkillUI.OpenRecipe: " .. tostring(err)) or nil
@@ -879,6 +885,47 @@ local function fillCard(card, c, consumed)
 		else
 			fs:Hide()
 		end
+	end
+
+	-- the shortcuts: a gated recipe that would save money here or fill this gap, with "Use it" and "Hide"
+	card.cutRows = card.cutRows or {}
+	local nCut = 0
+	for _, sc in ipairs(c.shortcuts or {}) do
+		nCut = nCut + 1
+		local row = card.cutRows[nCut]
+		if not row then
+			row = {
+				fs = text(card, "GameFontHighlightSmall", 11),
+				use = newButton(card),
+				hide = newButton(card),
+			}
+			row.fs:SetWidth(INNER - PAD * 2 - 4)
+			row.use:SetSize(60, 18)
+			row.hide:SetSize(50, 18)
+			card.cutRows[nCut] = row
+		end
+		top = top + 6
+		row.fs:ClearAllPoints()
+		row.fs:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		row.fs:SetText(sc.text)
+		setColor(row.fs, "gold")
+		row.fs:Show()
+		top = top + row.fs:GetStringHeight() + 3
+		row.use:ClearAllPoints()
+		row.use:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		setButton(row.use, sc.use, ns.View.RGB.gold)
+		row.hide:ClearAllPoints()
+		row.hide:SetPoint("LEFT", row.use, "RIGHT", 6, 0)
+		setButton(row.hide, sc.hide, ns.View.RGB.ash)
+		row.hide.style = "quiet"
+		paintButton(row.hide)
+		top = top + 18
+	end
+	for i = nCut + 1, #card.cutRows do
+		local row = card.cutRows[i]
+		row.fs:Hide()
+		row.use:Hide()
+		row.hide:Hide()
 	end
 
 	-- the buttons: Buy (vendor reagents the step lacks) takes a row of its own above; Craft takes the next row, Show
