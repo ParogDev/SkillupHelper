@@ -56,7 +56,8 @@ local function recipeIDs()
 	return type(ids) == "table" and ids or {}, "GetFilteredRecipeIDs"
 end
 
--- Basic reagents of a recipe from its schematic (optional and finishing slots left out).
+-- Basic reagents of a recipe from its schematic (optional and finishing slots left out), then the item it makes and
+-- how many (nil, nil for a recipe with no item output: an enchant, a buff).
 function S.reagents(recipeID)
 	local schem = C_TradeSkillUI.GetRecipeSchematic and C_TradeSkillUI.GetRecipeSchematic(recipeID, false)
 	if type(schem) ~= "table" or type(schem.reagentSlotSchematics) ~= "table" then
@@ -69,6 +70,114 @@ function S.reagents(recipeID)
 			out[#out + 1] = { item = first.itemID, count = slot.quantityRequired }
 		end
 	end
+	local makes = clean(schem.outputItemID)
+	if type(makes) ~= "number" or makes <= 0 then
+		makes = nil
+	end
+	local n = clean(schem.quantityMin)
+	return out, makes, makes and (type(n) == "number" and n > 0 and n or 1) or nil
+end
+
+-- Learned recipes the export does not list (a pattern bought after the export, a profession it never covered) --------
+-- The client gives a learned recipe's grey (maxTrivialLevel), its skill-ups and its colour at the current skill, but
+-- not where it turns yellow. That threshold starts at grey - LIVE_SPAN (the export's most common span) and is narrowed
+-- by every colour the client showed for it (SkillupHelperDB.colorSeen: the highest skill seen orange, the lowest
+-- seen yellow or green), so the estimate sharpens as the skill climbs. The planner's client-colour check
+-- (Planner.prepare) corrects the current colour on top.
+S.LIVE_SPAN = 25
+
+-- Records the colour the client shows for spell at skill into seen ({ o = highest orange, y = lowest yellow or
+-- green }). Returns true when the record changed.
+function S.noteColor(seen, spell, skill, difficulty)
+	if not seen or type(skill) ~= "number" then
+		return false
+	end
+	local color = ns.Logic.colorOfDifficulty(difficulty)
+	local e = seen[spell]
+	if color == "orange" then
+		if not e or not e.o or skill > e.o then
+			e = e or {}
+			e.o = skill
+			seen[spell] = e
+			return true
+		end
+	elseif color == "yellow" or color == "green" then
+		if not e or not e.y or skill < e.y then
+			e = e or {}
+			e.y = skill
+			seen[spell] = e
+			return true
+		end
+	end
+	return false
+end
+
+-- The yellow threshold of a recipe whose grey is g, from the colours seen (nil = none seen).
+function S.yellowOf(g, seen)
+	local y = g - S.LIVE_SPAN
+	if seen and seen.o and y <= seen.o then
+		y = seen.o + 1
+	end
+	if seen and seen.y and y > seen.y then
+		y = seen.y
+	end
+	return math.min(y, g)
+end
+
+-- A planner entry (Data/Plan.lua's recipe shape) for a learned recipe from what the client says, or nil and why.
+-- r = { id, name, grey, skillUps, reagents, makes, n }.
+function S.liveEntry(r, seen)
+	local g = r.grey
+	if type(g) ~= "number" or g <= 0 then
+		return nil, "no grey level (maxTrivialLevel)"
+	end
+	if not r.reagents then
+		return nil, "no schematic"
+	end
+	local mats = {}
+	for _, m in ipairs(r.reagents) do
+		mats[#mats + 1] = m.item
+		mats[#mats + 1] = m.count
+	end
+	local k = tonumber(r.skillUps)
+	return {
+		y = S.yellowOf(g, seen),
+		g = g,
+		k = (k and k > 0) and k or 1,
+		name = r.name,
+		mats = mats,
+		makes = r.makes,
+		n = r.makes and (r.n or 1) or nil,
+		src = "known",
+		live = true,
+	}
+end
+
+-- The profession entry the planner runs on: the export's (prof, may be nil) with every learned recipe it does not
+-- list added from the client (live[spell] = entry). Returns nil when neither has a recipe. The export is never
+-- changed: a copy carries the additions.
+function S.mergeProf(prof, live, info)
+	if not prof and not next(live) then
+		return nil
+	end
+	local out = {}
+	for k, v in pairs(prof or {}) do
+		out[k] = v
+	end
+	local recipes = {}
+	for spell, r in pairs(prof and prof.recipes or {}) do
+		recipes[spell] = r
+	end
+	local added = 0
+	for spell, r in pairs(live) do
+		if not recipes[spell] then
+			recipes[spell] = r
+			added = added + 1
+		end
+	end
+	out.recipes = recipes
+	out.name = out.name or (info and info.professionName) or "?"
+	out.liveAdded = added
 	return out
 end
 
@@ -182,15 +291,33 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 	local exclude = caps.exclude or {}
 	local t0 = clock()
 	local now = GetTime and GetTime() or 0
-	local pc = priceCache[prof]
+	-- caches are per profession name: the entry the scan passes is a fresh merge of the export and the client
+	local cacheKey = prof.name or "?"
+	-- the recipes the plan may use, with the client-built ones' thresholds: a recipe learned (or a threshold the
+	-- client narrowed) since the last run prices its reagents and replans
+	local recipeKey = {}
+	for spell, r in pairs(prof.recipes or {}) do
+		recipeKey[#recipeKey + 1] = r.live and (spell .. "~" .. tostring(r.y) .. "-" .. tostring(r.g))
+			or tostring(spell)
+	end
+	table.sort(recipeKey)
+	recipeKey = table.concat(recipeKey, ",")
+	local pc = priceCache[cacheKey]
 	-- salvage values depend on the sell-share setting: a changed share refetches like an expired entry
-	if not pc or now - pc.at > S.PRICE_TTL or now < pc.at or pc.sellShare ~= settings.sellShare then
+	if
+		not pc
+		or now - pc.at > S.PRICE_TTL
+		or now < pc.at
+		or pc.sellShare ~= settings.sellShare
+		or pc.recipeKey ~= recipeKey
+	then
 		local price, product, counts = ns.TSM.prices(plan, prof, nil, settings.sellShare)
 		pc = { at = now, price = price, product = product, counts = counts, stamp = (pc and pc.stamp or 0) + 1 }
 		pc.sellShare = settings.sellShare
-		priceCache[prof] = pc
+		pc.recipeKey = recipeKey
+		priceCache[cacheKey] = pc
 	end
-	local effort = settings.effort or plan.effort or ns.Planner.EFFORT
+	local effort = settings.effort or (plan and plan.effort) or ns.Planner.EFFORT
 	local nLearned, learnedKey = 0, {}
 	for spell in pairs(learned) do
 		nLearned = nLearned + 1
@@ -213,8 +340,9 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		S.ranksKey(ranks),
 		S.excludeKey(exclude),
 		S.seenKey(caps.trainerSeen),
+		recipeKey,
 	}, ":")
-	local bc = baseCache[prof]
+	local bc = baseCache[cacheKey]
 	if not bc or bc.key ~= key then
 		local ctx = ns.Planner.prepare({
 			skill = skill,
@@ -225,7 +353,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 			exclude = exclude,
 			trainerSeen = caps.trainerSeen,
 			recipes = prof.recipes,
-			items = plan.items,
+			items = plan and plan.items or {},
 			learned = learned,
 			difficulty = difficulty,
 			price = pc.price,
@@ -235,7 +363,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 			luck = luck,
 		})
 		bc = { key = key, ctx = ctx, baseline = ns.Planner.baseline(ctx) }
-		baseCache[prof] = bc
+		baseCache[cacheKey] = bc
 	end
 	local have, haveKey = {}, {}
 	for item in pairs(pc.price) do
@@ -290,6 +418,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 	result.prices = pc.counts
 	result.ageHours = ns.TSM.ageHours(plan)
 	result.profKey = prof.name
+	-- recipes planned from the client alone (no export row): their yellow threshold is an estimate
+	result.liveRecipes = prof.liveAdded
 	return result
 end
 
@@ -313,8 +443,20 @@ function S.build(plan)
 	local vendor = plan and plan.vendor or {}
 	local ids, idSource = recipeIDs()
 	local recipes = {}
-	local counts = { ids = #ids, learned = 0, secret = 0, noSchematic = 0, clientColor = 0, dataThresholds = 0 }
+	local counts = {
+		ids = #ids,
+		learned = 0,
+		secret = 0,
+		noSchematic = 0,
+		clientColor = 0,
+		dataThresholds = 0,
+		-- learned recipes the export does not list, planned from the client; and those it could not plan, by reason
+		live = 0,
+		liveSkipped = {},
+	}
 	local learned, difficulties, greyCheck = {}, {}, {}
+	local live = {}
+	local colorSeen = ns.savedColorSeen and ns.savedColorSeen() or nil
 	for _, id in ipairs(ids) do
 		local r = C_TradeSkillUI.GetRecipeInfo(id)
 		if type(r) == "table" then
@@ -323,7 +465,7 @@ function S.build(plan)
 			elseif r.learned then
 				counts.learned = counts.learned + 1
 				learned[id] = true
-				local reagents = S.reagents(id)
+				local reagents, makes, makesN = S.reagents(id)
 				if not reagents then
 					counts.noSchematic = counts.noSchematic + 1
 				end
@@ -336,7 +478,26 @@ function S.build(plan)
 					difficulties[id] = difficulty
 				end
 				local th = ns.Logic.thresholds(thresholds[id])
-				if th then
+				if not thresholds[id] then
+					-- not in the export: plan it from the client, its colours narrowing the yellow threshold
+					S.noteColor(colorSeen, id, skill, difficulty)
+					local entry, skipWhy = S.liveEntry({
+						name = r.name,
+						grey = clean(r.maxTrivialLevel),
+						skillUps = clean(r.numSkillUps),
+						reagents = reagents,
+						makes = makes,
+						n = makesN,
+					}, colorSeen and colorSeen[id])
+					if entry then
+						live[id] = entry
+						counts.live = counts.live + 1
+						th = { entry.y, entry.g, entry.k }
+					else
+						counts.liveSkipped[skipWhy] = (counts.liveSkipped[skipWhy] or 0) + 1
+					end
+				end
+				if th and thresholds[id] then
 					counts.dataThresholds = counts.dataThresholds + 1
 					-- the client's grey (maxTrivialLevel) next to the export's, for a few recipes (selftest)
 					if #greyCheck < 5 and not secret(r.maxTrivialLevel) then
@@ -377,20 +538,25 @@ function S.build(plan)
 	local level = UnitLevel and clean(UnitLevel("player")) or nil
 	local target = S.target(ranks, prof, info.maxSkillLevel)
 	model.target, model.ranks = target, ranks
-	if prof and ns.Logic.isPlanV2(plan, prof) and target and target > skill then
-		local ok, result = pcall(S.runPlanner, plan, prof, skill, info.maxSkillLevel, learned, difficulties, settings, {
-			target = target,
-			level = level,
-			ranks = ranks,
-			exclude = settings.exclude,
-			trainerSeen = trainerSeen,
-		})
+	-- the planner runs on the export's recipes plus every learned recipe it does not list, read from the client: a
+	-- pattern learned since the export, or a profession the export never covered (First Aid, Tailoring...), plans too
+	local v1 = prof and not ns.Logic.isPlanV2(plan, prof)
+	local merged = not v1 and S.mergeProf(prof, live, info) or nil
+	if merged and target and target > skill then
+		local ok, result =
+			pcall(S.runPlanner, plan, merged, skill, info.maxSkillLevel, learned, difficulties, settings, {
+				target = target,
+				level = level,
+				ranks = ranks,
+				exclude = settings.exclude,
+				trainerSeen = trainerSeen,
+			})
 		if ok then
 			model.planner = result
 		else
 			model.plannerWhy = "planner failed: " .. tostring(result)
 		end
-	elseif prof and not ns.Logic.isPlanV2(plan, prof) then
+	elseif v1 then
 		model.plannerWhy =
 			"Data/Plan.lua is version 1 (no recipe reagents): the price plan needs regenerating on the PC, then /reload"
 	end
@@ -400,6 +566,9 @@ function S.build(plan)
 		model.buyRecipes = ns.Logic.recipesToBuy(prof, skill, function(spell)
 			return learned[spell] or false
 		end)
+	elseif model.planner then
+		-- no export for this profession: planned from the client's recipes and TSM's live prices alone, nothing broken
+		model.planner.clientOnly = true
 	elseif not plan then
 		model.planWhy = "Data/Plan.lua absent: the price plan was not generated for this copy of the addon"
 	else
