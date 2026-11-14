@@ -281,6 +281,7 @@ UI.state = {}
 local function savedCollapsed()
 	local db = SkillupHelperDB
 	if type(db) ~= "table" then
+		UI.stats.collapsedWhy = "SkillupHelperDB absent: section folds are not saved"
 		return {}
 	end
 	db.ui = type(db.ui) == "table" and db.ui or {}
@@ -2045,14 +2046,16 @@ function UI.show(model)
 		preview = d.pager and d.pager.index or nil,
 		whyOpen = nx and nx.why and nx.why.open or false,
 		matsHidden = nx and nx.matsToggle and (nx.allMats - #nx.mats) or 0,
+		collapsedWhy = UI.stats.collapsedWhy,
 	}
 end
 
 -- Draws the last model again with the panel state changed by a click (preview, an expander, a section).
 function UI.redraw()
-	if UI.model and UI.frame then
-		UI.show(UI.model)
+	if not (UI.model and UI.frame) then
+		return false
 	end
+	UI.show(UI.model)
 	return true
 end
 

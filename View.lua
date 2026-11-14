@@ -1643,7 +1643,7 @@ function V.describe(m, env, opts)
 	local pi = opts.preview
 	if p and nx and type(pi) == "number" and pi >= 2 and pi <= total then
 		local pc = nextCard(p.steps[pi], env, listed)
-		pc.links = nx.links
+		-- the links count step 1's shopping and alts: a later step gets none
 		pc.actions = V.previewActions(p.steps[pi], env)
 		pc.previewing = true
 		d.now, d.next = nx, pc
@@ -1651,8 +1651,8 @@ function V.describe(m, env, opts)
 		nx = pc
 	end
 	if nx then
-		V.foldMats(nx, opts.matsOpen == nx.key)
-		nx.why = V.whyRow(nx, opts.whyOpen == nx.key)
+		V.foldMats(nx, nx.key ~= nil and opts.matsOpen == nx.key)
+		nx.why = V.whyRow(nx, nx.key ~= nil and opts.whyOpen == nx.key)
 		nx.bar = V.actionBar(nx)
 	end
 	return d
