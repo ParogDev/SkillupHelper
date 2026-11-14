@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.15
+
+- The Plan tab's buttons (Queue mail, Buy, Craft, Show recipe) sit in a bar at the bottom of the panel and no longer
+  scroll away.
+- The card's notes fold into one Why line. "+3" opens the rest in place; a new step folds it again.
+- A card with more than five reagents shows five and "3 more reagents >".
+- Shopping and Alts sections fold with a click on their title, and stay folded. Stock starts folded.
+- Click a later step to preview it on the card, with "< Step 3 of 9 >" and Back to now. A preview never crafts or
+  buys: its bar reads "Step 1 comes first". Any skill-up returns to step 1.
+- Right-click a step for a menu: preview it, Show recipe, Back to now.
+
 ## 0.2.14
 
 - The mail queue sends exactly what the plan wants, not whole stacks. When a stack holds more, the mailbox panel's
