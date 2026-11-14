@@ -1796,7 +1796,8 @@ function V.whyRow(card, open)
 	for _, n in ipairs(card.notes or {}) do
 		all[#all + 1] = { text = n, color = "bone" }
 	end
-	if not card.otherRows then
+	-- the other ways sit in the Way menu when the card has one
+	if not card.way then
 		for _, o in ipairs(card.others or {}) do
 			all[#all + 1] = { text = o, color = "ash" }
 		end
@@ -2038,11 +2039,14 @@ function V.moreItems(more, s, env, collapsed)
 	local out = {}
 	s = s or {}
 	if not section(out, "more:planner", "Planner", collapsed) then
-		local luck = s.luck or 90
+		-- the planner's own defaults (Planner.LUCK, Planner.EFFORT), so the controls never drift from them
+		local P = ns.Planner or {}
+		local defaultLuck = P.LUCK or 90
+		local luck = s.luck or defaultLuck
 		local radios = {}
 		for _, l in ipairs(ns.Logic.LUCKS) do
 			radios[#radios + 1] = {
-				label = ("%d%%%s"):format(l, l == 90 and " (default)" or ""),
+				label = ("%d%%%s"):format(l, l == defaultLuck and " (default)" or ""),
 				checked = l == luck,
 				action = setting("luck", l, ("Buy for bad luck: %d%%"):format(l)),
 			}
@@ -2054,7 +2058,7 @@ function V.moreItems(more, s, env, collapsed)
 			menu = { title = "Buys cover this share of runs", items = radios },
 			tip = "How unlucky a run of crafts the buys cover. 90%: nine runs in ten need no second trip.",
 		}
-		local effort = s.effort or s.defaultEffort or 20
+		local effort = s.effort or s.defaultEffort or P.EFFORT or 20
 		local down, up = ns.Logic.effortStep(effort, -1), ns.Logic.effortStep(effort, 1)
 		local function word(c)
 			return c == 0 and "none" or env.money(c)
@@ -2145,9 +2149,6 @@ function V.moreItems(more, s, env, collapsed)
 				out[#out + 1] = { kind = "line", text = line, color = act and "warn" or nil }
 			end
 		end
-	end
-	if more.empty then
-		out[#out + 1] = { kind = "line", text = more.empty, size = 10 }
 	end
 	return out
 end

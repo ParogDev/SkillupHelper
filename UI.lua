@@ -1104,7 +1104,7 @@ local function fillWayMenu(desc, way)
 					ns.guard("click", UI.act, act)
 				end
 			end)
-			if not act and not e.checked then
+			if not act and not e.checked and r.SetEnabled then
 				r:SetEnabled(false)
 			end
 			if e.tip and r.SetTooltip then
