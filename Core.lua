@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.14"
+ns.CODE_VERSION = "0.2.15"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -103,6 +103,8 @@ local function refreshSelftest()
 		-- the shown tab and each tab's content height (scroll: the shown one overflows)
 		tab = ui.tab,
 		views = ui.views,
+		-- Phase 2 of the redesign: the pieces, the action bar's rows and buttons, the previewed step, what is open
+		phase2 = ui.phase2,
 		animations = ui.animations,
 		played = ui.played,
 		lastDock = ui.lastDock,
