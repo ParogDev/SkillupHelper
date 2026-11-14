@@ -555,11 +555,11 @@ describe("Cap model on the panel", function()
 		assert.equal("Artisan needs level 35, you are 30", d.capBlock)
 		assert.matches("^Artisan needs level 35, you are 30", d.notice)
 		assert.equal("Data/Plan.lua covers to 140", d.more.data[1])
-		-- coverage up to the cap says nothing: More is empty, and its tab dimmed
+		-- coverage up to the cap says nothing: no data lines, but the tab holds the settings and is never dimmed
 		local full = show(plan({ craft(1) }, { coverage = { to = 150 } }))
 		assert.same({}, full.more.data)
 		assert.is_string(full.more.empty)
-		assert.is_true(full.tabs[4].empty)
+		assert.is_false(full.tabs[4].empty)
 		assert.equal("Artisan needs level unknown, you are unknown", ns.View.capBlockLine({ name = "Artisan" }))
 	end)
 

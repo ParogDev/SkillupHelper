@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.16
+
+- The More tab has controls for the planner's options: "Buy for bad luck" (50% to 99%), "Effort per craft" with - and
+  +, "Suggest recipes to buy", "Count reagents on my other characters" (new) and the recipe sources (dungeon and AH
+  patterns, special teachers). They write the same settings as `/skillup luck`, `effort`, `recipes` and `exclude`.
+- More also lists the shortcuts in use (Stop using) and the hidden recipes (Offer again).
+- The card's "Use this" rows and shortcut rows become one "Way: X" button. Its menu lists the other ways cheapest
+  first, the stock option and each shortcut with Use it / Hide; a switched step shows "your pick" and "Back to X".
+- Right-click a step, then "Ways...", to switch that step's recipe without previewing it.
+- A Shopping block whose items are all in your bags folds itself and says "covered".
+
 ## 0.2.15
 
 - The Plan tab's buttons (Queue mail, Buy, Craft, Show recipe) sit in a bar at the bottom of the panel and no longer

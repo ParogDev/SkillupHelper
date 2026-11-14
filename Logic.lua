@@ -360,6 +360,96 @@ function L.ahVerdict(each, live)
 	return ratio > L.AH_OVER and "over" or "ok", ratio
 end
 
+-- Settings (the More tab) ------------------------------------------------------------------------------------------
+-- The values the More tab offers; the slash commands accept the same luck values (Planner.zOf) and any effort.
+L.LUCKS = { 50, 75, 80, 90, 95, 99 }
+L.EFFORTS = { 0, 5, 10, 20, 50, 100, 200, 500 } -- copper per craft: 0, 5c, 10c, 20c, 50c, 1s, 2s, 5s
+
+-- The effort after `cur` one step up (dir > 0) or down: a value between two steps goes to the next one that way.
+-- nil past either end.
+function L.effortStep(cur, dir)
+	cur = tonumber(cur) or 0
+	if dir > 0 then
+		for _, e in ipairs(L.EFFORTS) do
+			if e > cur then
+				return e
+			end
+		end
+	else
+		for k = #L.EFFORTS, 1, -1 do
+			if L.EFFORTS[k] < cur then
+				return L.EFFORTS[k]
+			end
+		end
+	end
+	return nil
+end
+
+local EXCLUDE_FLAG = { dungeon = true, ahPatterns = true }
+
+-- Writes one More-tab control into SkillupHelperDB, under the keys the slash commands write:
+--   luck (db.luck, one of L.LUCKS, nil resets), effort (db.effort, copper >= 0, nil resets), noRecipeBuys and
+--   noAlts (true or nil), dungeon / ahPatterns (db.exclude[key]: true leaves them out), special (db.exclude.special:
+--   false plans special teachers, nil leaves them out), allow / notNow (db.exclude[key][spell]: true or nil; one
+--   clears the other, as /skillup allow and /skillup exclude <spellID> do).
+-- a = { key, value, spell }. Returns true, or false and the broken link.
+function L.applySetting(db, a)
+	if type(db) ~= "table" then
+		return false, "SkillupHelperDB not loaded"
+	end
+	if type(a) ~= "table" then
+		return false, "no setting given"
+	end
+	local k, v = a.key, a.value
+	if k == "luck" then
+		if v ~= nil then
+			local ok = false
+			for _, l in ipairs(L.LUCKS) do
+				ok = ok or l == v
+			end
+			if not ok then
+				return false, "luck " .. tostring(v) .. " is not one of 50, 75, 80, 90, 95, 99"
+			end
+		end
+		db.luck = v
+		return true
+	elseif k == "effort" then
+		if v ~= nil and (type(v) ~= "number" or v < 0) then
+			return false, "effort " .. tostring(v) .. " is not copper >= 0"
+		end
+		db.effort = v
+		return true
+	elseif k == "noRecipeBuys" or k == "noAlts" then
+		db[k] = v and true or nil
+		return true
+	end
+	db.exclude = type(db.exclude) == "table" and db.exclude or {}
+	local ex = db.exclude
+	if EXCLUDE_FLAG[k] then
+		ex[k] = v and true or nil
+		return true
+	elseif k == "special" then
+		if v == false then
+			ex.special = false
+		else
+			ex.special = nil
+		end
+		return true
+	elseif k == "allow" or k == "notNow" then
+		if type(a.spell) ~= "number" then
+			return false, k .. " without a spell id"
+		end
+		ex.allow = type(ex.allow) == "table" and ex.allow or {}
+		ex.notNow = type(ex.notNow) == "table" and ex.notNow or {}
+		ex[k][a.spell] = v and true or nil
+		if v then
+			ex[k == "allow" and "notNow" or "allow"][a.spell] = nil
+		end
+		return true
+	end
+	return false, "unknown setting " .. tostring(k)
+end
+
 -- The plan's profession entry for a profession the client names: by skill line id, then parent id, then name.
 function L.findProfession(plan, info)
 	if not plan or not plan.professions or not info then

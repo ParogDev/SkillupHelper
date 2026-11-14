@@ -107,10 +107,10 @@ describe("Why row", function()
 		assert.is_nil(V.whyRow({ key = "k", notes = {} }, false))
 	end)
 
-	it("leaves the other ways to their Use-this rows when the card has them", function()
-		local card = { key = "k", notes = {}, others = { "Other way" }, otherRows = { {} } }
+	it("leaves the other ways to the Way menu when the card has one", function()
+		local card = { key = "k", notes = {}, others = { "Other way" }, way = { items = {} } }
 		assert.is_nil(V.whyRow(card, true))
-		card.otherRows = nil
+		card.way = nil
 		assert.equal("Other way", V.whyRow(card, true).lines[1].text)
 	end)
 
