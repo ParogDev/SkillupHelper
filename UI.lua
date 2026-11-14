@@ -166,7 +166,17 @@ function UI.env()
 		where = ns.GuideUI and ns.GuideUI.where or nil,
 		queued = ns.MailUI and ns.MailUI.queued or nil,
 		mailQueue = ns.MailUI and ns.MailUI.toMe or nil,
+		spellName = UI.spellName,
 	}
+end
+
+-- A spell's name for the More tab's lists, or "spell <id>" when the client has none (or hands a secret).
+function UI.spellName(id)
+	local ok, name = pcall(C_Spell.GetSpellName, id)
+	if ok and type(name) == "string" and not secret(name) and name ~= "" then
+		return name
+	end
+	return "spell " .. tostring(id)
 end
 
 -- Which merchant window is up: Blizzard's, or another (TSM's vendoring frame hides MerchantFrame).
@@ -318,6 +328,15 @@ function UI.act(a)
 			savedCollapsed()[a.key] = not a.collapsed
 		end
 		return UI.redraw()
+	end
+	-- a More-tab control: a setting the slash commands also write; it replans (never crafts, buys or mails)
+	if type(a) == "table" and a.id == "setting" then
+		if not a.enabled then
+			return false
+		end
+		stats.clicks.setting = (stats.clicks.setting or 0) + 1
+		stats.lastSetting = tostring(a.key)
+		return ns.setSetting(a)
 	end
 	if type(a) == "table" and type(a.id) == "string" and a.id:sub(1, 4) == "mail" and ns.MailUI then
 		stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
@@ -811,6 +830,30 @@ local function newCard(parent)
 	card.whyToggle:SetSize(40, 14)
 	card.whyToggle.label:SetFontHeight(10)
 	card.whyToggle:Hide()
+	-- the Way row: a menu button with a down arrow, whose-pick text at its right, "Back to Y" under it
+	local wb = newButton(card)
+	wb.label:SetJustifyH("LEFT")
+	wb.label:ClearAllPoints()
+	wb.label:SetPoint("LEFT", 8, 0)
+	wb.label:SetPoint("RIGHT", -20, 0)
+	wb.arrow = wb:CreateTexture(nil, "OVERLAY")
+	wb.arrow:SetSize(10, 10)
+	wb.arrow:SetPoint("RIGHT", -6, 0)
+	wb.arrow:SetTexture(ARROW)
+	wb.arrow:SetRotation(-math.pi / 2)
+	wb:SetScript("OnClick", function(self)
+		ns.guard("way menu", UI.openWayMenu, self, self.menu)
+	end)
+	wb:Hide()
+	local wr = text(card, "GameFontHighlightSmall", 11)
+	wr:SetPoint("LEFT", wb, "RIGHT", 6, 0)
+	wr:SetPoint("RIGHT", card, "RIGHT", -PAD, 0)
+	wr:SetJustifyH("RIGHT")
+	wr:SetJustifyV("MIDDLE")
+	wr:SetWordWrap(false)
+	local back = newButton(card)
+	back:Hide()
+	card.way = { button = wb, right = wr, back = back }
 	card.guide = newStrip(card)
 
 	-- slide: in from the right with a fade, out to the left
@@ -975,89 +1018,43 @@ local function fillCard(card, c, consumed)
 		end
 	end
 
-	-- the alternatives: "Other way: ..." with "Use this" under it; a swapped step first shows "Back to Y"
-	card.otherRowFrames = card.otherRowFrames or {}
-	local rows = {}
-	if c.swapBack then
-		rows[1] = { text = c.swapBack.text, use = c.swapBack.use, color = "gold" }
-	end
-	for _, other in ipairs(c.otherRows or {}) do
-		rows[#rows + 1] = { text = other.text, use = other.use, color = "ash" }
-	end
-	for k, line in ipairs(rows) do
-		local row = card.otherRowFrames[k]
-		if not row then
-			row = { fs = text(card, "GameFontHighlightSmall", 11), use = newButton(card) }
-			row.use:SetSize(70, 18)
-			card.otherRowFrames[k] = row
-		end
-		top = top + 3
-		row.fs:SetWidth(INNER - PAD * 2 - 4)
-		row.fs:ClearAllPoints()
-		row.fs:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
-		row.fs:SetText(line.text)
-		setColor(row.fs, line.color)
-		row.fs:Show()
-		top = top + row.fs:GetStringHeight()
-		if line.use then
-			-- the button under its line, as wide as its label ("Back to <recipe name>" can be long)
-			top = top + 2
-			setButton(row.use, line.use, ns.View.RGB[line.color] or ns.View.RGB.ash)
-			row.use.style = line.color == "gold" and "primary" or "quiet"
-			paintButton(row.use)
-			local w = row.use.label:GetStringWidth() or 0
-			row.use:SetSize(math.max(70, math.min(INNER - PAD * 2 - 4, w + 16)), 18)
-			row.use:ClearAllPoints()
-			row.use:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+	-- the Way row (View.wayMenu): "Way: X v" opens the menu of other ways, the stock option and the shortcuts; the
+	-- right text says whose pick it is; a swapped step adds "Back to Y" under it. Hidden without an alternative.
+	local way = c.way
+	local wr = card.way
+	if way then
+		top = top + 6
+		wr.button.menu = way
+		wr.button.label:SetText(way.label)
+		local w = (wr.button.label:GetStringWidth() or 0) + 30
+		wr.button:SetSize(math.max(90, math.min(INNER - PAD * 2 - 90, w)), 22)
+		wr.button.style = way.rightColor == "warn" and "primary" or "quiet"
+		wr.button.accent = ns.View.RGB[way.rightColor == "warn" and "warn" or "bone"]
+		paintButton(wr.button)
+		wr.button:ClearAllPoints()
+		wr.button:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
+		wr.button:Show()
+		wr.right:SetText(way.right or "")
+		setColor(wr.right, way.rightColor or "ash")
+		wr.right:Show()
+		top = top + 22
+		if way.back then
+			top = top + 3
+			setButton(wr.back, way.back, ns.View.RGB.gold)
+			wr.back.style = "quiet"
+			paintButton(wr.back)
+			local bw = wr.back.label:GetStringWidth() or 0
+			wr.back:SetSize(math.max(70, math.min(INNER - PAD * 2 - 4, bw + 16)), 18)
+			wr.back:ClearAllPoints()
+			wr.back:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
 			top = top + 18
 		else
-			row.use:Hide()
+			wr.back:Hide()
 		end
-	end
-	for i = #rows + 1, #card.otherRowFrames do
-		card.otherRowFrames[i].fs:Hide()
-		card.otherRowFrames[i].use:Hide()
-	end
-
-	-- the shortcuts: a gated recipe that would save money here or fill this gap, with "Use it" and "Hide"
-	card.cutRows = card.cutRows or {}
-	local nCut = 0
-	for _, sc in ipairs(c.shortcuts or {}) do
-		nCut = nCut + 1
-		local row = card.cutRows[nCut]
-		if not row then
-			row = {
-				fs = text(card, "GameFontHighlightSmall", 11),
-				use = newButton(card),
-				hide = newButton(card),
-			}
-			row.fs:SetWidth(INNER - PAD * 2 - 4)
-			row.use:SetSize(60, 18)
-			row.hide:SetSize(50, 18)
-			card.cutRows[nCut] = row
-		end
-		top = top + 6
-		row.fs:ClearAllPoints()
-		row.fs:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
-		row.fs:SetText(sc.text)
-		setColor(row.fs, "gold")
-		row.fs:Show()
-		top = top + row.fs:GetStringHeight() + 3
-		row.use:ClearAllPoints()
-		row.use:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
-		setButton(row.use, sc.use, ns.View.RGB.gold)
-		row.hide:ClearAllPoints()
-		row.hide:SetPoint("LEFT", row.use, "RIGHT", 6, 0)
-		setButton(row.hide, sc.hide, ns.View.RGB.ash)
-		row.hide.style = "quiet"
-		paintButton(row.hide)
-		top = top + 18
-	end
-	for i = nCut + 1, #card.cutRows do
-		local row = card.cutRows[i]
-		row.fs:Hide()
-		row.use:Hide()
-		row.hide:Hide()
+	else
+		wr.button:Hide()
+		wr.right:Hide()
+		wr.back:Hide()
 	end
 
 	-- the card's actions sit in the sticky bar under the scroll area (drawBar); the strip only needs to know of Buy
@@ -1093,7 +1090,57 @@ end
 
 ---------------------------------------------------------------------------------------------------------- later rows
 
--- The right-click menu of a step row (View.stepMenu): every entry runs UI.act, like a button.
+-- Fills a menu description with a Way menu (View.wayMenu): radios (one without an action is disabled), a stock note,
+-- a divider, a submenu per shortcut with Use it / Hide. A radio counts as the user's click for plan state only (swap).
+local function fillWayMenu(desc, way)
+	desc:CreateTitle(way.title)
+	for _, e in ipairs(way.items) do
+		if e.kind == "radio" then
+			local act = e.action
+			local r = desc:CreateRadio(e.label, function()
+				return e.checked
+			end, function()
+				if act then
+					ns.guard("click", UI.act, act)
+				end
+			end)
+			if not act and not e.checked then
+				r:SetEnabled(false)
+			end
+			if e.tip and r.SetTooltip then
+				r:SetTooltip(function(tooltip)
+					GameTooltip_SetTitle(tooltip, e.tip)
+				end)
+			end
+		elseif e.kind == "note" then
+			desc:CreateTitle(e.label)
+		elseif e.kind == "divider" then
+			desc:CreateDivider()
+		elseif e.kind == "submenu" then
+			local sub = desc:CreateButton(e.label)
+			for _, a in ipairs(e.items) do
+				sub:CreateButton(a.label, function()
+					ns.guard("click", UI.act, a)
+				end)
+			end
+		end
+	end
+end
+
+-- The card's "Way: X v" button: the Way menu under it.
+function UI.openWayMenu(owner, way)
+	if not MenuUtil or type(way) ~= "table" then
+		UI.stats.wayMenuWhy = not MenuUtil and "MenuUtil absent" or "no way menu on this card"
+		return
+	end
+	UI.stats.clicks.wayMenu = (UI.stats.clicks.wayMenu or 0) + 1
+	MenuUtil.CreateContextMenu(owner, function(_, root)
+		fillWayMenu(root, way)
+	end)
+end
+
+-- The right-click menu of a step row (View.stepMenu): every entry runs UI.act, like a button; "Ways..." holds the
+-- step's Way menu.
 local function stepMenu(row)
 	if not MenuUtil or not row.info then
 		return
@@ -1106,6 +1153,9 @@ local function stepMenu(row)
 			root:CreateButton(a.label, function()
 				ns.guard("click", UI.act, a)
 			end)
+		end
+		if m.ways then
+			fillWayMenu(root:CreateButton("Ways..."), m.ways)
 		end
 	end)
 end
@@ -1469,7 +1519,7 @@ function UI.create()
 	-- the other tabs draw from pools of lines, rows and buttons (UI.drawList)
 	for _, id in ipairs({ "shopping", "alts", "more" }) do
 		local v = f.views[id]
-		v.pool = { fs = {}, rows = {}, buttons = {}, rules = {}, heads = {} }
+		v.pool = { fs = {}, rows = {}, buttons = {}, rules = {}, heads = {}, controls = {} }
 	end
 
 	-- the handle: what stays at the panel's corner while it is hidden, and brings it back with one click
@@ -1569,12 +1619,134 @@ function UI.paintTab(t)
 	t.pip:SetShown(info.warn == true)
 end
 
+-- A More-tab control row, 22 px: a checkbox (a flat 14-px box filled with the accent when on, the whole row
+-- clicks), a dropdown (label, then a menu button at the right) or a stepper (label, [-] value [+]).
+local function newControl(parent)
+	local c = CreateFrame("Button", nil, parent)
+	c:SetHeight(22)
+	c.hover = c:CreateTexture(nil, "BACKGROUND")
+	c.hover:SetAllPoints()
+	fill(c.hover, "line", 0.5)
+	c.hover:Hide()
+	c.box = CreateFrame("Frame", nil, c)
+	c.box:SetSize(14, 14)
+	c.box:SetPoint("LEFT", 2, 0)
+	c.box.fill = c.box:CreateTexture(nil, "ARTWORK")
+	c.box.fill:SetPoint("TOPLEFT", 3, -3)
+	c.box.fill:SetPoint("BOTTOMRIGHT", -3, 3)
+	c.box.edge = edges(c.box)
+	c.label = text(c, "GameFontHighlight", 12)
+	c.label:SetJustifyV("MIDDLE")
+	c.label:SetWordWrap(false)
+	c.value = text(c, "GameFontHighlightSmall", 11)
+	c.value:SetJustifyH("CENTER")
+	c.value:SetJustifyV("MIDDLE")
+	c.value:SetWordWrap(false)
+	c.dec = newButton(c)
+	c.dec:SetSize(22, 20)
+	c.inc = newButton(c)
+	c.inc:SetSize(22, 20)
+	c.inc:SetPoint("RIGHT", 0, 0)
+	c.menu = newButton(c)
+	c.menu:SetSize(96, 20)
+	c.menu:SetPoint("RIGHT", 0, 0)
+	c.menu.label:ClearAllPoints()
+	c.menu.label:SetPoint("LEFT", 8, 0)
+	c.menu.label:SetPoint("RIGHT", -18, 0)
+	c.menu.arrow = c.menu:CreateTexture(nil, "OVERLAY")
+	c.menu.arrow:SetSize(10, 10)
+	c.menu.arrow:SetPoint("RIGHT", -5, 0)
+	c.menu.arrow:SetTexture(ARROW)
+	c.menu.arrow:SetRotation(-math.pi / 2)
+	c.menu:SetScript("OnClick", function(self)
+		local m = self.choices
+		if not (MenuUtil and m) then
+			UI.stats.settingWhy = not MenuUtil and "MenuUtil absent" or "no choices on this control"
+			return
+		end
+		MenuUtil.CreateContextMenu(self, function(_, root)
+			root:CreateTitle(m.title)
+			for _, e in ipairs(m.items) do
+				root:CreateRadio(e.label, function()
+					return e.checked
+				end, function()
+					ns.guard("click", UI.act, e.action)
+				end)
+			end
+		end)
+	end)
+	c:SetScript("OnEnter", function(self)
+		if self.kind == "check" then
+			self.hover:Show()
+		end
+		showTip(self, self.tip)
+	end)
+	c:SetScript("OnLeave", function(self)
+		self.hover:Hide()
+		hideTip(self)
+	end)
+	c:SetScript("OnClick", function(self)
+		if self.kind == "check" then
+			ns.guard("click", UI.act, self.action)
+		end
+	end)
+	return c
+end
+
+local function drawControl(c, it)
+	c.kind, c.tip, c.action = it.kind, it.tip, it.action
+	c.label:ClearAllPoints()
+	c.box:SetShown(it.kind == "check")
+	c.menu:SetShown(it.kind == "choice")
+	c.dec:SetShown(it.kind == "stepper")
+	c.inc:SetShown(it.kind == "stepper")
+	c.value:SetShown(it.kind == "stepper")
+	c.label:SetText(it.text)
+	if it.kind == "check" then
+		c.label:SetPoint("LEFT", c.box, "RIGHT", 8, 0)
+		c.label:SetPoint("RIGHT", 0, 0)
+		local r, g, b = rgb(it.on and "gold" or "line")
+		paintEdges(c.box.edge, r, g, b, 1)
+		fill(c.box.fill, "gold", it.on and 0.9 or 0)
+		setColor(c.label, it.on and "bone" or "ash")
+	elseif it.kind == "choice" then
+		c.label:SetPoint("LEFT", 2, 0)
+		c.label:SetPoint("RIGHT", c.menu, "LEFT", -8, 0)
+		setColor(c.label, "bone")
+		c.menu.choices = it.menu
+		c.menu.action = nil
+		c.menu.label:SetText(it.value)
+		c.menu.style, c.menu.accent = "quiet", ns.View.RGB.bone
+		paintButton(c.menu)
+	else
+		c.value:ClearAllPoints()
+		c.value:SetPoint("RIGHT", c.inc, "LEFT", -4, 0)
+		c.value:SetWidth(84)
+		c.value:SetText(it.value)
+		setColor(c.value, "bone")
+		c.dec:ClearAllPoints()
+		c.dec:SetPoint("RIGHT", c.value, "LEFT", -4, 0)
+		c.label:SetPoint("LEFT", 2, 0)
+		c.label:SetPoint("RIGHT", c.dec, "LEFT", -8, 0)
+		setColor(c.label, "bone")
+		setButton(c.dec, it.dec, ns.View.RGB.bone)
+		c.dec.label:SetText("-")
+		setButton(c.inc, it.inc, ns.View.RGB.bone)
+		c.inc.label:SetText("+")
+		c.dec.style = it.dec.enabled and "quiet" or "inert"
+		c.inc.style = it.inc.enabled and "quiet" or "inert"
+		paintButton(c.dec)
+		paintButton(c.inc)
+	end
+	c:Show()
+end
+
 -- A list view (Shopping, Alts, More) from items: { kind = "head"|"line"|"row"|"button"|"gap", ... }. Rows are
 -- { name, right, color, tone, mark, action }: a row with an action carries a small button at its right. Returns
 -- the view's height. Frames come from the view's pools.
 function UI.drawList(v, items)
 	local pool = v.pool
-	local used = { fs = 0, rows = 0, buttons = 0, heads = 0 }
+	local used = { fs = 0, rows = 0, buttons = 0, heads = 0, controls = 0 }
 	local y = 0
 	local function take(kind, make)
 		used[kind] = used[kind] + 1
@@ -1669,6 +1841,15 @@ function UI.drawList(v, items)
 			end
 			row:Show()
 			y = y + (it.action and 18 or 16)
+		elseif it.kind == "check" or it.kind == "choice" or it.kind == "stepper" then
+			local c = take("controls", function()
+				return newControl(v)
+			end)
+			c:ClearAllPoints()
+			c:SetPoint("TOPLEFT", 4, -y)
+			c:SetWidth(INNER - 8)
+			drawControl(c, it)
+			y = y + 22 + 3
 		elseif it.kind == "button" then
 			local b = take("buttons", function()
 				return newButton(v)
@@ -1737,20 +1918,6 @@ local function drawBar(f, rows, color)
 	f.barH = used > 0 and (y - BAR_GAP + 2) or 0
 	bar:SetHeight(math.max(1, f.barH))
 	UI.stats.bar = { rows = rows and #rows or 0, buttons = used }
-end
-
-local function moreItems(m)
-	local out = {}
-	if #m.data > 0 then
-		out[#out + 1] = { kind = "head", text = "Data", color = "ash" }
-		for _, line in ipairs(m.data) do
-			out[#out + 1] = { kind = "line", text = line }
-		end
-	end
-	if m.empty then
-		out[#out + 1] = { kind = "line", text = m.empty }
-	end
-	return out
 end
 
 -- Shows view `id` in the scroll frame: keeps the old view's offset, restores the new one's, sizes the panel.
@@ -1998,7 +2165,9 @@ function UI.draw(d, prev)
 		local collapsed = savedCollapsed()
 		heights.shopping = UI.drawList(f.views.shopping, ns.View.shoppingItems(d.shopping, collapsed))
 		heights.alts = UI.drawList(f.views.alts, ns.View.altsItems(d.alts, collapsed))
-		heights.more = UI.drawList(f.views.more, moreItems(d.more))
+		local settings = ns.settingsView and ns.settingsView() or nil
+		UI.stats.moreWhy = not settings and "ns.settingsView absent: the More tab shows no settings" or nil
+		heights.more = UI.drawList(f.views.more, ns.View.moreItems(d.more, settings, UI.env(), collapsed))
 	end
 	drawBar(f, d.next and d.next.bar, d.next and d.next.color)
 	for id, v in pairs(f.views) do
@@ -2047,6 +2216,26 @@ function UI.show(model)
 		whyOpen = nx and nx.why and nx.why.open or false,
 		matsHidden = nx and nx.matsToggle and (nx.allMats - #nx.mats) or 0,
 		collapsedWhy = UI.stats.collapsedWhy,
+	}
+	-- Phase 3: the More tab's controls, the Way row, the folded covered blocks, the tab pips
+	local folded, pips = 0, {}
+	for _, b in ipairs(d.shopping and d.shopping.blocks or {}) do
+		folded = folded + (b.covered and 1 or 0)
+	end
+	for _, t in ipairs(d.tabs or {}) do
+		if t.warn then
+			pips[#pips + 1] = t.id
+		end
+	end
+	UI.stats.phase3 = {
+		pieces = { "settings", "wayMenu", "stepWays", "coveredFold", "warnPip" },
+		way = nx and nx.way and nx.way.label or nil,
+		wayItems = nx and nx.way and #nx.way.items or 0,
+		coveredBlocks = folded,
+		pips = pips,
+		lastSetting = UI.stats.lastSetting,
+		settingError = ns.lastSettingError,
+		moreWhy = UI.stats.moreWhy,
 	}
 end
 

@@ -257,6 +257,96 @@ function V.shortcutRows(cuts, env)
 	return out
 end
 
+-- The Way selector of a craft or gap step (the Plan card's "Way: X v" row and a step row's "Ways..." menu), or nil
+-- when the step has no alternative. { label, right, rightColor, title, items, back, stock }. items in menu order:
+-- radios { kind = "radio", label, checked, action, tip } (the way in use first, then the plan's pick when the user
+-- swapped, then the others cheapest first; a radio without an action is shown disabled), a stock note { kind = "note" },
+-- a divider, then each shortcut { kind = "submenu", label, items = { use, hide } }. back: the "Back to Y" action.
+function V.wayMenu(st, env)
+	if type(st) ~= "table" or (st.kind ~= "craft" and st.kind ~= "gap") then
+		return nil
+	end
+	local others = {}
+	for _, o in ipairs(st.kind == "craft" and st.others or {}) do
+		others[#others + 1] = o
+	end
+	table.sort(others, V.byExtra)
+	local cuts = V.shortcutRows(st.shortcuts, env)
+	local swapBack = st.kind == "craft" and V.swapBackRow(st) or nil
+	if #others == 0 and #cuts == 0 and not swapBack then
+		return nil
+	end
+	local m = { items = {} }
+	local items = m.items
+	if st.kind == "gap" then
+		m.title = ("Ways from %s to %s"):format(known(st.from), known(st.to))
+		m.label, m.right, m.rightColor = "Fill this gap", "no recipe here", "warn"
+	else
+		m.title = ("Ways from %d to %d"):format(math.floor(st.from or 0), math.floor(st.to or 0))
+		m.label = "Way: " .. tostring(st.name or st.spell)
+		local mine = swapBack ~= nil
+		m.right, m.rightColor = mine and "your pick" or "plan's pick", mine and "gold" or "ash"
+		items[#items + 1] = {
+			kind = "radio",
+			label = ("%s (%s)"):format(tostring(st.name or st.spell), m.right),
+			checked = true,
+		}
+		if swapBack then
+			m.back = swapBack.use
+			items[#items + 1] = {
+				kind = "radio",
+				label = tostring(st.swapFromName or ("spell " .. st.swapFrom)) .. " (plan's pick)",
+				checked = false,
+				action = swapBack.use,
+			}
+		end
+		local from = st.swapFrom or st.spell
+		for _, o in ipairs(others) do
+			local src = SRC_TEXT[o.src] or (o.src and tostring(o.src)) or "source unknown"
+			local r = {
+				kind = "radio",
+				label = ("%s +%s (%s)"):format(tostring(o.name or o.spell), env.money(math.max(0, o.extra or 0)), src),
+				checked = false,
+			}
+			if o.gated then
+				r.tip = "Not sure you can get it: a shortcut's Use it lets the plan pick it"
+			elseif st.committed then
+				r.tip = "On your AH list: this recipe holds until its target (drop the list to switch)"
+			elseif type(from) == "number" then
+				r.action = {
+					id = "swap",
+					spell = o.spell,
+					from = from,
+					enabled = true,
+					label = "Use this",
+					tip = ("Plan %s here instead"):format(tostring(o.name or o.spell)),
+				}
+			end
+			items[#items + 1] = r
+		end
+		if st.alt then
+			m.stock = true
+			items[#items + 1] = {
+				kind = "note",
+				label = ("Or use stock: %dx %s, +%s over the path"):format(
+					st.alt.crafts or 0,
+					tostring(st.alt.name),
+					env.money(st.alt.extra or 0)
+				),
+			}
+		end
+	end
+	if #cuts > 0 then
+		if #items > 0 then
+			items[#items + 1] = { kind = "divider" }
+		end
+		for _, c in ipairs(cuts) do
+			items[#items + 1] = { kind = "submenu", label = c.text, items = { c.use, c.hide } }
+		end
+	end
+	return m
+end
+
 -- What the plan is sure of, as the More tab's data lines: the shortcuts it left out, and trainer recipes not confirmed yet.
 function V.routeLines(p)
 	local out = {}
@@ -360,6 +450,7 @@ local function nextCard(st, env, listed)
 		card.name = ("Nothing gives skill from %d to %d"):format(st.from, st.to)
 		card.verb = st.why
 		card.shortcuts = V.shortcutRows(st.shortcuts, env)
+		card.way = V.wayMenu(st, env)
 		return card
 	elseif st.kind == "train" then
 		card.color = "gold"
@@ -408,6 +499,7 @@ local function nextCard(st, env, listed)
 	card.otherRows = V.otherRows(st, env, 3)
 	card.swapBack = V.swapBackRow(st)
 	card.shortcuts = V.shortcutRows(st.shortcuts, env)
+	card.way = V.wayMenu(st, env)
 	card.pre = {}
 	for _, p in ipairs(st.pre or {}) do
 		local name = env.nameOf(p.item)
@@ -1014,7 +1106,9 @@ end
 
 -- plan.shopping as blocks for the card, one per place and city, ordered by city (V.orderByCity), each city in travel
 -- order: { { place, city, title, total, unknown, rows = { { item, name, right } } } }. nil when there is nothing to buy.
-function V.shoppingBlocks(shopping, env)
+-- own: this character's counts the plan was built on (plan.have). A vendor or AH row is covered once the bags hold
+-- its count more than that (bought, the replan not in yet); a block whose rows are all covered is `covered`.
+function V.shoppingBlocks(shopping, env, own)
 	if type(shopping) ~= "table" then
 		return nil
 	end
@@ -1056,9 +1150,18 @@ function V.shoppingBlocks(shopping, env)
 						end
 						row.name = name
 						row.right = ("%d, %s"):format(r.count or 0, cost and env.money(cost) or "price unknown")
+						if own and r.item and (r.count or 0) > 0 then
+							local got = (env.have(r.item) or 0) - (own[r.item] or 0)
+							row.covered = got >= r.count or nil
+						end
 					end
 					b.rows[#b.rows + 1] = row
 				end
+				local covered = #b.rows > 0
+				for _, row in ipairs(b.rows) do
+					covered = covered and row.covered == true
+				end
+				b.covered = covered or nil
 				b.title = ("%s%s: %s%s"):format(
 					PLACE[place],
 					b.city and (", " .. b.city) or "",
@@ -1472,7 +1575,8 @@ local function tabsOf(d)
 			warn = a.open > 0,
 			empty = altRows == 0 and #a.incoming == 0,
 		},
-		{ id = "more", warn = more.warn, empty = #more.data == 0 },
+		-- the settings are always there: More is never dimmed
+		{ id = "more", warn = more.warn, empty = false },
 	}
 	for _, t in ipairs(list) do
 		t.label = V.TAB_LABEL[t.id]
@@ -1522,7 +1626,7 @@ function V.describe(m, env, opts)
 	local p = m.planner
 	if p then
 		d.header.stale = staleLine(p)
-		local shop = V.shoppingBlocks(p.shopping, env)
+		local shop = V.shoppingBlocks(p.shopping, env, p.have)
 		if shop then
 			listed = {}
 			for _, place in ipairs({ "vendor", "ah" }) do
@@ -1568,6 +1672,7 @@ function V.describe(m, env, opts)
 		for i = 2, #p.steps do
 			local row = laterRow(i, p.steps[i], env)
 			row.open = V.rowOpen(p.steps[i], env)
+			row.way = V.wayMenu(p.steps[i], env)
 			d.later[#d.later + 1] = row
 		end
 		sh.stock = stockLines(p, env)
@@ -1696,7 +1801,8 @@ function V.whyRow(card, open)
 			all[#all + 1] = { text = o, color = "ash" }
 		end
 	end
-	if card.alt then
+	-- the stock option sits in the Way menu when the card has one
+	if card.alt and not (card.way and card.way.stock) then
 		all[#all + 1] = { text = card.alt, color = "bone" }
 	end
 	if card.tags then
@@ -1783,7 +1889,8 @@ function V.stepMenu(row, previewing)
 	if previewing then
 		items[#items + 1] = { id = "preview", step = 1, enabled = true, label = "Back to now" }
 	end
-	return { title = row.n and ("Step %d"):format(row.n) or row.text, items = items }
+	-- "Ways...": the step's Way menu (View.wayMenu) as a submenu
+	return { title = row.n and ("Step %d"):format(row.n) or row.text, items = items, ways = row.way }
 end
 
 -- A collapsible section head: { kind = "head", key, text, collapsed, action }. The state is saved per account
@@ -1820,9 +1927,11 @@ function V.shoppingItems(s, collapsed)
 	for _, b in ipairs(s.blocks or {}) do
 		out[#out + 1] = { kind = "gap", h = 6 }
 		local key = ("shop:%s:%s"):format(tostring(b.place or "trip"), tostring(b.city or ""))
-		if not section(out, key, b.title, collapsed) then
+		-- a block the bags already cover folds itself (until the user opens it)
+		if not section(out, key, b.covered and (b.title .. ", covered") or b.title, collapsed, nil, b.covered) then
 			for _, r in ipairs(b.rows) do
-				out[#out + 1] = { kind = "row", name = r.name, right = r.right, mark = "gold" }
+				local tone = r.covered and "green" or nil
+				out[#out + 1] = { kind = "row", name = r.name, right = r.right, mark = tone or "gold", tone = tone }
 			end
 		end
 	end
@@ -1870,6 +1979,175 @@ function V.altsItems(a, collapsed)
 	end
 	if a.empty then
 		out[#out + 1] = { kind = "line", text = a.empty }
+	end
+	return out
+end
+
+local function setting(key, value, label, extra)
+	local a = { id = "setting", key = key, value = value, enabled = true, label = label }
+	for k, v in pairs(extra or {}) do
+		a[k] = v
+	end
+	return a
+end
+
+local function check(out, text, on, key, value, tip)
+	out[#out + 1] =
+		{ kind = "check", text = text, on = on and true or false, action = setting(key, value, text), tip = tip }
+end
+
+-- A spell id's list as rows sorted by name, each with one button.
+local function spellRows(out, set, env, label, key, tip)
+	local list = {}
+	for id, on in pairs(set or {}) do
+		if on and type(id) == "number" then
+			list[#list + 1] = { id = id, name = env.spellName and env.spellName(id) or ("spell " .. id) }
+		end
+	end
+	table.sort(list, function(a, b)
+		if a.name ~= b.name then
+			return a.name < b.name
+		end
+		return a.id < b.id
+	end)
+	for _, e in ipairs(list) do
+		out[#out + 1] = {
+			kind = "row",
+			name = e.name,
+			mark = "gold",
+			action = setting(key, nil, label, { spell = e.id, tip = tip }),
+		}
+	end
+	return #list
+end
+
+local function countSet(set)
+	local n = 0
+	for id, on in pairs(set or {}) do
+		if on and type(id) == "number" then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+-- The More tab as list items: Planner (luck dropdown, effort stepper, two checkboxes), Recipe sources, Shortcuts in
+-- use (Stop using), Hidden recipes (Offer again), then the Data lines. s: ns.settingsView(); env: money, spellName.
+-- Every control is an action { id = "setting", key, value, spell } for Logic.applySetting.
+function V.moreItems(more, s, env, collapsed)
+	local out = {}
+	s = s or {}
+	if not section(out, "more:planner", "Planner", collapsed) then
+		local luck = s.luck or 90
+		local radios = {}
+		for _, l in ipairs(ns.Logic.LUCKS) do
+			radios[#radios + 1] = {
+				label = ("%d%%%s"):format(l, l == 90 and " (default)" or ""),
+				checked = l == luck,
+				action = setting("luck", l, ("Buy for bad luck: %d%%"):format(l)),
+			}
+		end
+		out[#out + 1] = {
+			kind = "choice",
+			text = "Buy for bad luck",
+			value = ("%d%%"):format(luck),
+			menu = { title = "Buys cover this share of runs", items = radios },
+			tip = "How unlucky a run of crafts the buys cover. 90%: nine runs in ten need no second trip.",
+		}
+		local effort = s.effort or s.defaultEffort or 20
+		local down, up = ns.Logic.effortStep(effort, -1), ns.Logic.effortStep(effort, 1)
+		local function word(c)
+			return c == 0 and "none" or env.money(c)
+		end
+		out[#out + 1] = {
+			kind = "stepper",
+			text = "Effort per craft",
+			value = word(effort) .. (s.effort == nil and " (default)" or ""),
+			dec = setting("effort", down, "Less effort", { enabled = down ~= nil }),
+			inc = setting("effort", up, "More effort", { enabled = up ~= nil }),
+			tip = "What one craft's time is worth to you: the plan adds it to every craft, so it favours fewer crafts.",
+		}
+		check(
+			out,
+			"Suggest recipes to buy",
+			not s.noRecipeBuys,
+			"noRecipeBuys",
+			not s.noRecipeBuys,
+			"Off: the plan uses only the recipes you know and the trainer's."
+		)
+		check(
+			out,
+			"Count reagents on my other characters",
+			not s.noAlts,
+			"noAlts",
+			not s.noAlts,
+			"From TSM's inventory of your alts. Off: the plan counts this character's bags and bank only."
+		)
+	end
+	out[#out + 1] = { kind = "gap", h = 8 }
+	if not section(out, "more:sources", "Recipe sources", collapsed) then
+		check(out, "Dungeon patterns", not s.dungeon, "dungeon", not s.dungeon, "Recipes that drop in dungeons.")
+		check(
+			out,
+			"AH patterns",
+			not s.ahPatterns,
+			"ahPatterns",
+			not s.ahPatterns,
+			"Recipes bought on the auction house."
+		)
+		-- on: exclude.special = false plans them; off: nil leaves them out (the default)
+		local specialOn = s.special == false
+		local special = nil
+		if not specialOn then
+			special = false
+		end
+		check(
+			out,
+			"Special teachers (dungeon or special NPC)",
+			specialOn,
+			"special",
+			special,
+			"Off by default: these teachers are hard to reach."
+		)
+	end
+	out[#out + 1] = { kind = "gap", h = 8 }
+	local nAllow = countSet(s.allow)
+	if not section(out, "more:allow", ("Shortcuts in use (%d)"):format(nAllow), collapsed) then
+		if nAllow == 0 then
+			out[#out + 1] =
+				{ kind = "line", text = "None. A shortcut's Use it in the Way menu adds it here.", size = 10 }
+		else
+			spellRows(
+				out,
+				s.allow,
+				env,
+				"Stop using",
+				"allow",
+				"The plan stops using this recipe (offered as a shortcut again)"
+			)
+		end
+	end
+	local nHidden = countSet(s.notNow)
+	out[#out + 1] = { kind = "gap", h = 8 }
+	if not section(out, "more:hidden", ("Hidden recipes (%d)"):format(nHidden), collapsed) then
+		if nHidden == 0 then
+			out[#out + 1] = { kind = "line", text = "None. A shortcut's Hide puts it here.", size = 10 }
+		else
+			spellRows(out, s.notNow, env, "Offer again", "notNow", "The plan may offer this recipe again")
+		end
+	end
+	more = more or { data = {} }
+	if #more.data > 0 then
+		out[#out + 1] = { kind = "gap", h = 8 }
+		if not section(out, "more:data", "Data", collapsed, "ash") then
+			for _, line in ipairs(more.data) do
+				local act = line:find("^Visit your trainer once") ~= nil
+				out[#out + 1] = { kind = "line", text = line, color = act and "warn" or nil }
+			end
+		end
+	end
+	if more.empty then
+		out[#out + 1] = { kind = "line", text = more.empty, size = 10 }
 	end
 	return out
 end

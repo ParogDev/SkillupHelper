@@ -408,7 +408,9 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		end
 		S.altCache = ac
 	end
-	haveKey[#haveKey + 1] = "alts:" .. ac.key
+	-- More tab, "Count reagents on my other characters" off (SkillupHelperDB.noAlts): the plan counts this character only
+	local altStock = not settings.noAlts and ac.stock or nil
+	haveKey[#haveKey + 1] = "alts:" .. (altStock and ac.key or "off")
 	-- the AH trip list the user keeps for this profession: its steps are committed until their target is reached
 	-- (planner rule 3); a list saved before 0.2.6 has only route and to
 	local saved = settings.trips and settings.trips[prof.name]
@@ -441,7 +443,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 	S.stockRuns = S.stockRuns or 0
 	if bc.haveKey ~= haveKey or not bc.result then
 		bc.haveKey, bc.result =
-			haveKey, ns.Planner.finish(bc.ctx, bc.baseline, have, { commit = commit, gold = gold, alts = ac.stock })
+			haveKey, ns.Planner.finish(bc.ctx, bc.baseline, have, { commit = commit, gold = gold, alts = altStock })
 		bc.ms = clock() - t0
 		S.stockRuns = S.stockRuns + 1
 	end

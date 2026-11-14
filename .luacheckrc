@@ -42,6 +42,8 @@ end
 read_globals[#read_globals + 1] = "CreateVector2D"
 read_globals[#read_globals + 1] = "UiMapPoint"
 read_globals[#read_globals + 1] = "MenuUtil"
+read_globals[#read_globals + 1] = "GameTooltip_SetTitle"
+read_globals[#read_globals + 1] = "C_Spell"
 -- FrameXML globals the generated list doesn't carry (it is built from the C API lists).
 read_globals[#read_globals + 1] = "ProfessionsFrame"
 read_globals[#read_globals + 1] = "UIParent"

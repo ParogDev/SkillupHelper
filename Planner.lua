@@ -2045,6 +2045,7 @@ function P.finish(ctx, baseline, have, opts)
 	end
 	local plan = finishCore(ctx, baseline, all, opts.commit, have)
 	plan.mail = P.mailFrom(plan.steps, have, opts.alts)
+	plan.have = have -- this character's counts the plan was built on (the Shopping tab's covered rows)
 	plan.luck = ctx.z
 	plan.trip = tripOf(ctx, plan.steps, baseline.formula.chance, opts.gold)
 	plan.shopping = P.shoppingOf(ctx, plan.steps, plan.trip)

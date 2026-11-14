@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.15"
+ns.CODE_VERSION = "0.2.16"
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -105,6 +105,8 @@ local function refreshSelftest()
 		views = ui.views,
 		-- Phase 2 of the redesign: the pieces, the action bar's rows and buttons, the previewed step, what is open
 		phase2 = ui.phase2,
+		-- Phase 3: settings controls, the Way menu, covered Shopping blocks folding, the tab pips
+		phase3 = ui.phase3,
 		animations = ui.animations,
 		played = ui.played,
 		lastDock = ui.lastDock,
@@ -234,6 +236,7 @@ function ns.settings()
 		effort = db and db.effort,
 		sellShare = db and db.sellShare,
 		noRecipeBuys = db and db.noRecipeBuys,
+		noAlts = db and db.noAlts,
 		luck = db and db.luck,
 		trips = db and db.trips,
 		exclude = db and db.exclude,
@@ -708,6 +711,33 @@ function ns.clearSwap(from)
 	end
 	ns.refresh()
 	return true
+end
+
+-- A More-tab control: writes the same SavedVariables keys as the slash commands (Logic.applySetting), then replans.
+function ns.setSetting(a)
+	local ok, why = ns.Logic.applySetting(db, a)
+	ns.lastSettingError = not ok and why or nil
+	if ok then
+		ns.refresh()
+	end
+	return ok
+end
+
+-- What the More tab shows: the settings as they stand, with the defaults they fall back to.
+function ns.settingsView()
+	local ex = db and db.exclude or {}
+	return {
+		luck = db and db.luck or ns.Planner.LUCK,
+		effort = db and db.effort,
+		defaultEffort = ns.Data.plan and ns.Data.plan.effort or ns.Planner.EFFORT,
+		noRecipeBuys = db and db.noRecipeBuys,
+		noAlts = db and db.noAlts,
+		dungeon = ex.dungeon,
+		ahPatterns = ex.ahPatterns,
+		special = ex.special,
+		allow = ex.allow or {},
+		notNow = ex.notNow or {},
+	}
 end
 
 SLASH_SKILLUPHELPER1 = "/skillup"
