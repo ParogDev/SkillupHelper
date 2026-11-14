@@ -7,7 +7,7 @@ local _, ns = ...
 local V = {}
 ns.View = V
 
-V.MAX_MATS = 8
+V.MATS_FOLD = 5 -- reagent rows on the Next card before "N more reagents"
 V.MAX_LINKS = 2 -- link rows on the Next card, one per off-card tab
 -- The panel's tabs, in strip order.
 V.TABS = { "plan", "shopping", "alts", "more" }
@@ -1496,8 +1496,10 @@ end
 -- Returns { state, profession, skill, cap, header, runway, next, later, notice, message, tabs, shopping, alts, more }.
 -- The Plan tab draws next and later; shopping = { title, blocks, trip, stock, empty }, alts = V.altsView,
 -- more = { data, warn, empty }.
-function V.describe(m, env)
+function V.describe(m, env, opts)
 	m = m or {}
+	opts = opts or {}
+	local listed -- the items on the shopping list: their mat rows say "on the list"
 	if m.why and not m.skill then
 		return {
 			state = "message",
@@ -1521,7 +1523,6 @@ function V.describe(m, env)
 	if p then
 		d.header.stale = staleLine(p)
 		local shop = V.shoppingBlocks(p.shopping, env)
-		local listed
 		if shop then
 			listed = {}
 			for _, place in ipairs({ "vendor", "ah" }) do
@@ -1631,12 +1632,246 @@ function V.describe(m, env)
 		nx.links = cardLinks(d)
 	end
 	d.tabs = tabsOf(d)
-	if nx and #nx.mats > V.MAX_MATS then
-		for k = #nx.mats, V.MAX_MATS + 1, -1 do
-			nx.mats[k] = nil
+	-- a step row's left click previews it on the card; step 1 is the card itself
+	for _, r in ipairs(d.later) do
+		if r.n then
+			r.preview = { id = "preview", step = r.n, enabled = true, label = "Preview this step" }
+			r.selected = opts.preview == r.n or nil
 		end
 	end
+	local total = p and #p.steps or 0
+	local pi = opts.preview
+	if p and nx and type(pi) == "number" and pi >= 2 and pi <= total then
+		local pc = nextCard(p.steps[pi], env, listed)
+		pc.links = nx.links
+		pc.actions = V.previewActions(p.steps[pi], env)
+		pc.previewing = true
+		d.now, d.next = nx, pc
+		d.pager = V.pager(pi, total)
+		nx = pc
+	end
+	if nx then
+		V.foldMats(nx, opts.matsOpen == nx.key)
+		nx.why = V.whyRow(nx, opts.whyOpen == nx.key)
+		nx.bar = V.actionBar(nx)
+	end
 	return d
+end
+
+------------------------------------------------------------------------------------------------- Plan tab controls
+
+-- Cuts the card's reagent rows to V.MATS_FOLD unless `open`, and sets card.matsToggle (the expander under them):
+-- "3 more reagents" folded, "Fewer reagents" open, nil when all fit. card.allMats keeps the full count.
+function V.foldMats(card, open)
+	local n = #card.mats
+	card.allMats = n
+	if n <= V.MATS_FOLD then
+		card.matsToggle = nil
+		return card
+	end
+	local toggle = { id = "mats", key = card.key, enabled = true }
+	if open then
+		toggle.label = "Fewer reagents"
+	else
+		local hidden = n - V.MATS_FOLD
+		for k = n, V.MATS_FOLD + 1, -1 do
+			card.mats[k] = nil
+		end
+		toggle.label = ("%d more reagent%s"):format(hidden, hidden == 1 and "" or "s")
+	end
+	card.matsToggle = toggle
+	return card
+end
+
+-- The Why row: the card's notes, its plain "other way" lines (only without the Use-this rows), the stock or skip
+-- option and the tags, as { lines = { { text, color } }, more, toggle }. Folded it shows the first line and a "+N"
+-- toggle; open it shows them all with "less". nil when the card has nothing to say.
+function V.whyRow(card, open)
+	local all = {}
+	for _, n in ipairs(card.notes or {}) do
+		all[#all + 1] = { text = n, color = "bone" }
+	end
+	if not card.otherRows then
+		for _, o in ipairs(card.others or {}) do
+			all[#all + 1] = { text = o, color = "ash" }
+		end
+	end
+	if card.alt then
+		all[#all + 1] = { text = card.alt, color = "bone" }
+	end
+	if card.tags then
+		all[#all + 1] = { text = card.tags, color = "ash" }
+	end
+	if #all == 0 then
+		return nil
+	end
+	local row = { lines = all, more = #all - 1, open = open and #all > 1 or false }
+	if #all > 1 then
+		row.toggle = { id = "why", key = card.key, enabled = true, label = open and "less" or ("+%d"):format(#all - 1) }
+		if not open then
+			row.lines = { all[1] }
+		end
+	end
+	return row
+end
+
+-- The sticky action bar under the Plan tab's scroll area: rows of the card's actions, { { mail }, { buy },
+-- { craft, open } } with the empty rows left out. A preview card's row holds Show recipe and the inert "Step 1
+-- comes first". nil when the card has no action.
+function V.actionBar(card)
+	local by = {}
+	for _, a in ipairs(card.actions or {}) do
+		by[a.id] = by[a.id] or a
+	end
+	local rows = {}
+	local mail = by.mailQueue or by.mailUnqueue
+	if mail then
+		rows[#rows + 1] = { mail }
+	end
+	if by.buy then
+		rows[#rows + 1] = { by.buy }
+	end
+	local last = {}
+	last[#last + 1] = by.craft or by.now
+	last[#last + 1] = by.open
+	if #last > 0 then
+		rows[#rows + 1] = last
+	end
+	return #rows > 0 and rows or nil
+end
+
+-- The buttons of a previewed step: Show recipe when the row offers it, and an inert "Step 1 comes first" (nothing
+-- for a later step is crafted, bought or mailed from the preview).
+function V.previewActions(st, env)
+	local out = {
+		{
+			id = "now",
+			enabled = false,
+			label = "Step 1 comes first",
+			tip = "This is a later step. Back to now shows what to do first.",
+		},
+	}
+	local open = V.rowOpen(st, env)
+	if open then
+		open.label, open.tip = "Show recipe", nil
+		out[#out + 1] = open
+	end
+	return out
+end
+
+-- The pager over a previewed card: "Step 3 of 9" with < and > (step 1 is "now") and "Back to now".
+function V.pager(i, total)
+	return {
+		index = i,
+		total = total,
+		text = ("Step %d of %d"):format(i, total),
+		prev = { id = "preview", step = i - 1, enabled = i > 1, label = "<", tip = "The step before" },
+		next = { id = "preview", step = i + 1, enabled = i < total, label = ">", tip = "The step after" },
+		back = { id = "preview", step = 1, enabled = true, label = "Back to now" },
+	}
+end
+
+-- The right-click menu of a step row: { title, items = { action } }, every item an action UI.act runs.
+function V.stepMenu(row, previewing)
+	local items = {}
+	if row.preview then
+		items[#items + 1] = row.preview
+	end
+	if row.open then
+		items[#items + 1] = { id = "open", spell = row.open.spell, enabled = true, label = "Show recipe" }
+	end
+	if previewing then
+		items[#items + 1] = { id = "preview", step = 1, enabled = true, label = "Back to now" }
+	end
+	return { title = row.n and ("Step %d"):format(row.n) or row.text, items = items }
+end
+
+-- A collapsible section head: { kind = "head", key, text, collapsed, action }. The state is saved per account
+-- (SkillupHelperDB.ui.collapsed[key]); `fallback` is the state of a section the user never touched.
+local function section(out, key, text, collapsed, color, fallback)
+	local c = collapsed and collapsed[key]
+	if c == nil then
+		c = fallback or false
+	end
+	out[#out + 1] = {
+		kind = "head",
+		key = key,
+		text = text,
+		color = color,
+		collapsed = c,
+		action = { id = "section", key = key, collapsed = c, enabled = true, label = text },
+	}
+	return c
+end
+
+-- The Shopping tab as list items: the total and the trip button, a section per place and city, then Stock (folded
+-- until opened). collapsed: SkillupHelperDB.ui.collapsed.
+function V.shoppingItems(s, collapsed)
+	local out = {}
+	if s.title then
+		out[#out + 1] = { kind = "line", text = s.title, color = "bone", size = 12 }
+	end
+	if s.tripLine then
+		out[#out + 1] = { kind = "line", text = s.tripLine }
+	end
+	if s.trip then
+		out[#out + 1] = { kind = "button", action = s.trip, accent = s.trip.id == "trip" and "gold" or "ash" }
+	end
+	for _, b in ipairs(s.blocks or {}) do
+		out[#out + 1] = { kind = "gap", h = 6 }
+		local key = ("shop:%s:%s"):format(tostring(b.place or "trip"), tostring(b.city or ""))
+		if not section(out, key, b.title, collapsed) then
+			for _, r in ipairs(b.rows) do
+				out[#out + 1] = { kind = "row", name = r.name, right = r.right, mark = "gold" }
+			end
+		end
+	end
+	if #(s.stock or {}) > 0 then
+		out[#out + 1] = { kind = "gap", h = 10 }
+		if not section(out, "stock", ("Stock (%d)"):format(#s.stock), collapsed, "ash", true) then
+			for _, line in ipairs(s.stock) do
+				out[#out + 1] = { kind = "line", text = line, size = 10 }
+			end
+		end
+	end
+	if s.empty then
+		out[#out + 1] = { kind = "line", text = s.empty }
+	end
+	return out
+end
+
+-- The Alts tab: a section per character, a row per reagent with Queue / Queued, Queue all; then the mail queued to
+-- you. Queue all stays visible under a folded character.
+function V.altsItems(a, collapsed)
+	local out = {}
+	if a.title then
+		out[#out + 1] = { kind = "line", text = a.title, color = "bone", size = 12 }
+	end
+	for _, g in ipairs(a.groups) do
+		out[#out + 1] = { kind = "gap", h = 6 }
+		local text = ("%s (%d)"):format(g.who, #g.rows)
+		if not section(out, "alt:" .. tostring(g.who), text, collapsed) then
+			for _, r in ipairs(g.rows) do
+				out[#out + 1] = { kind = "row", name = r.name, right = r.right, tone = r.tone, action = r.action }
+			end
+		end
+		if g.all then
+			out[#out + 1] = { kind = "button", action = g.all, accent = "gold" }
+		end
+	end
+	if #a.incoming > 0 then
+		out[#out + 1] = { kind = "gap", h = 10 }
+		local text = ("In the mail queue (%d)"):format(#a.incoming)
+		if not section(out, "incoming", text, collapsed, "ash") then
+			for _, line in ipairs(a.incoming) do
+				out[#out + 1] = { kind = "line", text = line, size = 10 }
+			end
+		end
+	end
+	if a.empty then
+		out[#out + 1] = { kind = "line", text = a.empty }
+	end
+	return out
 end
 
 -- The description as plain lines (tests, and a readable dump for bug reports).
@@ -1658,6 +1893,9 @@ function V.text(d)
 	add(d.header.stale)
 	add(d.notice)
 	local nx = d.next
+	if d.pager then
+		add(("< %s > [Back to now]"):format(d.pager.text))
+	end
 	if nx then
 		add(nx.name)
 		add(table.concat({ nx.verb or "", nx.gain or "" }, ", "))

@@ -15,7 +15,9 @@ local DOCK_GAP, TAB_GAP = 2, 4
 local WHITE = "Interface\\Buttons\\WHITE8X8"
 local QUESTION = 134400 -- INV_Misc_QuestionMark
 local HANDLE_ICON = "Interface\\Icons\\INV_Misc_Note_01"
-local CARD_LINES = 6 -- note lines under a card (notes, other ways, the stock option, tags); the rest join the last
+local BAR_H, BAR_GAP = 24, 6 -- the sticky action bar's buttons and the space between its rows
+local PAGER_H = 20 -- the step pager over a previewed card
+local ARROW = "Interface\\ChatFrame\\ChatFrameExpandArrow" -- a right-pointing arrow, turned for an open section
 
 -- Panel diagnostics for the selftest.
 UI.stats = {
@@ -271,6 +273,21 @@ function UI.showRecipe(spell)
 	return ok2
 end
 
+-- Panel state that lives until the step changes: preview = the step index shown on the card (nil: step 1), mats /
+-- why = the card key whose reagents or Why row are open. A skill-up or another profession clears it (UI.show).
+UI.state = {}
+
+-- The sections the user folded (SkillupHelperDB.ui.collapsed: key -> true or false), created on first use.
+local function savedCollapsed()
+	local db = SkillupHelperDB
+	if type(db) ~= "table" then
+		return {}
+	end
+	db.ui = type(db.ui) == "table" and db.ui or {}
+	db.ui.collapsed = type(db.ui.collapsed) == "table" and db.ui.collapsed or {}
+	return db.ui.collapsed
+end
+
 -- A click on a card button. Each client call runs under pcall and leaves its result in UI.stats (selftest ui).
 -- Only ever called from a button's OnClick: a craft needs the user's own click.
 function UI.act(a)
@@ -284,6 +301,22 @@ function UI.act(a)
 	end
 	if type(a) == "table" and a.id == "buy" then
 		return a.enabled and buy(a) or false
+	end
+	-- panel state only (no craft, purchase or mail): preview a step, open the mats or the Why row, fold a section
+	if type(a) == "table" and (a.id == "preview" or a.id == "mats" or a.id == "why" or a.id == "section") then
+		if not a.enabled then
+			return false
+		end
+		stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
+		local s = UI.state
+		if a.id == "preview" then
+			s.preview = (type(a.step) == "number" and a.step >= 2) and a.step or nil
+		elseif a.id == "mats" or a.id == "why" then
+			s[a.id] = s[a.id] ~= a.key and a.key or nil
+		else
+			savedCollapsed()[a.key] = not a.collapsed
+		end
+		return UI.redraw()
 	end
 	if type(a) == "table" and type(a.id) == "string" and a.id:sub(1, 4) == "mail" and ns.MailUI then
 		stats.clicks[a.id] = (stats.clicks[a.id] or 0) + 1
@@ -768,14 +801,15 @@ local function newCard(parent)
 	card.cost = text(card, "GameFontHighlightSmall", 11)
 	card.cost:SetWidth(INNER - PAD * 2 - 46)
 	card.mats = {}
-	card.lines = {}
-	for k = 1, CARD_LINES do
-		card.lines[k] = text(card, "GameFontHighlightSmall", 11)
-		card.lines[k]:SetWidth(INNER - PAD * 2)
-	end
+	card.lines = {} -- the Why row's lines, made as needed
 	card.links = {}
-	card.buttons = { buy = newButton(card), craft = newButton(card), open = newButton(card) }
-	card.buttons.mail = newButton(card)
+	card.matsToggle = newButton(card)
+	card.matsToggle.label:SetJustifyH("LEFT")
+	card.matsToggle:Hide()
+	card.whyToggle = newButton(card)
+	card.whyToggle:SetSize(40, 14)
+	card.whyToggle.label:SetFontHeight(10)
+	card.whyToggle:Hide()
 	card.guide = newStrip(card)
 
 	-- slide: in from the right with a fade, out to the left
@@ -868,6 +902,20 @@ local function fillCard(card, c, consumed)
 	for i = #c.mats + 1, #card.mats do
 		card.mats[i]:Hide()
 	end
+	-- the mats expander: "3 more reagents" past View.MATS_FOLD rows, "Fewer reagents" when open
+	local mt = card.matsToggle
+	if c.matsToggle then
+		setButton(mt, c.matsToggle, ns.View.RGB.ash)
+		mt.style = "quiet"
+		paintButton(mt)
+		mt.label:SetText(c.matsToggle.label .. "  >")
+		mt:SetSize(math.max(90, (mt.label:GetStringWidth() or 0) + 18), 16)
+		mt:ClearAllPoints()
+		mt:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 8, -top - 1)
+		top = top + 18
+	else
+		mt:Hide()
+	end
 
 	-- link rows: one per tab that holds more for this step (Shopping, Alts); a click switches to that tab
 	for i, l in ipairs(c.links or {}) do
@@ -892,41 +940,36 @@ local function fillCard(card, c, consumed)
 		card.links[i]:Hide()
 	end
 
-	local extra = {}
-	for _, n in ipairs(c.notes) do
-		extra[#extra + 1] = { n, "bone" }
-	end
-	-- the alternatives are rows with a "Use this" button below (c.otherRows); plain lines only without them
-	if not c.otherRows then
-		for _, o in ipairs(c.others or {}) do
-			extra[#extra + 1] = { o, "ash" }
-		end
-	end
-	if c.alt then
-		extra[#extra + 1] = { c.alt, "bone" }
-	end
-	if c.tags then
-		extra[#extra + 1] = { c.tags, "ash" }
-	end
-	local joined = {}
-	for k = 1, CARD_LINES do
+	-- the Why row: the first note with "+N" at its right; open, every note, the plain other ways, the stock option
+	-- and the tags (View.whyRow)
+	local why = c.why
+	local wt = card.whyToggle
+	wt:Hide()
+	for k = 1, math.max(#card.lines, why and #why.lines or 0) do
 		local fs = card.lines[k]
-		local e = extra[k]
-		if k == CARD_LINES and #extra > CARD_LINES then
-			for j = CARD_LINES, #extra do
-				joined[#joined + 1] = extra[j][1]
-			end
-			e = { table.concat(joined, "; "), "ash" }
+		local e = why and why.lines[k]
+		if e and not fs then
+			fs = text(card, "GameFontHighlightSmall", 11)
+			card.lines[k] = fs
 		end
 		if e then
 			top = top + (k == 1 and 6 or 3)
 			fs:ClearAllPoints()
 			fs:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
-			fs:SetText(e[1])
-			setColor(fs, e[2])
+			-- the first line leaves room for the toggle at its right
+			fs:SetWidth(INNER - PAD * 2 - ((k == 1 and why.toggle) and 44 or 0))
+			fs:SetText(e.text)
+			setColor(fs, e.color)
 			fs:Show()
-			top = top + fs:GetStringHeight()
-		else
+			if k == 1 and why.toggle then
+				setButton(wt, why.toggle, ns.View.RGB.ash)
+				wt.style = "quiet"
+				paintButton(wt)
+				wt:ClearAllPoints()
+				wt:SetPoint("TOPRIGHT", card, "TOPRIGHT", -PAD, -top + 1)
+			end
+			top = top + math.max(fs:GetStringHeight(), (k == 1 and why.toggle) and 14 or 0)
+		elseif fs then
 			fs:Hide()
 		end
 	end
@@ -1016,20 +1059,14 @@ local function fillCard(card, c, consumed)
 		row.hide:Hide()
 	end
 
-	-- the buttons: Buy (vendor reagents the step lacks) takes a row of its own above; Craft takes the next row, Show
-	-- recipe sits at its right when the view offers it
-	local craft, open, buyButton = card.buttons.craft, card.buttons.open, card.buttons.buy
-	craft:Hide()
-	open:Hide()
-	buyButton:Hide()
-	card.buttons.mail:Hide()
+	-- the card's actions sit in the sticky bar under the scroll area (drawBar); the strip only needs to know of Buy
 	local byId = {}
 	for _, a in ipairs(c.actions or {}) do
 		byId[a.id] = a
 	end
 
-	-- the guide strip: where to go for this step, after the notes and before the buttons
-	local gs = ns.GuideUI and ns.GuideUI.strip and ns.GuideUI.strip() or nil
+	-- the guide strip: where to go for this step, after the notes; a previewed later step has none
+	local gs = not c.previewing and ns.GuideUI and ns.GuideUI.strip and ns.GuideUI.strip() or nil
 	local collapsed = gs ~= nil and gs.phase == "here" and byId.buy ~= nil
 	card.stripShape = gs and (stripHeight(gs, collapsed) .. ":" .. tostring(byId.buy ~= nil)) or "none"
 	card.stripBuy = byId.buy ~= nil
@@ -1047,42 +1084,6 @@ local function fillCard(card, c, consumed)
 		card.guide:Hide()
 	end
 
-	-- the mail queue: reagents the plan takes from alts (MailUI.lua)
-	local ma = byId.mailQueue or byId.mailUnqueue
-	if ma then
-		local mb = card.buttons.mail
-		top = top + 10
-		mb:ClearAllPoints()
-		mb:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
-		mb:SetWidth(INNER - 2 * PAD - 2)
-		setButton(mb, ma, ma.id == "mailQueue" and ns.View.RGB.gold or ns.View.RGB.ash)
-		top = top + 20
-	end
-	if byId.buy then
-		top = top + 10
-		buyButton:ClearAllPoints()
-		buyButton:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
-		buyButton:SetWidth(INNER - 2 * PAD - 2)
-		setButton(buyButton, byId.buy, ns.View.RGB.gold)
-		top = top + 20 -- the Craft row adds its 10 on top: 6 px between the two buttons
-	end
-	if byId.craft then
-		top = top + 10
-		craft:ClearAllPoints()
-		craft:SetPoint("TOPLEFT", card, "TOPLEFT", PAD + 2, -top)
-		local row = INNER - 2 * PAD - 2
-		if byId.open then
-			open:ClearAllPoints()
-			open:SetPoint("TOPRIGHT", card, "TOPRIGHT", -PAD, -top)
-			open:SetWidth(96)
-			craft:SetWidth(row - 96 - 6)
-			setButton(open, byId.open, ns.View.RGB.bone)
-		else
-			craft:SetWidth(row)
-		end
-		setButton(craft, byId.craft, ns.View.RGB[col] or ns.View.RGB.bone)
-		top = top + 24
-	end
 	UI.stats.actionsWhy = c.actionsWhy
 	local h = top + PAD
 	card:SetHeight(h)
@@ -1091,9 +1092,52 @@ end
 
 ---------------------------------------------------------------------------------------------------------- later rows
 
+-- The right-click menu of a step row (View.stepMenu): every entry runs UI.act, like a button.
+local function stepMenu(row)
+	if not MenuUtil or not row.info then
+		return
+	end
+	local m = ns.View.stepMenu(row.info, UI.last and UI.last.pager ~= nil)
+	UI.stats.clicks.stepMenu = (UI.stats.clicks.stepMenu or 0) + 1
+	MenuUtil.CreateContextMenu(row, function(_, root)
+		root:CreateTitle(m.title)
+		for _, a in ipairs(m.items) do
+			root:CreateButton(a.label, function()
+				ns.guard("click", UI.act, a)
+			end)
+		end
+	end)
+end
+
 local function newLaterRow(parent)
-	local row = CreateFrame("Frame", nil, parent)
+	local row = CreateFrame("Button", nil, parent)
 	row:SetSize(INNER, 18)
+	row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	row.hover = row:CreateTexture(nil, "BACKGROUND")
+	row.hover:SetAllPoints()
+	fill(row.hover, "line", 0.5)
+	row.hover:Hide()
+	row.sel = row:CreateTexture(nil, "BACKGROUND", nil, 1)
+	row.sel:SetAllPoints()
+	row.sel:Hide()
+	row:SetScript("OnEnter", function(self)
+		self.hover:Show()
+		if self.info and self.info.preview then
+			showTip(self, "Click: preview this step. Right-click: more.")
+		end
+	end)
+	row:SetScript("OnLeave", function(self)
+		self.hover:Hide()
+		hideTip(self)
+	end)
+	row:SetScript("OnClick", function(self, button)
+		hideTip(self)
+		if button == "RightButton" then
+			ns.guard("step menu", stepMenu, self)
+		elseif self.info and self.info.preview then
+			ns.guard("click", UI.act, self.info.preview)
+		end
+	end)
 	row.pip = row:CreateTexture(nil, "ARTWORK")
 	row.pip:SetSize(6, 6)
 	row.pip:SetPoint("LEFT", 4, 0)
@@ -1172,7 +1216,7 @@ function UI.fit()
 	f:SetSize(fit.scroll and WIDTH or NARROW, fit.height)
 	f.scroll:ClearAllPoints()
 	f.scroll:SetPoint("TOPLEFT", PAD - 2, -f.top)
-	f.scroll:SetPoint("BOTTOMRIGHT", fit.scroll and -26 or -(PAD - 2), 8)
+	f.scroll:SetPoint("BOTTOMRIGHT", fit.scroll and -26 or -(PAD - 2), 8 + (f.barShownH or 0))
 	if f.scroll.ScrollBar then
 		f.scroll.ScrollBar:SetShown(fit.scroll)
 	end
@@ -1388,10 +1432,43 @@ function UI.create()
 	f.thenLabel = text(child, "GameFontNormalSmall", 11)
 	f.thenLabel:SetText("Then")
 	f.later = {}
+
+	-- the step pager over a previewed card: [<] Step 3 of 9 [>]   [Back to now]
+	local pg = CreateFrame("Frame", nil, child)
+	pg:SetSize(INNER, PAGER_H)
+	pg.prev = newButton(pg)
+	pg.prev:SetSize(22, PAGER_H)
+	pg.prev:SetPoint("LEFT", 0, 0)
+	pg.text = text(pg, "GameFontHighlight", 12)
+	pg.text:SetPoint("LEFT", pg.prev, "RIGHT", 8, 0)
+	pg.text:SetJustifyV("MIDDLE")
+	pg.text:SetWordWrap(false)
+	pg.next = newButton(pg)
+	pg.next:SetSize(22, PAGER_H)
+	pg.next:SetPoint("LEFT", pg.text, "RIGHT", 8, 0)
+	pg.back = newButton(pg)
+	pg.back:SetSize(96, PAGER_H)
+	pg.back:SetPoint("RIGHT", 0, 0)
+	pg:Hide()
+	f.pager = pg
+
+	-- the sticky action bar: under the scroll area, Plan tab only, a 1-px rule above its buttons
+	local ab = CreateFrame("Frame", nil, f)
+	ab:SetPoint("BOTTOMLEFT", PAD, 8)
+	ab:SetPoint("BOTTOMRIGHT", -PAD, 8)
+	ab:SetHeight(1)
+	ab.rule = ab:CreateTexture(nil, "BORDER")
+	ab.rule:SetHeight(1)
+	ab.rule:SetPoint("TOPLEFT", -PAD + 1, 0)
+	ab.rule:SetPoint("TOPRIGHT", PAD - 1, 0)
+	fill(ab.rule, "line")
+	ab.buttons = {}
+	ab:Hide()
+	f.actions, f.barH = ab, 0
 	-- the other tabs draw from pools of lines, rows and buttons (UI.drawList)
 	for _, id in ipairs({ "shopping", "alts", "more" }) do
 		local v = f.views[id]
-		v.pool = { fs = {}, rows = {}, buttons = {}, rules = {} }
+		v.pool = { fs = {}, rows = {}, buttons = {}, rules = {}, heads = {} }
 	end
 
 	-- the handle: what stays at the panel's corner while it is hidden, and brings it back with one click
@@ -1496,7 +1573,7 @@ end
 -- the view's height. Frames come from the view's pools.
 function UI.drawList(v, items)
 	local pool = v.pool
-	local used = { fs = 0, rows = 0, buttons = 0 }
+	local used = { fs = 0, rows = 0, buttons = 0, heads = 0 }
 	local y = 0
 	local function take(kind, make)
 		used[kind] = used[kind] + 1
@@ -1510,6 +1587,45 @@ function UI.drawList(v, items)
 	for _, it in ipairs(items) do
 		if it.kind == "gap" then
 			y = y + (it.h or 8)
+		elseif it.kind == "head" and it.action then
+			-- a collapsible section head: an arrow (right folded, down open) and the title; a click folds or opens it
+			local hb = take("heads", function()
+				local b = CreateFrame("Button", nil, v)
+				b:SetHeight(16)
+				b.arrow = b:CreateTexture(nil, "ARTWORK")
+				b.arrow:SetSize(10, 10)
+				b.arrow:SetPoint("LEFT", 0, 0)
+				b.arrow:SetTexture(ARROW)
+				b.label = text(b, "GameFontNormalSmall", 11)
+				b.label:SetPoint("LEFT", 14, 0)
+				b.label:SetPoint("RIGHT", 0, 0)
+				b.label:SetJustifyV("MIDDLE")
+				b.label:SetWordWrap(false)
+				b.hover = b:CreateTexture(nil, "BACKGROUND")
+				b.hover:SetAllPoints()
+				fill(b.hover, "line", 0.5)
+				b.hover:Hide()
+				b:SetScript("OnEnter", function(self)
+					self.hover:Show()
+				end)
+				b:SetScript("OnLeave", function(self)
+					self.hover:Hide()
+				end)
+				b:SetScript("OnClick", function(self)
+					ns.guard("click", UI.act, self.action)
+				end)
+				return b
+			end)
+			hb.action = it.action
+			hb:ClearAllPoints()
+			hb:SetPoint("TOPLEFT", 4, -y)
+			hb:SetWidth(INNER - 8)
+			hb.label:SetText(it.text)
+			setColor(hb.label, it.color or "gold")
+			hb.arrow:SetRotation(it.collapsed and 0 or -math.pi / 2)
+			hb.arrow:SetVertexColor(rgb(it.color or "gold"))
+			hb:Show()
+			y = y + 16 + 3
 		elseif it.kind == "head" or it.kind == "line" then
 			local fs = take("fs", function()
 				return text(v, "GameFontHighlightSmall", 11)
@@ -1576,65 +1692,50 @@ function UI.drawList(v, items)
 	return math.max(10, y + 4)
 end
 
--- The Shopping tab as list items: the total and the trip button, a block per place and city, then Stock.
-local function shoppingItems(s)
-	local out = {}
-	if s.title then
-		out[#out + 1] = { kind = "line", text = s.title, color = "bone", size = 12 }
-	end
-	if s.tripLine then
-		out[#out + 1] = { kind = "line", text = s.tripLine }
-	end
-	if s.trip then
-		out[#out + 1] = { kind = "button", action = s.trip, accent = s.trip.id == "trip" and "gold" or "ash" }
-	end
-	for _, b in ipairs(s.blocks or {}) do
-		out[#out + 1] = { kind = "gap", h = 6 }
-		out[#out + 1] = { kind = "head", text = b.title }
-		for _, r in ipairs(b.rows) do
-			out[#out + 1] = { kind = "row", name = r.name, right = r.right, mark = "gold" }
+-- The sticky action bar under the scroll area (View.actionBar rows): full-width rows for Queue mail and Buy, then
+-- Craft with Show recipe at its right. Sets f.barH (0 without a bar); UI.showView shows it on the Plan tab only.
+local function drawBar(f, rows, color)
+	local bar = f.actions
+	local used = 0
+	local y = 7 -- under the 1-px rule
+	for _, row in ipairs(rows or {}) do
+		local right = nil
+		for k = #row, 1, -1 do
+			local a = row[k]
+			used = used + 1
+			local b = bar.buttons[used]
+			if not b then
+				b = newButton(bar)
+				bar.buttons[used] = b
+			end
+			local accent = (a.id == "mailQueue" or a.id == "buy") and ns.View.RGB.gold
+				or (a.id == "open" or a.id == "mailUnqueue") and ns.View.RGB.bone
+				or ns.View.RGB[color or "bone"]
+				or ns.View.RGB.bone
+			setButton(b, a, accent)
+			b:ClearAllPoints()
+			if right then
+				-- the wide button left of the narrow one
+				b:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, -y)
+				b:SetPoint("TOPRIGHT", right, "TOPLEFT", -6, 0)
+			elseif #row > 1 then
+				b:SetPoint("TOPRIGHT", bar, "TOPRIGHT", 0, -y)
+				b:SetWidth(96)
+				right = b
+			else
+				b:SetPoint("TOPLEFT", bar, "TOPLEFT", 0, -y)
+				b:SetPoint("TOPRIGHT", bar, "TOPRIGHT", 0, -y)
+			end
+			b:SetHeight(BAR_H)
 		end
+		y = y + BAR_H + BAR_GAP
 	end
-	if #(s.stock or {}) > 0 then
-		out[#out + 1] = { kind = "gap", h = 10 }
-		out[#out + 1] = { kind = "head", text = ("Stock (%d)"):format(#s.stock), color = "ash" }
-		for _, line in ipairs(s.stock) do
-			out[#out + 1] = { kind = "line", text = line, size = 10 }
-		end
+	for i = used + 1, #bar.buttons do
+		bar.buttons[i]:Hide()
 	end
-	if s.empty then
-		out[#out + 1] = { kind = "line", text = s.empty }
-	end
-	return out
-end
-
--- The Alts tab: a section per character, a row per reagent with Queue / Queued, Queue all; then the mail queued to you.
-local function altsItems(a)
-	local out = {}
-	if a.title then
-		out[#out + 1] = { kind = "line", text = a.title, color = "bone", size = 12 }
-	end
-	for _, g in ipairs(a.groups) do
-		out[#out + 1] = { kind = "gap", h = 6 }
-		out[#out + 1] = { kind = "head", text = g.who }
-		for _, r in ipairs(g.rows) do
-			out[#out + 1] = { kind = "row", name = r.name, right = r.right, tone = r.tone, action = r.action }
-		end
-		if g.all then
-			out[#out + 1] = { kind = "button", action = g.all, accent = "gold" }
-		end
-	end
-	if #a.incoming > 0 then
-		out[#out + 1] = { kind = "gap", h = 10 }
-		out[#out + 1] = { kind = "head", text = "In the mail queue", color = "ash" }
-		for _, line in ipairs(a.incoming) do
-			out[#out + 1] = { kind = "line", text = line, size = 10 }
-		end
-	end
-	if a.empty then
-		out[#out + 1] = { kind = "line", text = a.empty }
-	end
-	return out
+	f.barH = used > 0 and (y - BAR_GAP + 2) or 0
+	bar:SetHeight(math.max(1, f.barH))
+	UI.stats.bar = { rows = rows and #rows or 0, buttons = used }
 end
 
 local function moreItems(m)
@@ -1667,6 +1768,11 @@ function UI.showView(id)
 		f.shownView = id
 	end
 	f.contentHeight = f.heights and f.heights[id] or 10
+	-- the action bar belongs to the Plan tab: it never scrolls, and the other tabs give its room back
+	local barH = id == "plan" and f.barH or 0
+	f.actions:SetShown(barH > 0)
+	f.barShownH = barH
+	f.chrome = (f.chromeBase or f.top or 0) + barH
 	UI.fit()
 	local range = f.scroll:GetVerticalScrollRange() or 0
 	f.scroll:SetVerticalScroll(math.max(0, math.min(f.offsets[id] or 0, range)))
@@ -1769,6 +1875,25 @@ function UI.draw(d, prev)
 	else
 		f.message:Hide()
 	end
+	-- the pager over a previewed later step: "< Step 3 of 9 >  Back to now"
+	local pg = f.pager
+	if d.pager then
+		pg:ClearAllPoints()
+		pg:SetPoint("TOPLEFT", 0, -y)
+		setButton(pg.prev, d.pager.prev, ns.View.RGB.bone)
+		pg.prev.style = d.pager.prev.enabled and "quiet" or "inert"
+		paintButton(pg.prev)
+		setButton(pg.next, d.pager.next, ns.View.RGB.bone)
+		pg.next.style = d.pager.next.enabled and "quiet" or "inert"
+		paintButton(pg.next)
+		pg.text:SetText(d.pager.text)
+		setColor(pg.text, "bone")
+		setButton(pg.back, d.pager.back, ns.View.RGB.gold)
+		pg:Show()
+		y = y + PAGER_H + 6
+	else
+		pg:Hide()
+	end
 	f.cards[1].home:ClearAllPoints()
 	f.cards[1].home:SetPoint("TOPLEFT", 0, -y)
 
@@ -1840,6 +1965,10 @@ function UI.draw(d, prev)
 		f.later[i] = row
 		row:ClearAllPoints()
 		row:SetPoint("TOPLEFT", 0, -y)
+		row.info = r
+		-- the previewed step wears its colour behind the row
+		fill(row.sel, r.color or "line", 0.18)
+		row.sel:SetShown(r.selected == true)
 		fill(row.pip, r.color)
 		row.pip:SetShown(r.n ~= nil)
 		row.n:SetText(r.n and tostring(r.n) or "")
@@ -1865,17 +1994,20 @@ function UI.draw(d, prev)
 
 	local heights = { plan = math.max(10, y + 4) }
 	if d.tabs then
-		heights.shopping = UI.drawList(f.views.shopping, shoppingItems(d.shopping))
-		heights.alts = UI.drawList(f.views.alts, altsItems(d.alts))
+		local collapsed = savedCollapsed()
+		heights.shopping = UI.drawList(f.views.shopping, ns.View.shoppingItems(d.shopping, collapsed))
+		heights.alts = UI.drawList(f.views.alts, ns.View.altsItems(d.alts, collapsed))
 		heights.more = UI.drawList(f.views.more, moreItems(d.more))
 	end
+	drawBar(f, d.next and d.next.bar, d.next and d.next.color)
 	for id, v in pairs(f.views) do
 		v:SetHeight(heights[id] or 10)
 		UI.stats.views[id] = { height = heights[id] }
 	end
 	f.heights = heights
-	-- header above, 8 below, and 2 of slack so a rounded string height never leaves a pixel to scroll
-	f.chrome = f.top + 8 + 2
+	-- header above, 8 below, and 2 of slack so a rounded string height never leaves a pixel to scroll; the action
+	-- bar adds its height on the Plan tab (UI.showView)
+	f.chromeBase = f.top + 8 + 2
 	-- the Plan tab starts at the top for every new step
 	if how == "advance" or how == "replace" then
 		f.offsets.plan = 0
@@ -1892,17 +2024,44 @@ function UI.show(model)
 	if not f then
 		return
 	end
-	local d = ns.View.describe(model, UI.env())
+	-- any skill-up or another profession returns the card to step 1 and folds what was open
+	local s = UI.state
+	if type(model) ~= "table" or model.skill ~= s.skill or model.profession ~= s.profession then
+		s.preview, s.mats, s.why = nil, nil, nil
+		local m = type(model) == "table" and model or {}
+		s.skill, s.profession = m.skill, m.profession
+	end
+	local d = ns.View.describe(model, UI.env(), { preview = s.preview, matsOpen = s.mats, whyOpen = s.why })
+	if s.preview and not d.pager then
+		s.preview = nil -- the plan no longer has that step
+	end
 	UI.draw(d, UI.last)
 	UI.last = d
+	UI.model = model
+	local nx = d.next
+	UI.stats.phase2 = {
+		pieces = { "actionBar", "whyRow", "matsFold", "sections", "pager", "stepMenu" },
+		bar = UI.stats.bar,
+		preview = d.pager and d.pager.index or nil,
+		whyOpen = nx and nx.why and nx.why.open or false,
+		matsHidden = nx and nx.matsToggle and (nx.allMats - #nx.mats) or 0,
+	}
+end
+
+-- Draws the last model again with the panel state changed by a click (preview, an expander, a section).
+function UI.redraw()
+	if UI.model and UI.frame then
+		UI.show(UI.model)
+	end
+	return true
 end
 
 -- The guide's tick (GuideUI, 10 Hz and on events): repaints the live card's strip in place, and redraws the panel
 -- only when the strip appears, goes, or changes height.
 function UI.guideStrip(g)
 	local f = UI.frame
-	if not f or not f:IsShown() or not UI.last or not UI.last.next then
-		return
+	if not f or not f:IsShown() or not UI.last or not UI.last.next or UI.last.pager then
+		return -- a previewed later step shows no strip
 	end
 	local card = f.cards[f.current]
 	if not card or not card.live then
