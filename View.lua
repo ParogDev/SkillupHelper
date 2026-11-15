@@ -560,6 +560,13 @@ local function nextCard(st, env, listed)
 		card.cost = ("%s a point"):format(money(st.costPt))
 	end
 	card.mats = craftMats(st, env, listed)
+	if st.resale and (st.resale.back or 0) > 0 then
+		-- "Count selling what I craft" is off: what selling would bring is information, the plan never ranks on it
+		card.resale = ("about %s back if you sell %d (not counted)"):format(
+			money(st.resale.back),
+			st.resale.crafts or 0
+		)
+	end
 	if st.rankUp then
 		local up = st.rankUp
 		card.notes[#card.notes + 1] = ("Train %s between %s and %s"):format(
@@ -595,6 +602,10 @@ local function nextCard(st, env, listed)
 	end
 	if st.committed then
 		card.notes[#card.notes + 1] = ("On your AH list: this recipe holds until %d"):format(math.floor(st.to or 0))
+	end
+	if card.resale then
+		-- last, so a tight fit drops it before anything the plan needs
+		card.notes[#card.notes + 1] = upper1(card.resale)
 	end
 	local tags = {}
 	for _, t in ipairs(st.tags or {}) do
@@ -2356,6 +2367,14 @@ function V.moreItems(more, s, env, collapsed)
 			"noAlts",
 			not s.noAlts,
 			"From TSM's inventory of your alts. Off: the plan counts this character's bags and bank only."
+		)
+		check(
+			out,
+			"Count selling what I craft",
+			s.resale == true,
+			"resale",
+			not s.resale,
+			"On: what the products sell for lowers a recipe's cost. Off: recipes are ranked by what you pay."
 		)
 	end
 	out[#out + 1] = { kind = "gap", h = 8 }

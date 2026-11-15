@@ -597,6 +597,13 @@ function P.settingsPage(s)
 		},
 		{ kind = "check", key = "recipes", label = "Suggest recipes to buy", value = not v.noRecipeBuys },
 		{ kind = "check", key = "alts", label = "Count reagents on my other characters", value = not v.noAlts },
+		{
+			kind = "check",
+			key = "resale",
+			label = "Count selling what I craft",
+			value = v.resale == true,
+			tip = "On: what the products sell for lowers a recipe's cost. Off: recipes are ranked by what you pay.",
+		},
 		{ kind = "check", key = "dungeon", label = "Plan dungeon patterns", value = not v.dungeon },
 		{ kind = "check", key = "ahPatterns", label = "Plan auction house patterns", value = not v.ahPatterns },
 		{ kind = "check", key = "special", label = "Plan special teachers", value = v.special == false },
@@ -936,6 +943,9 @@ P.SETTING = {
 	end,
 	alts = function(v)
 		return { key = "noAlts", value = not v }
+	end,
+	resale = function(v)
+		return { key = "resale", value = v and true or nil }
 	end,
 	dungeon = function(v)
 		return { key = "dungeon", value = not v }

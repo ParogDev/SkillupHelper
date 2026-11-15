@@ -333,6 +333,7 @@ function ns.settings()
 		sellShare = db and db.sellShare,
 		noRecipeBuys = db and db.noRecipeBuys,
 		noAlts = db and db.noAlts,
+		resale = db and db.resale,
 		luck = db and db.luck,
 		trips = db and db.trips,
 		exclude = db and db.exclude,
@@ -861,6 +862,7 @@ function ns.settingsView()
 		defaultEffort = ns.plan() and ns.plan().effort or ns.Planner.EFFORT,
 		noRecipeBuys = db and db.noRecipeBuys,
 		noAlts = db and db.noAlts,
+		resale = db and db.resale,
 		dungeon = ex.dungeon,
 		ahPatterns = ex.ahPatterns,
 		special = ex.special,
@@ -961,6 +963,26 @@ function ns.command(msg)
 		print(
 			off and "SkillupHelper: planning without buying recipes."
 				or "SkillupHelper: planning with recipes to buy (/skillup recipes off to stop)."
+		)
+		ns.refresh()
+		return true
+	end
+	if cmd == "resale" then
+		-- "/skillup resale on": selling what you craft counts against a recipe's cost (off, the default: ranked by
+		-- what you pay)
+		local word = arg:lower()
+		if word ~= "on" and word ~= "off" then
+			print(("SkillupHelper: /skillup resale on|off (now %s)."):format(db and db.resale and "on" or "off"))
+			return true
+		end
+		if not db then
+			print("SkillupHelper: SavedVariables not loaded yet, setting not changed.")
+			return true
+		end
+		db.resale = word == "on" or nil
+		print(
+			db.resale and "SkillupHelper: selling what you craft now counts against a recipe's cost."
+				or "SkillupHelper: recipes ranked by what you pay; selling what you craft does not count."
 		)
 		ns.refresh()
 		return true

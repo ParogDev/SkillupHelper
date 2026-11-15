@@ -364,6 +364,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 	end
 	local effort = settings.effort or (plan and plan.effort) or ns.Planner.EFFORT
 	local noRecipeBuys = settings.noRecipeBuys == true
+	local resale = settings.resale == true
 	local luck = settings.luck or ns.Planner.LUCK
 	local key = table.concat({
 		skill,
@@ -371,6 +372,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		pc.stamp,
 		effort,
 		tostring(noRecipeBuys),
+		tostring(resale),
 		luck,
 		nLearned,
 		learnedKey,
@@ -402,6 +404,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 			product = pc.product,
 			effort = effort,
 			noRecipeBuys = noRecipeBuys,
+			resale = resale,
 			luck = luck,
 		})
 		bc = { key = key, ctx = ctx, baseline = ns.Planner.baseline(ctx) }
@@ -917,6 +920,7 @@ function S.costOf(plan, id, prof, own, settings)
 		effort = settings.effort or plan.effort,
 		luck = settings.luck,
 		recipeItems = not settings.noRecipeBuys,
+		resale = settings.resale == true,
 	})
 	if not ok then
 		return nil, from, to, "planner failed: " .. tostring(r)

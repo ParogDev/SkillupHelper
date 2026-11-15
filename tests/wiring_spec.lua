@@ -704,6 +704,7 @@ describe("Settings page", function()
 		{ "luck 95", "luck", 95 },
 		{ "effort 30", "effort", 30 },
 		{ "recipes off", "recipes", false },
+		{ "resale on", "resale", true },
 		{ "exclude dungeon", "dungeon", false },
 		{ "exclude ahpatterns", "ahPatterns", false },
 		{ "exclude special", "special", true },
@@ -715,6 +716,7 @@ describe("Settings page", function()
 			luck = db.luck,
 			effort = db.effort,
 			noRecipeBuys = db.noRecipeBuys,
+			resale = db.resale,
 			exclude = {
 				dungeon = db.exclude.dungeon,
 				ahPatterns = db.exclude.ahPatterns,
