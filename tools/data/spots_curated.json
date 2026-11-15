@@ -1,0 +1,64 @@
+{
+  "about": [
+    "Hand-kept additions to Data/Spots.lua, read by tools/gen_spots.py. Nothing here comes from a data file.",
+    "quests[skill][A|H]: who starts the class quest; the generator finds the NPC's position by name.",
+    "zoneOf[target key] = uiMap: a border the map data gets wrong.",
+    "spots[spot id] = { area, note, indoor }: keyed by the ids the generator writes; an id it no longer writes is an error.",
+    "manual[skill] = [ spot, ... ]: spots written out by hand (id, map, zone, x, y required), copied as they are."
+  ],
+  "quests": {
+    "633": {
+      "A": { "quest": 2281, "npc": "Renzik \"The Shiv\"" },
+      "H": { "quest": 2382, "npc": "Zando'zan" }
+    }
+  },
+  "zoneOf": {
+    "venture-co-strongbox-1": 1413
+  },
+  "spots": {
+    "lock:redridge-mountains:46-45": {
+      "area": "Alther's Mill",
+      "note": "Practice Lockboxes (skill 1) and Lucius's Lockbox (25). Alliance quest 2281 sends you here."
+    },
+    "lock:the-barrens:65-45": {
+      "area": "Merchant Coast",
+      "note": "On the ship off the coast: Buccaneer's Strongboxes (skill 1)."
+    },
+    "lock:redridge-mountains:40-60": {
+      "area": "Lake Everstill",
+      "note": "Waterlogged Footlockers, underwater."
+    },
+    "lock:ashenvale:11-22": {
+      "area": "Zoram Strand",
+      "note": "Waterlogged Footlockers: skill 70 and 110 mixed."
+    },
+    "lock:stonetalon-mountains:67-51": { "area": "Windshear Crag" },
+    "lock:stonetalon-mountains:73-60": { "area": "Windshear Crag" },
+    "lock:hillsbrad-foothills:78-42": { "area": "Durnholde Keep" },
+    "lock:wetlands:17-36": { "note": "The murloc camps." },
+    "lock:badlands:41-28": {
+      "area": "Angor Fortress",
+      "note": "Battered Footlockers upstairs, Dented downstairs."
+    },
+    "lock:desolace:35-19": { "area": "Sar'theris Strand" },
+    "lock:searing-gorge:41-39": {
+      "area": "The Slag Pit",
+      "note": "The skill 225 boxes are on the upper level."
+    },
+    "lock:tanaris:71-47": { "area": "Lost Rigger Cove" },
+    "lock:tanaris:74-46": { "area": "Lost Rigger Cove" },
+    "lock:azshara:62-51": { "note": "Spread across the zone: one long route, not a camp." },
+    "lock:eastern-plaguelands:72-69": { "area": "Tyr's Hand" },
+    "lock:dun-morogh:21-29": { "note": "Gnomeregan. Use Pick Lock on the door, not right-click." },
+    "lock:tirisfal-glades:85-31": { "note": "Scarlet Monastery. Use Pick Lock on the door, not right-click." },
+    "lock:western-plaguelands:69-73": { "note": "Scholomance. Use Pick Lock on the door, not right-click." },
+    "lock:eastern-plaguelands:41-17": { "note": "Stratholme. Use Pick Lock on the door, not right-click." },
+    "lock:feralas:65-30": { "note": "Dire Maul. Use Pick Lock on the door, not right-click." },
+    "lock:instance:gnomeregan": { "note": "Use Pick Lock on the door, not right-click." },
+    "lock:instance:scarlet-monastery": { "note": "Use Pick Lock on the door, not right-click." },
+    "lock:instance:blackrock-depths": { "note": "Use Pick Lock on the door, not right-click." },
+    "lock:instance:stratholme": { "note": "Use Pick Lock on the door, not right-click." },
+    "lock:instance:dire-maul": { "note": "Use Pick Lock on the door, not right-click." }
+  },
+  "manual": {}
+}
