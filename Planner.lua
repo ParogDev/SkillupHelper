@@ -558,6 +558,14 @@ function P.prepare(input)
 							variant = variant + 1
 							local o = newOption(ctx, base, fm, fp, variant)
 							o.stockOnly = true
+							-- the raw reagents the variant crafts from (Medium Hide, Salt): the stock pass offers it only
+							-- when one of them is owned surplus, never for a reagent the plain recipe shares (the leather)
+							o.raws = {}
+							for i in pairs(fm) do
+								if not plain[i] then
+									o.raws[i] = true
+								end
+							end
 							ctx.stockOnly[#ctx.stockOnly + 1] = o
 						end
 					end
@@ -1058,6 +1066,15 @@ local function stockPass(ctx, base, have, route)
 					ok = false
 				end
 			end
+		end
+		-- a stock-only variant pays for its pre-craft only when the bags hold a non-vendor raw it crafts from: owned
+		-- Medium Leather alone must not turn "use the 15 Cured Medium Hide in the bags" into "buy hides and cure them"
+		if ok and mine and o.stockOnly then
+			local own = false
+			for i in pairs(o.raws or {}) do
+				own = own or (mine[i] and not isVendor(ctx, i))
+			end
+			ok = own
 		end
 		if ok and mine then
 			local net = mat - backOf(o, 0)
