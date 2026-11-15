@@ -711,6 +711,7 @@ for _, e in ipairs(AH_EVENTS) do
 		ns.UI.stats.ah.unregistered[e] = tostring(err)
 	end
 end
+local trainerQueued = false
 f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
 	if event == "UNIT_SPELLCAST_SUCCEEDED" then
 		if arg1 == "player" then
@@ -732,7 +733,15 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
 		return
 	end
 	if event == "TRAINER_SHOW" or event == "TRAINER_UPDATE" then
-		ns.onTrainer()
+		-- the list fills after TRAINER_SHOW, in a burst of TRAINER_UPDATEs: one read per frame, after the burst. An
+		-- empty read is "not now" (Scan.readTrainer) and what is saved only ever gains keys, so no read downgrades it.
+		if not trainerQueued then
+			trainerQueued = true
+			C_Timer.After(0, function()
+				trainerQueued = false
+				ns.onTrainer()
+			end)
+		end
 		return
 	end
 	if event == "BAG_UPDATE_DELAYED" then

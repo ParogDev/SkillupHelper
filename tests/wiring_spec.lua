@@ -364,6 +364,97 @@ describe("Load order", function()
 	end)
 end)
 
+describe("Trainer window", function()
+	it("reads the service list on TRAINER_UPDATE when TRAINER_SHOW found it empty, once per burst", function()
+		local a = login({})
+		local env = a.env
+		local queued = {}
+		env.C_Timer.After = function(_, fn)
+			queued[#queued + 1] = fn
+		end
+		local function flush()
+			local q = queued
+			queued = {}
+			for _, fn in ipairs(q) do
+				fn()
+			end
+		end
+		local services = {
+			{ "Cooking", "header" },
+			{ "Spiced Wolf Meat", "available" },
+			{ "Herb Baked Egg", "available" },
+		}
+		local n, reads = 0, 0
+		rawset(env, "IsInInstance", function()
+			return false
+		end)
+		rawset(env, "CreateVector2D", function(x, y)
+			return { x = x, y = y }
+		end)
+		rawset(env, "C_Map", {
+			GetBestMapForUnit = function()
+				return 1453
+			end,
+			GetPlayerMapPosition = function()
+				return {
+					GetXY = function()
+						return 0.5, 0.5
+					end,
+				}
+			end,
+			GetWorldPosFromMapPos = function()
+				return 0, {
+					GetXY = function()
+						return 100, 200
+					end,
+				}
+			end,
+			GetMapInfo = function()
+				return { name = "Stormwind City" }
+			end,
+		})
+		rawset(env, "GetNumTrainerServices", function()
+			reads = reads + 1
+			return n
+		end)
+		rawset(env, "GetTrainerServiceInfo", function(i)
+			local s = services[i]
+			return s[1], s[2]
+		end)
+		rawset(env, "GetTrainerServiceSkillLine", function()
+			return "Cooking"
+		end)
+		rawset(env, "GetTrainerServiceTypeFilter", function()
+			return true
+		end)
+		rawset(env, "SetTrainerServiceTypeFilter", function() end)
+		local npcs = env.SkillupHelperDB.learned.npcs
+		-- the window opens before the server has sent the list
+		assert.same({}, a.fire("TRAINER_SHOW"))
+		flush()
+		assert.is_table(npcs["name:Tester"])
+		assert.is_nil(npcs["name:Tester"].teaches)
+		-- the list arrives in a burst of updates: one read by the guide and one by the trainer reader, after it
+		n = #services
+		reads = 0
+		assert.same({}, a.fire("TRAINER_UPDATE"))
+		assert.same({}, a.fire("TRAINER_UPDATE"))
+		assert.same({}, a.fire("TRAINER_UPDATE"))
+		flush()
+		assert.same({ ["spiced wolf meat"] = true, ["herb baked egg"] = true }, npcs["name:Tester"].teaches)
+		local burstReads = reads
+		assert.is_nil(npcs["name:Tester"].teachesPartial)
+		-- a later update of the same visit that reads less keeps the fuller list; one update costs what the burst did
+		n = 2
+		reads = 0
+		assert.same({}, a.fire("TRAINER_UPDATE"))
+		flush()
+		assert.equal(burstReads, reads)
+		assert.same({ ["spiced wolf meat"] = true, ["herb baked egg"] = true }, npcs["name:Tester"].teaches)
+		assert.same({}, a.fire("TRAINER_CLOSED"))
+	end)
+end)
+
 describe("Provider: a view-model for every page", function()
 	it("a crafter with shipped data and TSM prices", function()
 		local a = login({ prices = true, professions = { { 164, 50, 150 }, { 186, 60, 150 } } })

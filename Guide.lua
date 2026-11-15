@@ -549,6 +549,26 @@ function G.teachesSet(list)
 	return set
 end
 
+-- One read of a trainer's service list during a visit. The server fills the list after TRAINER_SHOW and sends
+-- TRAINER_UPDATE as it does, so: a read with no service is "not yet" (nothing saved), and a read with fewer names
+-- than one already taken in the same visit (a list still loading, a filter changed) never replaces the fuller one.
+-- visit = { id, best } of the visit so far, or nil at a new one. Returns teaches, partial to save (nil, nil: keep
+-- what is saved), the visit, and why a read was held back.
+function G.trainerRead(visit, id, names, partial, services)
+	if type(visit) ~= "table" or visit.id ~= id then
+		visit = { id = id, best = 0 }
+	end
+	names = type(names) == "table" and names or {}
+	if (tonumber(services) or 0) < 1 or #names == 0 then
+		return nil, nil, visit, "not yet: the trainer listed no services (the list fills after the window opens)"
+	end
+	if #names < visit.best then
+		return nil, nil, visit, ("kept the fuller list of this visit (%d names over %d)"):format(visit.best, #names)
+	end
+	visit.best = #names
+	return names, partial and true or nil, visit, nil
+end
+
 -- Merges what a window just showed into the learned records. rec = { id, name, map, x, y, sells (list of item ids),
 -- trains, auction, teaches (list of service names), teachesPartial }. Keeps what an earlier visit learned that this
 -- one cannot see (a trainer that also sells). A trainer's service list is replaced, not merged: it is the whole list.
@@ -568,6 +588,10 @@ function G.learn(learned, rec, now)
 	if rec.teaches then
 		npc.teaches = G.teachesSet(rec.teaches)
 		npc.teachesPartial = rec.teachesPartial and true or nil
+	elseif npc.teachesPartial and type(npc.teaches) == "table" and next(npc.teaches) == nil then
+		-- an empty partial list saved before 0.3.0 by a read made before the trainer's list had filled: unknown,
+		-- not "teaches nothing"; the next read with services replaces it
+		npc.teaches, npc.teachesPartial = nil, nil
 	end
 	npc.trains = rec.trains or npc.trains
 	npc.auction = rec.auction or npc.auction

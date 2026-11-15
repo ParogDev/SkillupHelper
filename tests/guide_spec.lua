@@ -201,6 +201,43 @@ describe("Guide", function()
 			assert.same({ d = true }, learned[3].teaches)
 		end)
 
+		it("takes a trainer's list once it has filled: SHOW empty, then UPDATE full, never a smaller read", function()
+			local learned, visit = {}, nil
+			local function read(names, partial, n, at)
+				local teaches, tp, why
+				teaches, tp, visit, why = G.trainerRead(visit, 7, names, partial, n)
+				G.learn(learned, { id = 7, map = 1, x = 1, y = 1, teaches = teaches, teachesPartial = tp }, at)
+				return why
+			end
+			-- TRAINER_SHOW: the list has not filled yet
+			assert.matches("^not yet", read({}, true, 0, 1))
+			assert.is_nil(learned[7].teaches)
+			-- TRAINER_UPDATE: the whole list
+			assert.is_nil(read({ "A", "B", "C" }, false, 3, 2))
+			assert.same({ a = true, b = true, c = true }, learned[7].teaches)
+			assert.is_nil(learned[7].teachesPartial)
+			-- a later update of the same visit that reads less is held back
+			assert.matches("fuller list", read({ "A" }, true, 1, 3))
+			assert.same({ a = true, b = true, c = true }, learned[7].teaches)
+			-- a new visit (another trainer, or the window reopened: visit reset) reads afresh
+			visit = nil
+			assert.is_nil(read({ "D" }, false, 1, 4))
+			assert.same({ d = true }, learned[7].teaches)
+		end)
+
+		it("repairs an empty partial list saved by a read made before the list filled", function()
+			local learned = { [8] = { id = 8, map = 1, x = 1, y = 1, teaches = {}, teachesPartial = true } }
+			local teaches, tp = G.trainerRead(nil, 8, {}, true, 0)
+			G.learn(learned, { id = 8, map = 1, x = 1, y = 1, teaches = teaches, teachesPartial = tp }, 2)
+			assert.is_nil(learned[8].teaches)
+			assert.is_nil(learned[8].teachesPartial)
+			-- a real list read in part stays as it is
+			learned[9] = { id = 9, map = 1, x = 1, y = 1, teaches = { a = true }, teachesPartial = true }
+			G.learn(learned, { id = 9, map = 1, x = 1, y = 1 }, 2)
+			assert.same({ a = true }, learned[9].teaches)
+			assert.is_true(learned[9].teachesPartial)
+		end)
+
 		it("finds a rank-up listed with the rank before the profession", function()
 			local t = { trains = "Cooking", teaches = G.teachesSet({ "Expert Cooking" }) }
 			assert.equal(2, G.serves(t, { kind = "trainer", profession = "Cooking", name = "Expert" }))

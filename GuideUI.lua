@@ -37,6 +37,7 @@ local npcs = {} -- SkillupHelperDB.learned.npcs: the NPCs whose window was opene
 local seeds = {}
 local cur -- the step to do now: { key, step, profession, color, base = { [item] = count at plan time }, hadNeeds }
 local open -- the window open now: { kind, npc } (npc nil when it could not be recorded)
+local trainerVisit -- the trainer window open now: { id, best = most service names read } (Guide.trainerRead)
 local worldCache = {}
 local shipped, foreign = {}, nil -- Data/Trainers.lua's trainers and recipe vendors of the player's faction
 local shippedFor -- the faction `shipped` was built for ("Horde" | "Alliance"), nil while it is not known
@@ -298,8 +299,10 @@ local function trainerServices()
 			fail(("trainer filter %s not restored after reading the list"):format(f))
 		end
 	end
-	status.lastTeaches = { services = n, names = #names, partial = partial, filtersOpened = #turnedOn }
-	return names, partial
+	-- the type filters as the player had them (each false one was opened for the read): a list read with a filter
+	-- that could not be opened is partial
+	status.lastTeaches = { services = n, names = #names, partial = partial, filtersOpened = #turnedOn, filters = saved }
+	return names, partial, n
 end
 
 -- The shipped trainers and recipe vendors (Data/Trainers.lua) for the player's faction. Built at login and again
@@ -350,7 +353,10 @@ local function learn(kind)
 		rec.sells = merchantItems()
 	elseif kind == "trainer" then
 		rec.trains = trainerLine()
-		rec.teaches, rec.teachesPartial = trainerServices()
+		local names, partial, n = trainerServices()
+		local held
+		rec.teaches, rec.teachesPartial, trainerVisit, held = G.trainerRead(trainerVisit, rec.id, names, partial, n)
+		status.lastTeaches.held = held
 	elseif kind == "auction" then
 		rec.auction = true
 	end
@@ -1272,6 +1278,8 @@ local EVENTS = {
 	"MERCHANT_UPDATE",
 	"MERCHANT_CLOSED",
 	"TRAINER_SHOW",
+	-- the service list fills after the window opens: each update reads it again (Blizzard_TrainerUI redraws on it)
+	"TRAINER_UPDATE",
 	"TRAINER_CLOSED",
 	"AUCTION_HOUSE_SHOW",
 	"AUCTION_HOUSE_CLOSED",
@@ -1287,6 +1295,24 @@ if next(status.events) == nil then
 	status.events = "all registered"
 end
 
+-- TRAINER_UPDATE comes in bursts while the list fills: one read per frame, after the burst's events.
+local trainerQueued = false
+local function trainerUpdate()
+	if trainerQueued then
+		return
+	end
+	trainerQueued = true
+	C_Timer.After(0, function()
+		trainerQueued = false
+		if gdb and open and open.kind == "trainer" then
+			ns.guard("guide learn", function()
+				learn("trainer")
+			end)
+			ns.guard("guide TRAINER_UPDATE", evaluate)
+		end
+	end)
+end
+
 events:SetScript("OnEvent", function(_, event)
 	if event == "PLAYER_LOGIN" then
 		ns.guard("guide init", init)
@@ -1295,8 +1321,20 @@ events:SetScript("OnEvent", function(_, event)
 	if not gdb then
 		return
 	end
+	if event == "TRAINER_UPDATE" then
+		if open and open.kind == "trainer" then
+			trainerUpdate()
+		end
+		return
+	end
+	if event == "TRAINER_SHOW" or event == "TRAINER_CLOSED" then
+		trainerVisit = nil -- a new visit: no read of it taken yet
+	end
 	if WINDOW_KIND[event] then
-		ns.guard("guide learn", learn, WINDOW_KIND[event])
+		-- a closure, not an extra guard argument: plain Lua 5.1 xpcall (the tests) passes no arguments on
+		ns.guard("guide learn", function()
+			learn(WINDOW_KIND[event])
+		end)
 	elseif event == "MERCHANT_UPDATE" then
 		if open and open.kind == "vendor" then
 			ns.guard("guide learn", learn, "vendor")

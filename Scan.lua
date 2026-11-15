@@ -1103,7 +1103,10 @@ function S.readTrainer()
 	end
 	local n = clean(GetNumTrainerServices())
 	if type(n) ~= "number" or n < 1 then
-		return nil, "GetNumTrainerServices returned nothing (the filter hides every service?)"
+		-- the list fills after TRAINER_SHOW (TRAINER_UPDATE reads again): not yet, never an empty trainer
+		return nil,
+			"GetNumTrainerServices returned nothing yet (still loading, or the filter hides every service)",
+			"not now"
 	end
 	local values = {}
 	if GetTrainerTradeskillRankValues then
