@@ -25,7 +25,12 @@ function S.professionInfo()
 	-- not ipairs: a nil child would end the list before the base
 	for k = 1, 2 do
 		local info = k == 1 and child or base
-		if type(info) == "table" and (info.maxSkillLevel or 0) > 0 and not secret(info.skillLevel) then
+		if
+			type(info) == "table"
+			and not secret(info.maxSkillLevel)
+			and not secret(info.skillLevel)
+			and (info.maxSkillLevel or 0) > 0
+		then
 			pick = pick or info
 		end
 	end
@@ -86,30 +91,31 @@ end
 -- (Planner.prepare) corrects the current colour on top.
 S.LIVE_SPAN = 25
 
--- Records the colour the client shows for spell at skill into seen ({ o = highest orange, y = lowest yellow or
--- green }). Returns true when the record changed.
+-- The (skill, difficulty) each recipe was last noted at, per colour table: seen is written only when one of the two
+-- changes (a skill-up, a colour flip), not for every learned recipe on every refresh.
+local colorNoted = setmetatable({}, { __mode = "k" })
+
+-- Records the colour the client shows for spell at skill into seen (SkillupHelperDB.learned.colors: o = highest
+-- orange, y = lowest yellow or green, n, g; Learned.noteColor is the one writer and owns the rules). Returns true
+-- when the record changed. Values must already be clean (no secrets).
 function S.noteColor(seen, spell, skill, difficulty)
-	if not seen or type(skill) ~= "number" then
+	if type(seen) ~= "table" or type(skill) ~= "number" or type(difficulty) ~= "number" or spell == nil then
 		return false
 	end
-	local color = ns.Logic.colorOfDifficulty(difficulty)
-	local e = seen[spell]
-	if color == "orange" then
-		if not e or not e.o or skill > e.o then
-			e = e or {}
-			e.o = skill
-			seen[spell] = e
-			return true
-		end
-	elseif color == "yellow" or color == "green" then
-		if not e or not e.y or skill < e.y then
-			e = e or {}
-			e.y = skill
-			seen[spell] = e
-			return true
-		end
+	if not (ns.Learned and ns.Learned.noteColor) then
+		return false
 	end
-	return false
+	local noted = colorNoted[seen]
+	if not noted then
+		noted = {}
+		colorNoted[seen] = noted
+	end
+	local key = skill .. ":" .. difficulty
+	if noted[spell] == key then
+		return false
+	end
+	noted[spell] = key
+	return ns.Learned.noteColor(seen, spell, skill, difficulty, ns.Learned.build())
 end
 
 -- The yellow threshold of a recipe whose grey is g, from the colours seen (nil = none seen).
@@ -188,6 +194,52 @@ function S.mergeProf(prof, live, info)
 		or (type(pid) == "number" and ("profession " .. pid))
 		or nil
 	out.liveAdded = added
+	return out
+end
+
+-- The character's level, or nil when the client gives none or a secret one.
+function S.level()
+	return UnitLevel and clean(UnitLevel("player")) or nil
+end
+
+-- The skill line id of the data's profession entry `prof`: the client's own ids first (ids = { profession, base,
+-- parent }, cleaned), then the entry's own key in plan.professions by identity, never by name, so two entries that
+-- share a name cannot make the answer depend on table order.
+function S.skillLine(plan, prof, ids)
+	local profs = plan and plan.professions
+	if type(prof) ~= "table" or type(profs) ~= "table" then
+		return nil
+	end
+	for k = 1, 3 do
+		local id = ids and ids[k]
+		if id ~= nil and profs[id] == prof then
+			return id
+		end
+	end
+	local found
+	for id, p in pairs(profs) do
+		if p == prof and (found == nil or tostring(id) < tostring(found)) then
+			found = id
+		end
+	end
+	return found
+end
+
+-- Logic.withTrainerReq walks (and may copy) every recipe of the profession. The refresh ticker builds about every
+-- 0.3 s, so its answer is kept per profession entry and redone only when the trainer table or what the trainers
+-- taught changes (Learned.trainersVersion, bumped by every trainer read).
+local trainerMemo = setmetatable({}, { __mode = "k" })
+function S.withTrainerReq(prof, req)
+	if type(prof) ~= "table" then
+		return prof
+	end
+	local ver = ns.Learned and ns.Learned.trainersVersion or 0
+	local m = trainerMemo[prof]
+	if m and m.req == req and m.ver == ver then
+		return m.out
+	end
+	local out = ns.Logic.withTrainerReq(prof, req)
+	trainerMemo[prof] = { req = req, ver = ver, out = out }
 	return out
 end
 
@@ -532,12 +584,23 @@ function S.build(plan)
 		return { why = "C_TradeSkillUI gave no profession with a skill (base and child info empty)", diag = diag }
 	end
 	local skill = info.skillLevel
+	-- the client's ids of the open profession (secret ones left out: never a table key)
+	local ids3 = { clean(info.professionID), base and clean(base.professionID), clean(info.parentProfessionID) }
 	local function lookup(fn)
-		return fn and (fn(info.professionID) or (base and fn(base.professionID)) or fn(info.parentProfessionID)) or nil
+		if not fn then
+			return nil
+		end
+		for k = 1, 3 do
+			local got = ids3[k] ~= nil and fn(ids3[k]) or nil
+			if got ~= nil then
+				return got
+			end
+		end
+		return nil
 	end
-	local prof = ns.Logic.findProfession(plan, info) or ns.Logic.findProfession(plan, base)
+	local dataProf = ns.Logic.findProfession(plan, info) or ns.Logic.findProfession(plan, base)
 	-- what a trainer showed in game (the skill it asks for each recipe) goes over the data's learn ranks
-	prof = ns.Logic.withTrainerReq(prof, lookup(ns.savedTrainerReq))
+	local prof = S.withTrainerReq(dataProf, lookup(ns.savedTrainerReq))
 	local thresholds = prof and prof.recipes or {}
 	local removed = prof and prof.removed or {}
 	local vendor = plan and plan.vendor or {}
@@ -571,11 +634,10 @@ function S.build(plan)
 				end
 				-- secret in an instance: no colour, the recipe still plans from its thresholds
 				local difficulty = clean(r.relativeDifficulty)
-				if difficulty ~= nil and colorSeen and ns.Learned then
-					-- every learned recipe's colour at this skill, as the client shows it (learned.colors): how a
-					-- hotfixed threshold is noticed
-					ns.Learned.noteColor(colorSeen, id, skill, difficulty, ns.Learned.build())
-				end
+				-- every learned recipe's colour at this skill, as the client shows it (learned.colors): how a
+				-- hotfixed threshold is noticed, and what narrows the yellow of a recipe the data lacks. Written only
+				-- when this recipe's skill or colour changed since the last note.
+				S.noteColor(colorSeen, id, skill, difficulty)
 				if clean(r.canSkillUp) == false then
 					difficulty = 3
 				end
@@ -585,8 +647,7 @@ function S.build(plan)
 				end
 				local th = ns.Logic.thresholds(thresholds[id])
 				if not thresholds[id] and not removed[id] then
-					-- not in the data: plan it from the client, its colours narrowing the yellow threshold
-					S.noteColor(colorSeen, id, skill, difficulty)
+					-- not in the data: plan it from the client, its colours (noted above) narrowing the yellow threshold
 					local entry, skipWhy = S.liveEntry({
 						name = r.name,
 						grey = clean(r.maxTrivialLevel),
@@ -633,6 +694,9 @@ function S.build(plan)
 		generatedAt = plan and plan.generatedAt,
 		fromStock = ns.Logic.fromStock(recipes, skill, S.have, vendor),
 		greyCheck = greyCheck,
+		-- every learned recipe of the window ([spell] = true), the data's and the client-only ones: what a craft cast
+		-- is counted against (Core's skill-up counter)
+		learned = learned,
 	}
 	-- the cap model: ranks learned at the trainer (SkillupHelperDB.ranks), the character level and the exclusions
 	local settings = ns.settings and ns.settings() or {}
@@ -645,7 +709,7 @@ function S.build(plan)
 	end
 	-- recipes seen in this profession's trainer list (nil when no trainer was ever read)
 	local trainerSeen = lookup(ns.savedTrainerSeen)
-	local level = UnitLevel and clean(UnitLevel("player")) or nil
+	local level = S.level()
 	local target = S.target(ranks, prof, info.maxSkillLevel)
 	model.target, model.ranks = target, ranks
 	-- the planner runs on the export's recipes plus every learned recipe it does not list, read from the client: a
@@ -653,12 +717,7 @@ function S.build(plan)
 	local v1 = prof and not ns.Logic.isPlanV2(plan, prof)
 	local merged = not v1 and S.mergeProf(prof, live, info) or nil
 	if merged and target and target > skill then
-		local line
-		for id, p in pairs(plan and plan.professions or {}) do
-			if prof and p.name == prof.name then
-				line = id
-			end
-		end
+		local line = S.skillLine(plan, dataProf, ids3)
 		local ok, result =
 			pcall(S.runPlanner, plan, merged, skill, info.maxSkillLevel, learned, difficulties, settings, {
 				target = target,
@@ -962,7 +1021,7 @@ function S.costOf(plan, id, prof, own, settings)
 		luck = settings.luck,
 		recipeItems = not settings.noRecipeBuys,
 		resale = settings.resale == true,
-		world = S.worldFor(id, from, to, S.level and S.level() or nil, S.faction()),
+		world = S.worldFor(id, from, to, S.level(), S.faction()),
 	})
 	if not ok then
 		return nil, from, to, "planner failed: " .. tostring(r)

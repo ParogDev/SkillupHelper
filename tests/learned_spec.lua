@@ -144,6 +144,24 @@ describe("Learned.attach", function()
 		assert.equal(l, L.attach(db))
 	end)
 
+	it("merges an old rank row into the newer one field by field, and old colours by the colour rules", function()
+		local db = oldDB()
+		db.learned = {
+			ranks = { [165] = { [150] = { cap = 150, skill = 55, seenAt = "1.60.1.70938" } } },
+			colors = { [9999] = { o = 120, y = 135, g = 160 } },
+		}
+		local l = L.attach(db, "1.60.1.70938")
+		-- the newer row keeps its values and its stamp, and gains what only the old row knew
+		assert.same(
+			{ name = "Journeyman", cap = 150, skill = 55, cost = 500, seen = 1700000000, seenAt = "1.60.1.70938" },
+			l.ranks[165][150]
+		)
+		-- orange seen up to 127 (old), yellow from 131 (old, lower), grey from 160 (new only)
+		assert.same({ o = 127, y = 131, g = 160 }, l.colors[9999])
+		assert.is_nil(db.ranks)
+		assert.is_nil(db.colorSeen)
+	end)
+
 	it("keeps the newest build that wrote", function()
 		local db = {}
 		assert.equal("1.60.1.70938", L.attach(db, "1.60.1.70938").build)
@@ -205,6 +223,36 @@ describe("What the game teaches", function()
 		assert.same({}, l.skillups)
 	end)
 
+	it("never keys a table or computes with a secret id, item, skill line or position", function()
+		local SECRET = setmetatable({}, {
+			__tostring = function()
+				return "secret"
+			end,
+		})
+		_G.issecretvalue = function(v)
+			return v == SECRET
+		end
+		assert.is_false(L.noteColor(l.colors, SECRET, 120, 0, "b1"))
+		assert.is_false(L.noteTry(l, SECRET, 5, 120, true))
+		assert.is_false(L.noteTry(l, 165, SECRET, 120, true))
+		assert.is_nil(L.noteVendor(l, { id = SECRET }, { { item = 1 } }, "b1"))
+		-- a secret item is left out; a secret price, stock or position is not recorded
+		local v = L.noteVendor(
+			l,
+			{ id = 3005, map = SECRET, x = SECRET, y = 40 },
+			{ { item = SECRET, price = 1 }, { item = 2320, price = SECRET, stock = SECRET } },
+			"b1"
+		)
+		assert.same({ y = 40, seenAt = "b1", items = { [2320] = {} } }, v)
+		assert.equal(0, L.noteTrainer(l, SECRET, { [1] = { skill = 1 } }, "b1"))
+		assert.equal(1, L.noteTrainer(l, 165, { [SECRET] = { skill = 1 }, [2] = { skill = SECRET, cost = 5 } }, "b1"))
+		assert.same({ [2] = { cost = 5, seenAt = "b1" } }, l.trainers[165])
+		-- a secret skill now: not now, the crafts stay for the next scan
+		assert.equal(0, L.settle(l, 165, { [2153] = { n = 2, skill = 100 } }, SECRET, 150))
+		assert.same({}, l.colors)
+		assert.same({}, l.skillups)
+	end)
+
 	it("keeps a vendor's list with prices and stock", function()
 		local v = L.noteVendor(
 			l,
@@ -258,6 +306,87 @@ describe("What the game teaches", function()
 	end)
 end)
 
+describe("Scan with the learned table", function()
+	it("gives the cost line the character's level, as the plan does (a secret level is none)", function()
+		local ns = core()
+		local level = 42
+		_G.UnitLevel = function()
+			return level
+		end
+		local got = {}
+		ns.Scan.worldFor = function(line, _, _, lvl)
+			got[#got + 1] = { line, lvl }
+		end
+		ns.TSM.prices = function()
+			return {}, {}
+		end
+		ns.Planner.costToCap = function()
+			return { total = 1 }
+		end
+		assert.is_table((ns.Scan.costOf({ items = {} }, 186, { recipes = {}, to = 300 }, nil, {})))
+		assert.same({ 186, 42 }, got[1])
+		_G.issecretvalue = function(v)
+			return v == level
+		end
+		assert.is_nil(ns.Scan.level())
+		_G.UnitLevel = nil
+		assert.is_nil(ns.Scan.level())
+	end)
+
+	it("finds the skill line by the client's id, not by a name two entries share", function()
+		local ns = core()
+		local a, b = { name = "Mining" }, { name = "Mining" }
+		local plan = { professions = { [186] = a, [9999] = b } }
+		assert.equal(9999, ns.Scan.skillLine(plan, b, { 9999 }))
+		assert.equal(186, ns.Scan.skillLine(plan, a, { nil, 186 }))
+		-- no client id matches (found by name): the entry's own key, by identity
+		assert.equal(9999, ns.Scan.skillLine(plan, b, {}))
+		assert.is_nil(ns.Scan.skillLine(plan, { name = "Mining" }, { 186 }))
+	end)
+
+	it("applies what the trainers asked once per profession, again only after a trainer read", function()
+		local ns = core()
+		local db = ns.initDB(nil)
+		ns.capTables(db)
+		local calls = 0
+		local real = ns.Logic.withTrainerReq
+		ns.Logic.withTrainerReq = function(...)
+			calls = calls + 1
+			return real(...)
+		end
+		local prof = { recipes = { [5] = { name = "Belt", src = "trainer" } } }
+		ns.Learned.noteTrainer(db.learned, 165, { [5] = { skill = 10 } }, "b1")
+		local req = ns.savedTrainerReq(165)
+		local one = ns.Scan.withTrainerReq(prof, req)
+		assert.equal(one, ns.Scan.withTrainerReq(prof, req))
+		assert.equal(1, calls)
+		assert.equal(10, one.recipes[5].learn)
+		ns.Learned.noteTrainer(db.learned, 165, { [5] = { skill = 20 } }, "b1")
+		assert.equal(20, ns.Scan.withTrainerReq(prof, req).recipes[5].learn)
+		assert.equal(2, calls)
+	end)
+
+	it("writes a recipe's colour through one writer, only when its skill or colour changed", function()
+		local ns = core()
+		local writes = 0
+		local real = ns.Learned.noteColor
+		ns.Learned.noteColor = function(...)
+			writes = writes + 1
+			return real(...)
+		end
+		local seen = {}
+		assert.is_true(ns.Scan.noteColor(seen, 1, 127, 0))
+		for _ = 1, 5 do
+			assert.is_false(ns.Scan.noteColor(seen, 1, 127, 0)) -- the next refreshes: nothing new
+		end
+		assert.equal(1, writes)
+		assert.is_true(ns.Scan.noteColor(seen, 1, 131, 1))
+		assert.same({ o = 127, y = 131, n = 131 }, { o = seen[1].o, y = seen[1].y, n = seen[1].n })
+		assert.equal(2, writes)
+		assert.is_false(ns.Scan.noteColor(seen, 1, 131, nil))
+	end)
+end)
+
 describe("Core after the move", function()
 	it("answers the old readers from the learned table", function()
 		local ns = core()
@@ -283,5 +412,66 @@ describe("Core after the move", function()
 		assert.same({}, db.learned.trainers)
 		assert.equal(0, ns.ranksSeen())
 		assert.same({}, ns.savedColorSeen())
+	end)
+
+	it("annotates a copy of the data layers' report for the selftest, never the shared report", function()
+		local ns = core()
+		local layers = { plan = "absent (optional)" }
+		local out =
+			ns.selftest.dataReport(layers, { build = "1.60.1.70938", source = "Wowhead, Forever" }, "1.60.1", "71000")
+		assert.same({ plan = "absent (optional)" }, layers)
+		assert.equal("absent (optional)", out.plan)
+		assert.equal("Wowhead, Forever", out.overlayRetrieved)
+		assert.is_true(out.gameIsNewer)
+		assert.is_string(out.status)
+		assert.is_nil(ns.selftest.dataReport(nil))
+	end)
+
+	it("counts crafts of a client-only recipe, and settles them with the panel hidden", function()
+		local now = 100
+		_G.GetTime = function()
+			return now
+		end
+		_G.C_Timer = {
+			After = function(_, fn)
+				fn()
+			end,
+		}
+		local skill = 100
+		_G.C_TradeSkillUI = {
+			GetBaseProfessionInfo = function()
+				return { professionID = 165, skillLevel = skill, maxSkillLevel = 150 }
+			end,
+		}
+		local ns = core()
+		local db = ns.initDB(nil)
+		ns.capTables(db)
+		ns.tradeSkillOpen = true
+		-- a scan: recipe 999 is learned but not in the data (no plan entry at all)
+		ns.craftCounter.settle({ professionID = 165, skill = 100, maxSkill = 150, learned = { [999] = true } })
+		ns.craftCounter.cast(999)
+		ns.craftCounter.cast(999)
+		ns.craftCounter.cast(12345) -- not a recipe of this window
+		assert.equal(2, ns.craftCounter.pending()[999].n)
+		-- the panel is hidden (no frame): the refresh settles from the client's skill once SETTLE has passed
+		skill, now = 101, 102
+		ns.refresh()
+		assert.same({ [100] = { t = 2, u = 1 } }, db.learned.skillups[165] and db.learned.skillups[165][999])
+		assert.is_nil(next(ns.craftCounter.pending()))
+		-- a failed scan (no profession) neither settles nor drops what is pending
+		ns.craftCounter.cast(999)
+		ns.craftCounter.settle({ why = "scan failed" })
+		assert.equal(1, ns.craftCounter.pending()[999].n)
+		_G.C_Timer, _G.C_TradeSkillUI, _G.GetTime = nil, nil, nil
+	end)
+
+	it("answers nil, not an error, when a section of the learned table is missing", function()
+		local ns = core()
+		local db = ns.initDB(nil)
+		ns.capTables(db)
+		db.learned.trainers, db.learned.ranks = nil, nil
+		assert.is_nil(ns.savedTrainerReq(165))
+		assert.is_nil(ns.savedRanks(165))
+		assert.equal(0, ns.ranksSeen())
 	end)
 end)

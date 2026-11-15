@@ -24,6 +24,9 @@ ns.Learned = L
 
 L.VERSION = 1
 L.BUCKET = 5 -- skill points per skill-up bucket
+-- Bumped by every write to learned.trainers, so a reader that keeps a derived copy (Scan.withTrainerReq) knows it
+-- is stale.
+L.trainersVersion = 0
 
 local function tbl(v)
 	return type(v) == "table" and v or {}
@@ -31,6 +34,20 @@ end
 
 local function secret(v)
 	return issecretvalue ~= nil and issecretvalue(v) or false
+end
+
+-- A client value that can be used as a table key or in arithmetic: present and not a secret value (in an instance
+-- or encounter the client hands secrets, and a secret as a key or operand is a Lua error: "not now", skip it).
+local function usable(v)
+	return v ~= nil and not secret(v)
+end
+
+-- A number from the client, or nil when it is missing, not a number or a secret value.
+local function num(v)
+	if type(v) ~= "number" or secret(v) then
+		return nil
+	end
+	return v
 end
 
 -- "1.60.1.70938": the client version and build number, or nil when the client gives neither.
@@ -71,15 +88,33 @@ function L.olderBuild(a, b)
 	return false
 end
 
--- Moves `from[key]` entries into `into` where `into` has none (what is already in `learned` is the newer copy).
-local function adopt(into, from)
+-- Moves `from` entries into `into`. What is already in `learned` is the newer copy: its values win, and an old
+-- record only fills the fields the newer one lacks, `depth` table levels down (trainers and ranks are
+-- [skillLine][key][field]: 3, so a rank row learned since keeps its seenAt and gains the old row's other fields).
+local function adopt(into, from, depth)
 	for k, v in pairs(tbl(from)) do
 		if into[k] == nil then
 			into[k] = v
-		elseif type(into[k]) == "table" and type(v) == "table" then
-			for k2, v2 in pairs(v) do
-				if into[k][k2] == nil then
-					into[k][k2] = v2
+		elseif depth > 1 and type(into[k]) == "table" and type(v) == "table" then
+			adopt(into[k], v, depth - 1)
+		end
+	end
+end
+
+-- The old colorSeen rows into learned.colors by the colour rules (o, n: the highest; y, g: the lowest), so an old
+-- observation narrows a threshold instead of being dropped or overwriting a sharper one.
+local function adoptColors(into, from)
+	for spell, old in pairs(tbl(from)) do
+		local e = into[spell]
+		if type(e) ~= "table" then
+			into[spell] = old
+		elseif type(old) == "table" then
+			for field, pick in pairs({ o = math.max, n = math.max, y = math.min, g = math.min }) do
+				local a, b = tonumber(e[field]), tonumber(old[field])
+				if a and b then
+					e[field] = pick(a, b)
+				elseif b then
+					e[field] = b
 				end
 			end
 		end
@@ -98,12 +133,15 @@ function L.attach(db, build, locale)
 	for _, key in ipairs({ "trainers", "ranks", "vendors", "npcs", "colors", "skillups" }) do
 		l[key] = tbl(l[key])
 	end
-	adopt(l.trainers, db.trainerReq)
-	adopt(l.ranks, db.ranks)
-	adopt(l.colors, db.colorSeen)
+	if db.trainerReq ~= nil or l ~= db.learned then
+		L.trainersVersion = L.trainersVersion + 1
+	end
+	adopt(l.trainers, db.trainerReq, 3)
+	adopt(l.ranks, db.ranks, 3)
+	adoptColors(l.colors, db.colorSeen)
 	db.trainerReq, db.ranks, db.colorSeen = nil, nil, nil
 	if type(db.guide) == "table" then
-		adopt(l.npcs, db.guide.npcs)
+		adopt(l.npcs, db.guide.npcs, 2)
 		db.guide.npcs = nil
 	end
 	if build and (l.build == nil or L.olderBuild(l.build, build)) then
@@ -118,27 +156,31 @@ end
 
 -- What a trainer asks for each recipe (Scan.trainerReqSet's { [key] = { skill, cost } }), stamped with the build.
 function L.noteTrainer(learned, skillLine, req, build)
-	if type(learned) ~= "table" or skillLine == nil then
+	if type(learned) ~= "table" or not usable(skillLine) then
 		return 0
 	end
+	learned.trainers = tbl(learned.trainers)
 	local store = tbl(learned.trainers[skillLine])
 	local n = 0
 	for key, e in pairs(tbl(req)) do
-		store[key] = { skill = e.skill, cost = e.cost, seenAt = build }
-		n = n + 1
+		if usable(key) and type(e) == "table" then
+			store[key] = { skill = num(e.skill), cost = num(e.cost), seenAt = build }
+			n = n + 1
+		end
 	end
 	learned.trainers[skillLine] = store
+	L.trainersVersion = L.trainersVersion + 1
 	return n
 end
 
 -- Stamps the rank rows of one skill line (written by Scan.saveRanks) with the build they were read on.
 function L.stampRanks(learned, skillLine, caps, build)
-	local store = type(learned) == "table" and learned.ranks[skillLine]
+	local store = type(learned) == "table" and usable(skillLine) and tbl(learned.ranks)[skillLine]
 	if type(store) ~= "table" then
 		return
 	end
 	for _, r in ipairs(tbl(caps)) do
-		if type(store[r.cap]) == "table" then
+		if usable(r.cap) and type(store[r.cap]) == "table" then
 			store[r.cap].seenAt = build
 		end
 	end
@@ -147,10 +189,7 @@ end
 -- The colour the client shows for a learned recipe at this skill (difficulty: 0 orange, 1 yellow, 2 green, 3 grey).
 -- Returns true when the record changed.
 function L.noteColor(colors, spell, skill, difficulty, build)
-	if type(colors) ~= "table" or type(spell) ~= "number" or type(skill) ~= "number" then
-		return false
-	end
-	if secret(skill) or secret(difficulty) then
+	if type(colors) ~= "table" or not num(spell) or not num(skill) or secret(difficulty) then
 		return false
 	end
 	local e = tbl(colors[spell])
@@ -187,13 +226,13 @@ end
 -- A vendor window: npc = { id, map, x, y }, items = { { item, price, stock }, ... } (price in copper for one item,
 -- nil when it costs something else; stock nil = unlimited). The list replaces the last one: it is the whole window.
 function L.noteVendor(learned, npc, items, build)
-	if type(learned) ~= "table" or type(npc) ~= "table" or type(npc.id) ~= "number" then
+	if type(learned) ~= "table" or type(npc) ~= "table" or not num(npc.id) then
 		return nil
 	end
 	local sold, n = {}, 0
 	for _, it in ipairs(tbl(items)) do
-		if type(it.item) == "number" then
-			sold[it.item] = { price = it.price, stock = it.stock }
+		if type(it) == "table" and num(it.item) then
+			sold[it.item] = { price = num(it.price), stock = num(it.stock) }
 			n = n + 1
 		end
 	end
@@ -201,21 +240,21 @@ function L.noteVendor(learned, npc, items, build)
 		return nil
 	end
 	local function tenth(v)
-		return type(v) == "number" and math.floor(v * 10 + 0.5) / 10 or nil
+		v = num(v)
+		return v and math.floor(v * 10 + 0.5) / 10 or nil
 	end
-	local v = { map = npc.map, x = tenth(npc.x), y = tenth(npc.y), seenAt = build, items = sold }
+	learned.vendors = tbl(learned.vendors)
+	local v = { map = num(npc.map), x = tenth(npc.x), y = tenth(npc.y), seenAt = build, items = sold }
 	learned.vendors[npc.id] = v
 	return v
 end
 
 -- One try at a skill-up: a craft of `key` (its spell) or a use of a world target (its key) at `skill`.
 function L.noteTry(learned, skillLine, key, skill, up)
-	if type(learned) ~= "table" or skillLine == nil or key == nil or type(skill) ~= "number" then
+	if type(learned) ~= "table" or not usable(skillLine) or not usable(key) or not num(skill) or secret(up) then
 		return false
 	end
-	if secret(skill) or secret(key) then
-		return false
-	end
+	learned.skillups = tbl(learned.skillups)
 	local line = tbl(learned.skillups[skillLine])
 	local byKey = tbl(line[key])
 	local bucket = math.floor(skill / L.BUCKET) * L.BUCKET
@@ -238,11 +277,12 @@ function L.settle(learned, skillLine, pending, skillNow, cap)
 	for spell in pairs(tbl(pending)) do
 		spells[#spells + 1] = spell
 	end
-	if #spells ~= 1 or type(skillNow) ~= "number" then
-		return 0
+	if #spells ~= 1 or not num(skillNow) then
+		return 0 -- a secret skill (an instance): not now, the crafts stay pending
 	end
 	local p = pending[spells[1]]
-	if type(p.skill) ~= "number" or (type(cap) == "number" and p.skill >= cap) then
+	cap = num(cap)
+	if not num(p.skill) or not num(p.n) or (cap and p.skill >= cap) then
 		return 0 -- at the rank cap nothing can give a point: not a try
 	end
 	local gained = math.max(0, math.min(p.n, skillNow - p.skill))

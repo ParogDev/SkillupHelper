@@ -114,6 +114,22 @@ function ns.selftest.planSummary(plan)
 	return { generatedAt = plan.generatedAt, build = plan.build, professions = profs }
 end
 
+-- selftest.data: a copy of the data layers' report (ns.Data.layers, cached for the session and read by the guide and
+-- the journal) with the data's age on top: where and when the overlay was read, and whether the game is a newer build.
+-- The shared report itself is never written to.
+function ns.selftest.dataReport(layers, recipes, build, buildNumber)
+	if type(layers) ~= "table" then
+		return layers
+	end
+	local out = {}
+	for k, v in pairs(layers) do
+		out[k] = v
+	end
+	out.overlayRetrieved = type(recipes) == "table" and recipes.source or nil
+	out.status, out.gameIsNewer = ns.Logic.dataStatus(recipes, build, buildNumber)
+	return out
+end
+
 local function refreshSelftest()
 	if not db then
 		return
@@ -126,12 +142,7 @@ local function refreshSelftest()
 	st.savedAt = date("%Y-%m-%d %H:%M:%S")
 	-- the data layers: the shipped build and recipe counts per profession, the local plan, the custom file
 	ns.plan()
-	st.data = ns.Data.layers
-	if type(st.data) == "table" then
-		-- the data's age: where and when the overlay was read, and whether the running game is a newer build
-		st.data.overlayRetrieved = ns.Data.recipes and ns.Data.recipes.source or nil
-		st.data.status, st.data.gameIsNewer = ns.Logic.dataStatus(ns.Data.recipes, build, buildNumber)
-	end
+	st.data = ns.selftest.dataReport(ns.Data.layers, ns.Data.recipes, build, buildNumber)
 	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent (optional: the shipped data plans alone)"
 	st.lastScan = ns.lastScan
 	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
@@ -232,8 +243,13 @@ local function noteCraftCast(spellID)
 	ns.skillupStatus.casts = ns.skillupStatus.casts + 1
 end
 
+-- model: a scan's model, or liveSkill()'s { professionID, skill, maxSkill } while the panel is hidden. A model with no
+-- profession (a failed scan, a secret id) settles nothing and drops nothing.
 local function settleCrafts(model)
 	local line = model and model.professionID
+	if line == nil or (issecretvalue and issecretvalue(line)) then
+		return
+	end
 	if next(crafts) and crafting and line == crafting.line and GetTime() - craftsAt >= SETTLE then
 		local n = ns.Learned.settle(learned, line, crafts, model.skill, crafting.cap)
 		ns.skillupStatus.counted = ns.skillupStatus.counted + n
@@ -242,15 +258,82 @@ local function settleCrafts(model)
 	elseif next(crafts) and crafting and line ~= crafting.line then
 		crafts = {} -- another profession's window: the pending crafts cannot be settled against it
 	end
-	if not next(crafts) and line and type(model.skill) == "number" then
-		crafting =
-			{ line = line, skill = model.skill, cap = model.maxSkill, recipes = model.plan and model.plan.recipes }
+	if not next(crafts) and type(model.skill) == "number" then
+		-- every learned recipe of the window counts (the client-only ones too: Scan.build's model.learned); the
+		-- data's recipes when a model has no such set; the last set when a hidden-panel read carries none
+		local recipes = model.learned or (model.plan and model.plan.recipes)
+		if recipes == nil and crafting and crafting.line == line then
+			recipes = crafting.recipes
+		end
+		crafting = { line = line, skill = model.skill, cap = model.maxSkill, recipes = recipes }
 	end
 end
 
+-- The open profession's skill straight from the client, for settling crafts without a scan (the panel hidden, the
+-- window closing): { professionID, skill, maxSkill }, or nil when there is none or it is a secret (not now).
+local function liveSkill()
+	local ok, info = pcall(ns.Scan.professionInfo)
+	if not ok or type(info) ~= "table" then
+		return nil
+	end
+	local id, skill, cap = info.professionID, info.skillLevel, info.maxSkillLevel
+	if issecretvalue and (issecretvalue(id) or issecretvalue(skill) or issecretvalue(cap)) then
+		return nil
+	end
+	if id == nil or type(skill) ~= "number" then
+		return nil
+	end
+	return { professionID = id, skill = skill, maxSkill = cap }
+end
+
+-- With the panel hidden ns.refresh scans nothing, so pending crafts settle here: SETTLE seconds after the last
+-- refresh event, again while some stay pending (at most a few times: a skill that never reads stops trying).
+local settleArmed, settleTries = false, 0
+local function settleSoon()
+	if settleArmed then
+		return
+	end
+	settleArmed = true
+	C_Timer.After(SETTLE, function()
+		settleArmed = false
+		if not ns.tradeSkillOpen then
+			return
+		end
+		ns.guard("skillups", function()
+			settleCrafts(liveSkill())
+		end)
+		if next(crafts) and settleTries < 5 then
+			settleTries = settleTries + 1
+			settleSoon()
+		else
+			settleTries = 0
+		end
+	end)
+end
+
+-- For the tests: the craft counter's steps (a cast, a settle with a model, a hidden-panel settle).
+ns.craftCounter = {
+	cast = function(spellID)
+		return noteCraftCast(spellID)
+	end,
+	settle = function(model)
+		return settleCrafts(model)
+	end,
+	pending = function()
+		return crafts
+	end,
+}
+
 local pending = false
 function ns.refresh()
-	if pending or not ns.UI.frame or not ns.UI.frame:IsShown() then
+	if not ns.UI.frame or not ns.UI.frame:IsShown() then
+		-- the panel hidden: no scan, but crafts made meanwhile still settle against the client's skill
+		if ns.tradeSkillOpen and next(crafts) then
+			settleSoon()
+		end
+		return
+	end
+	if pending then
 		return
 	end
 	pending = true
@@ -346,18 +429,25 @@ function ns.savedTrainerSeen(skillLineID)
 	return db and skillLineID and db.trainerSeen and db.trainerSeen[skillLineID] or nil
 end
 
+-- One section of SkillupHelperDB.learned for a skill line, or nil (no table yet, or a hand-edited file without it).
+local function learnedFor(section, skillLineID)
+	local t = learned and skillLineID and learned[section]
+	return type(t) == "table" and t[skillLineID] or nil
+end
+
 function ns.savedTrainerReq(skillLineID)
-	return learned and skillLineID and learned.trainers[skillLineID] or nil
+	return learnedFor("trainers", skillLineID)
 end
 
 function ns.savedRanks(skillLineID)
-	return learned and skillLineID and learned.ranks[skillLineID] or nil
+	return learnedFor("ranks", skillLineID)
 end
 
 function ns.ranksSeen()
 	local n = 0
-	for _, byCap in pairs(learned and learned.ranks or {}) do
-		for _ in pairs(byCap) do
+	local ranks = learned and learned.ranks
+	for _, byCap in pairs(type(ranks) == "table" and ranks or {}) do
+		for _ in pairs(type(byCap) == "table" and byCap or {}) do
 			n = n + 1
 		end
 	end
@@ -547,8 +637,12 @@ local function open()
 end
 
 local function close()
+	-- a last settle while the client still names the profession; crafts younger than SETTLE (their skill-up may not be
+	-- in yet) are dropped: without the window the skill they ended at is not known
+	ns.guard("skillups", function()
+		settleCrafts(liveSkill())
+	end)
 	ns.tradeSkillOpen = false
-	-- crafts not settled by a scan are dropped: without the window the skill they ended at is not known
 	crafts, crafting = {}, nil
 	stopTicker()
 	ns.UI.setShown(false, false)

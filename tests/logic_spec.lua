@@ -1,6 +1,15 @@
 -- Logic, the panel text and the scan against a fake C_TradeSkillUI. Frames are checked in game.
 local function load(ns)
-	for _, f in ipairs({ "Logic.lua", "Planner.lua", "Scan.lua", "TSM.lua", "View.lua", "Where.lua", "UI.lua" }) do
+	for _, f in ipairs({
+		"Logic.lua",
+		"Learned.lua",
+		"Planner.lua",
+		"Scan.lua",
+		"TSM.lua",
+		"View.lua",
+		"Where.lua",
+		"UI.lua",
+	}) do
 		assert(loadfile(f))("SkillupHelper", ns)
 	end
 	return ns
@@ -274,7 +283,8 @@ describe("Yellow threshold of a recipe the export does not list", function()
 		assert.is_true(S.noteColor(seen, 1, 131, 1)) -- yellow at 131: yellow is at or below
 		assert.equal(128, S.yellowOf(145, seen[1]))
 		assert.equal(131, S.yellowOf(160, seen[1]))
-		assert.is_false(S.noteColor(seen, 1, 131, 3)) -- grey says nothing about yellow
+		S.noteColor(seen, 1, 131, 3) -- grey says nothing about yellow
+		assert.equal(131, S.yellowOf(160, seen[1]))
 	end)
 
 	it("builds an entry from the client, or names what is missing", function()
