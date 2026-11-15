@@ -16,16 +16,27 @@ What the client data gives, per recipe: the skill where it turns yellow (Trivial
 learn rank) or `trainer` (everything else). The client data does NOT say at which skill a trainer teaches a recipe
 (MinSkillLineRank is 1 on nearly every row), nor which "trainer" recipes come from a quest or a special NPC.
 
-What it cannot give comes from tools/data/overlay.json, kept by hand:
+What it cannot give comes from tools/data/overlay.json (written by tools/import_wowhead.py from a research export,
+with the hand-kept tools/data/overlay.manual.json on top):
 
     {
-      "recipes": { "<spell id>": { "learn": 30, "src": "trainer", "teacher": "who", "cost": 100, "note": "source" } },
+      "source": { "name": "...", "retrieved": "YYYY-MM-DD", "compared_with_build": "..." },
+      "listed": [ 164, 165 ],
+      "ranks": { "<skill line>": [ { "name": "Journeyman", "cap": 150, "skill": 50, "cost": 500, "where": "trainer" } ] },
+      "recipes": { "<spell id>": { "learn": 30, "cost": 100, "y": 50, "g": 90, "src": "trainer", "teacher": "who",
+                                   "vendor": { "name": "who", "npc": 1, "zone": 2, "a": 1, "h": -1 }, "note": "..." } },
       "vendor": [ 2880, 3466 ]
     }
 
-`learn` is the skill needed to learn the recipe, `src` one of auto / trainer / item / special, `teacher` free text
-shown for a special teacher, `cost` the training cost in copper. Every field is optional; `note` is for people and is
-not written to the Lua file. `vendor` lists extra reagents a vendor sells (the built-in list is VENDOR_REAGENTS below).
+Per recipe: `learn` the skill needed to learn it, `cost` the training cost in copper, `y` / `g` the yellow and grey
+thresholds where they differ from the build (they win: the overlay carries hotfixes a build lacks), `src` one of
+auto / trainer / item / special, or where its recipe item comes from: vendor / quest / drop / crafted / other (a
+number is a source code with no name yet), `teacher` free text for a special teacher, `vendor` the one vendor known
+to sell the recipe item (a / h = its reaction to Alliance / Horde). Every field is optional; `note` is for people and
+is not written to the Lua file. `listed` names the skill lines whose recipe list is whole in the overlay: a craft
+spell of such a line with no entry is written as src = "unlisted" (not confirmed obtainable; the addon shows it as a
+shortcut and never plans it by itself). `ranks` replaces the classic rank rows by name. The top-level `vendor` lists
+extra reagents a vendor sells (the built-in list is VENDOR_REAGENTS below).
 
 The file holds no prices from an auction house: the addon reads those from TradeSkillMaster in game. Vendor reagents
 carry the vendor's price per item (ItemSparse.BuyPrice / VendorStackCount).
@@ -55,7 +66,15 @@ TRIGGER_LEARN = 6  # ItemEffect.TriggerType: the item teaches SpellID
 ACQUIRE_AUTO = 1  # SkillLineAbility.AcquireMethod: learned with the profession
 BIND_ON_PICKUP = 1  # ItemSparse.Bonding: 0 none, 1 when picked up, 2 when equipped, 3 when used, 4 quest item
 DEAD_NAME = re.compile(r"\b(OLD|DEP|DEPRECATED|TEST|UNUSED|NYI)\b|^zz", re.IGNORECASE)
-SOURCES = ("auto", "trainer", "item", "special")
+# How the addon plans a recipe: learned with the profession, at a trainer, from a recipe item, from a special teacher
+# or quest (a gated shortcut), or not in the overlay's list of a profession it lists whole (gated: not confirmed
+# obtainable).
+SOURCES = ("auto", "trainer", "item", "special", "unlisted")
+# What the overlay may say. vendor / quest / drop / crafted / other tell where a recipe item comes from (written as
+# `from` next to src = "item"); with no recipe item in the client data the recipe is a "special" one.
+ITEM_SOURCES = ("vendor", "quest", "drop", "crafted", "other")
+OVERLAY_SOURCES = ("auto", "trainer", "item", "special") + ITEM_SOURCES
+EMPTY_OVERLAY = {"recipes": {}, "vendor": set(), "listed": set(), "ranks": {}, "source": {}}
 # The highest profession rank cap (Artisan). The client data holds no rank table.
 TOP_RANK_CAP = 300
 
@@ -169,9 +188,10 @@ def fetch_tables(folder: Path, build: str, download: bool = True, get=http_get) 
 
 
 def load_overlay(path: Path) -> dict:
-    """The hand-kept overlay, checked: {"recipes": {spell: {learn, src, teacher, cost}}, "vendor": {item ids}}."""
+    """The overlay, checked: {"recipes": {spell: {learn, cost, y, g, src, teacher, vendor}}, "vendor": {item ids},
+    "listed": {skill lines}, "ranks": {line: [rank rows]}, "source": {...}}."""
     if not path.is_file():
-        return {"recipes": {}, "vendor": set()}
+        return dict(EMPTY_OVERLAY)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as e:
@@ -186,28 +206,50 @@ def load_overlay(path: Path) -> dict:
         if not isinstance(row, dict):
             raise GenError(f"{where}: must be an object")
         out = {}
-        for field in ("learn", "cost"):
+        for field in ("learn", "cost", "y", "g"):
             v = row.get(field)
             if v is not None:
                 if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                     raise GenError(f"{where}.{field}: must be a whole number >= 0, got {v!r}")
                 out[field] = v
-        if row.get("src") is not None:
-            if row["src"] not in SOURCES:
-                raise GenError(f"{where}.src: must be one of {', '.join(SOURCES)}, got {row['src']!r}")
-            out["src"] = row["src"]
+        src = row.get("src")
+        if src is not None:
+            # a number is a source code of the research site that has no name yet
+            if not (src in OVERLAY_SOURCES or (isinstance(src, int) and not isinstance(src, bool))):
+                raise GenError(f"{where}.src: must be one of {', '.join(OVERLAY_SOURCES)} or a number, got {src!r}")
+            out["src"] = src
         if row.get("teacher") is not None:
             if not isinstance(row["teacher"], str):
                 raise GenError(f"{where}.teacher: must be text")
             out["teacher"] = row["teacher"]
-        unknown = sorted(set(row) - {"learn", "cost", "src", "teacher", "note"})
+        v = row.get("vendor")
+        if v is not None:
+            if not isinstance(v, dict) or not isinstance(v.get("npc"), int) or set(v) - {"name", "npc", "zone", "a", "h"}:
+                raise GenError(f"{where}.vendor: must be an object with npc and any of name, zone, a, h")
+            out["vendor"] = v
+        unknown = sorted(set(row) - {"learn", "cost", "y", "g", "src", "teacher", "vendor", "note"})
         if unknown:
             raise GenError(f"{where}: unknown field {unknown[0]!r}")
         recipes[int(key)] = out
     vendor = raw.get("vendor") or []
     if not isinstance(vendor, list) or any(isinstance(i, bool) or not isinstance(i, int) for i in vendor):
         raise GenError(f"overlay {path.name}: vendor must be a list of item ids")
-    return {"recipes": recipes, "vendor": set(vendor)}
+    listed = raw.get("listed") or []
+    if not isinstance(listed, list) or any(isinstance(i, bool) or not isinstance(i, int) for i in listed):
+        raise GenError(f"overlay {path.name}: listed must be a list of skill line ids")
+    ranks = {}
+    for key, rows in (raw.get("ranks") or {}).items():
+        where = f"overlay {path.name}: ranks[{key!r}]"
+        if not str(key).isdigit() or not isinstance(rows, list):
+            raise GenError(f"{where}: must be a skill line id with a list of rank rows")
+        for r in rows:
+            if not isinstance(r, dict) or not isinstance(r.get("name"), str) or not isinstance(r.get("cap"), int):
+                raise GenError(f"{where}: a rank row needs name and cap")
+            if set(r) - {"name", "cap", "skill", "cost", "where"}:
+                raise GenError(f"{where}: unknown field {sorted(set(r) - {'name', 'cap', 'skill', 'cost', 'where'})[0]!r}")
+        ranks[int(key)] = rows
+    source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
+    return {"recipes": recipes, "vendor": set(vendor), "listed": set(listed), "ranks": ranks, "source": source}
 
 
 # ---------------------------------------------------------------- recipe data
@@ -226,7 +268,8 @@ def count(n: float):
 
 def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None) -> tuple[dict, list[str]]:
     """The whole Recipes.lua table from the CSV rows, and warnings (overlay entries that match no recipe)."""
-    overlay = overlay or {"recipes": {}, "vendor": set()}
+    overlay = {**EMPTY_OVERLAY, **(overlay or {})}
+    stats = {"thresholds": 0, "listed_gone": 0}
     # child lines share the parent's name; the recipes sit on the parent, whose own row names it
     line_names = {int(r["ID"]): (r.get("DisplayName_lang") or "").strip() for r in t["SkillLine"]}
     spell_names = {int(r["ID"]): r["Name_lang"] for r in t["SpellName"]}
@@ -276,18 +319,43 @@ def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None
         item = teaches.get(spell)
         over = overlay["recipes"].get(spell, {})
         src = "item" if item is not None else ("auto" if int(num(r.get("AcquireMethod"))) == ACQUIRE_AUTO else "trainer")
-        src = over.get("src", src)
+        osrc, came, teacher = over.get("src"), None, over.get("teacher")
+        # a trainer recipe the overlay does not call one (no source stated, or a class skill it has no learn rank for)
+        unconfirmed = None
+        if line in overlay["listed"] and spell not in overlay["recipes"]:
+            src = "unlisted"
+        elif osrc in ("auto", "trainer", "item", "special"):
+            src = osrc
+        elif osrc is not None:
+            # where the recipe item comes from; with no recipe item in the client data, the source teaches it itself
+            came = osrc if isinstance(osrc, str) else f"source {osrc}"
+            if item is None:
+                src, teacher = "special", teacher or f"a {came}"
+        elif src == "trainer" and overlay["listed"]:
+            unconfirmed = True
+        if "y" in over or "g" in over:
+            stats["thresholds"] += 1
+        yellow, grey = over.get("y", yellow), over.get("g", grey)
         scroll = items.get(item, {}) if item is not None else {}
         learn = over.get("learn", scroll.get("reqSkillRank") or None)
         # an item the recipe needs (a reagent, the product, its recipe item) with no ItemSparse row is not in the
         # game in this build: the recipe stays in the file, flagged, and the planner leaves it out
         needs = list(reagents[spell]) + [i for i in (product, item) if i is not None]
         gone = any(i not in items for i in needs)
+        if gone and src != "unlisted" and line in overlay["listed"]:
+            # the overlay lists it as a recipe of the game: the build's item table is what is incomplete (items can
+            # reach the client outside the exported tables). The recipe is planned; its item has no bundled name.
+            stats["listed_gone"] += 1
+            gone = False
         prof["recipes"][spell] = {
             "y": yellow, "g": grey, "k": max(1, int(num(r.get("NumSkillUps"), 1))), "name": name,
             "mats": [x for i, n in sorted(reagents[spell].items()) for x in (i, n)],
             "makes": product, "n": count(made) if product else None, "src": src, "item": item, "learn": learn,
-            "teacher": over.get("teacher"), "cost": over.get("cost"),
+            "teacher": teacher, "cost": over.get("cost"),
+            # the recipe item's source (vendor, quest, drop, crafted) and the one vendor the overlay names for it:
+            # { name, npc, zone, a, h } (a / h = the NPC's reaction to Alliance / Horde, absent when not known)
+            "from": came if src == "item" else None, "vendor": over.get("vendor") if src == "item" else None,
+            "unc": unconfirmed,
             # the recipe item: binds when picked up (never an auction buy), what a vendor would ask for one (the
             # client's BuyPrice; which vendor sells it, if any, is the overlay's to say), and the reputation it needs
             "bop": True if scroll.get("bonding") == BIND_ON_PICKUP else None,
@@ -299,9 +367,23 @@ def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None
                 for s in sorted(set(overlay["recipes"]) - seen_spells)]
     for line, prof in professions.items():
         prof["side"] = True if len(prof["recipes"]) < MIN_CRAFT_RECIPES else None
-        prof["ranks"] = None if line in NO_RANKS else [
-            {"name": name, "cap": cap, "skill": skill or None, "cost": cost, "where": "trainer", "confirmed": False}
-            for name, cap, skill, cost in DEFAULT_RANKS]
+        # the classic ranks, each replaced by the overlay's row of that name. A rank the overlay gives without a
+        # trainer (a quest) keeps the classic skill and has no price; one it lacks altogether (the Expert Cooking
+        # book) keeps the classic numbers with where = "unknown". All are confirmed = false.
+        given = {r["name"]: r for r in overlay["ranks"].get(line, [])}
+        ranks = []
+        for name, cap, skill, cost in DEFAULT_RANKS:
+            o = given.get(name)
+            if o is None:
+                ranks.append({"name": name, "cap": cap, "skill": skill or None, "cost": cost,
+                              "where": "unknown" if given else "trainer", "confirmed": False})
+            elif o.get("where", "trainer") == "trainer":
+                ranks.append({"name": name, "cap": o["cap"], "skill": o.get("skill"), "cost": o.get("cost"),
+                              "where": "trainer", "confirmed": False})
+            else:
+                ranks.append({"name": name, "cap": o["cap"], "skill": o.get("skill", skill or None), "cost": None,
+                              "where": o["where"], "confirmed": False})
+        prof["ranks"] = None if line in NO_RANKS else ranks
 
     item_ids, made_by = set(), {}
     for _, prof in sorted(professions.items()):
@@ -331,8 +413,10 @@ def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None
             vendor[i] = count(info["buy"] / info["lot"])
         elif i in overlay["vendor"]:
             warnings.append(f"overlay: vendor item {i} has no vendor price in ItemSparse")
-    data = {"version": 2, "build": build, "vendor": vendor, "items": out_items,
-            "professions": dict(sorted(professions.items()))}
+    src = overlay["source"]
+    data = {"version": 2, "build": build,
+            "source": f"{src['name']}, {src.get('retrieved', 'date unknown')}" if src.get("name") else None,
+            "vendor": vendor, "items": out_items, "professions": dict(sorted(professions.items())), "stats": stats}
     return data, warnings
 
 
@@ -345,10 +429,20 @@ def summary(data: dict) -> list[str]:
         no_learn = sum(1 for r in live if r["src"] == "trainer" and r["learn"] is None)
         bop = sum(1 for r in live if r["src"] == "item" and r["bop"])
         trade = sum(1 for r in live if r["src"] == "item" and not r["bop"])
+        usable = [r for r in live if r["src"] != "unlisted"]
+        learn = sum(1 for r in usable if r["learn"] is not None)
         lines.append(f"{line:>4} {prof['name']:<16} {len(rows):>4} recipes ({len(rows) - len(live)} gone): "
                      f"{by['auto']} auto, {by['trainer']} trainer ({no_learn} in the game without a learn rank), "
-                     f"{by['item']} item ({trade} tradeable, {bop} bind on pickup), {by['special']} special")
-    lines.append(f"{len(data['items'])} items, {len(data['vendor'])} vendor reagents")
+                     f"{by['item']} item ({trade} tradeable, {bop} bind on pickup), {by['special']} special, "
+                     f"{by['unlisted']} unlisted; learn rank on {learn} of {len(usable)} usable")
+    for line, prof in data["professions"].items():
+        names = sorted(r["name"] for r in prof["recipes"].values() if r["src"] == "unlisted")
+        if names:
+            lines.append(f"{line:>4} {prof['name']} unlisted ({len(names)}): {', '.join(names)}")
+    stats = data.get("stats") or {}
+    lines.append(f"{len(data['items'])} items, {len(data['vendor'])} vendor reagents, {stats.get('thresholds', 0)} "
+                 f"threshold overrides from the overlay, {stats.get('listed_gone', 0)} listed recipes kept although "
+                 "an item of theirs is not in the build's item table")
     return lines
 
 
@@ -370,7 +464,7 @@ def coverage(prof: dict, top: int = TOP_RANK_CAP, items: bool = True) -> list[tu
     flagged gone, special teachers, recipe items that bind when picked up, and with items=False every recipe item."""
     spans = []
     for r in prof["recipes"].values():
-        if r["gone"] or r["src"] == "special" or (r["src"] == "item" and (r["bop"] or not items)):
+        if r["gone"] or r["src"] in ("special", "unlisted") or (r["src"] == "item" and (r["bop"] or not items)):
             continue
         if r["src"] == "trainer":
             start = r["learn"] if r["learn"] is not None else r["y"]
@@ -450,7 +544,9 @@ def render(data: dict) -> str:
         "-- it turns yellow / grey, k = skill-ups a craft, mats = { item, count, ... }, makes / n = the item made and how",
         "-- many, src = auto | trainer | item | special, item = the recipe item, learn = the skill needed to learn it,",
         "-- bop = the recipe item binds when picked up, buy = its vendor price, faction / rep = the reputation it needs,",
-        "-- gone = an item the recipe needs is not in this build's item data (left out of plans).",
+        "-- gone = an item the recipe needs is not in this build's item data (left out of plans), from = where the recipe",
+        "-- item comes from (vendor, quest, drop, crafted), vendor = the one vendor known to sell it, unc = a trainer",
+        "-- recipe no source confirms. src = unlisted: not in the overlay's list for its profession (a gated shortcut).",
         "-- No auction prices: those come from TradeSkillMaster in game.",
         "-- luacheck: ignore",
         "local _, ns = ...",
@@ -458,8 +554,10 @@ def render(data: dict) -> str:
         "ns.Data.recipes = {",
         f"\tversion = {data['version']},",
         f"\tbuild = {lua_str(data['build'])},",
-        "\tvendor = {",
     ]
+    if data.get("source"):
+        out.append(f"\tsource = {lua_str(data['source'])},")
+    out.append("\tvendor = {")
     out += [f"\t\t[{i}] = {lua_inline(p)}," for i, p in data["vendor"].items()]
     out += ["\t},", "\titems = {"]
     out += [f"\t\t[{i}] = {lua_inline(row)}," for i, row in data["items"].items()]
