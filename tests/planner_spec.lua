@@ -594,6 +594,17 @@ describe("Owned raw reagents of an intermediate", function()
 		assert.is_nil(bought[I.SALT])
 	end)
 
+	-- Owned Salt alone (a vendor item) is no reason to cure: the hides would be bought anyway, and at buy prices the
+	-- cured hide is the cheaper route (under CRAFT_SAVING).
+	it("buys the intermediate when only a vendor raw of its recipe is owned", function()
+		local input = pantsInput(0)
+		input.have = { [I.SALT] = 40, [I.LIGHT] = 400 }
+		local st = P.run(input).steps[1]
+		assert.equal("Light Leather Pants", st.name)
+		assert.same({}, st.pre)
+		assert.is_nil(boughtOf(st)[I.HIDE])
+	end)
+
 	-- In game: 15 Medium Hide and 15 Salt, one Cured Medium Hide, plenty of leather: cure, never buy cured hides.
 	it("cures owned hides when one cured hide and owned leather are in the bags too", function()
 		local input = pantsInput(16)

@@ -561,8 +561,9 @@ function P.prepare(input)
 							-- the raw reagents the variant crafts from (Medium Hide, Salt): the stock pass offers it only
 							-- when one of them is owned surplus, never for a reagent the plain recipe shares (the leather)
 							o.raws = {}
-							for i in pairs(fm) do
-								if not plain[i] then
+							for i, n in pairs(fm) do
+								-- more than the plain recipe takes: a raw the plain recipe also lists counts too
+								if n > (plain[i] or 0) + EPS then
 									o.raws[i] = true
 								end
 							end
