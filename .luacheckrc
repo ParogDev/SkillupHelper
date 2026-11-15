@@ -36,8 +36,13 @@ else
 		"CreateColor", "GetBindingKey", "GetCurrentBindingSet", "GetCursorPosition", "IsAltKeyDown",
 		"IsControlKeyDown", "IsShiftKeyDown", "OpenWorldMap", "SaveBindings", "SetBinding", "C_SkillInfo",
 		"UnitClassBase", "GetLocale", "UnitFactionGroup", "UnitClass", "C_SuperTrack", "UISpecialFrames",
+		-- pixel snapping (Widgets) and the minimap button's optional LibDataBroker launcher (FieldUI)
+		"GetPhysicalScreenSize", "LibStub",
 	}
 end
+-- The minimap button (FieldUI.lua): the Minimap frame, and the global addons that reshape the minimap define.
+read_globals[#read_globals + 1] = "Minimap"
+read_globals[#read_globals + 1] = "GetMinimapShape"
 -- FrameXML globals for the vendor buy: the merchant window and bag constants.
 for _, g in ipairs({ "MerchantFrame", "LE_LOOT_FILTER_ALL", "NUM_BAG_SLOTS", "NUM_TOTAL_EQUIPPED_BAG_SLOTS" }) do
 	read_globals[#read_globals + 1] = g

@@ -853,6 +853,8 @@ local function placeChip()
 	else
 		chip:SetPoint("TOP", UIParent, "TOP", 0, -170)
 	end
+	-- on whole pixels, also for a point saved before the snap existed (Widgets.lua, "pixels")
+	ns.Widgets.snap(chip)
 end
 
 local function tip(owner, lines)
@@ -1138,7 +1140,7 @@ local function create()
 		if not dragging then
 			return
 		end
-		chip:StopMovingOrSizing()
+		ns.Widgets.dragStop(chip) -- stops and snaps to whole pixels: savePoint below keeps the snapped point
 		dragging, dragStoppedAt = false, GetTime()
 		savePoint()
 		placeSecure()
@@ -1158,6 +1160,8 @@ local function create()
 	chip:SetScript("OnUpdate", function(self, elapsed)
 		ns.guard("guide tick", onUpdate, self, elapsed)
 	end)
+	-- the chip's frames are made without the Widgets constructors: round their layout to whole pixels once
+	ns.Widgets.roundAll(chip)
 
 	sb = CreateFrame("Button", "SkillupHelperGuideTarget", UIParent, "SecureActionButtonTemplate")
 	sb:SetFrameStrata("MEDIUM")

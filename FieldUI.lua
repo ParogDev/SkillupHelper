@@ -237,6 +237,8 @@ local function placeField()
 	else
 		field:SetPoint("RIGHT", UIParent, "RIGHT", -120, 0)
 	end
+	-- on whole pixels wherever it lands (a saved point from before the snap, or beside a tracker)
+	W.snap(field)
 end
 
 local function createField()
@@ -254,10 +256,10 @@ local function createField()
 		end
 	end)
 	field:SetScript("OnDragStop", function(self)
-		self:StopMovingOrSizing()
-		local point, _, _, x, y = self:GetPoint(1)
-		if point then
-			state("field").point = { point, x, y }
+		-- the saved point is the snapped one
+		local p = W.dragStop(self)
+		if p then
+			state("field").point = p
 		end
 	end)
 	field:SetBackdrop({ bgFile = W.WHITE, edgeFile = W.WHITE, edgeSize = 1 })
@@ -288,8 +290,9 @@ local function createField()
 	field.buttons = W.pool(function()
 		return W.button(field, 96, 24)
 	end)
-	field:SetScript("OnShow", function()
+	field:SetScript("OnShow", function(self)
 		F.stats.fieldShows = F.stats.fieldShows + 1
+		W.snap(self)
 	end)
 	field:Hide()
 end
@@ -447,10 +450,10 @@ local function createTracker()
 		end
 	end)
 	tracker:SetScript("OnDragStop", function(self)
-		self:StopMovingOrSizing()
-		local point, _, _, x, y = self:GetPoint(1)
-		if point then
-			state("tracker").point = { point, x, y }
+		-- the saved point is the snapped one
+		local p = W.dragStop(self)
+		if p then
+			state("tracker").point = p
 		end
 		if field and field:IsShown() then
 			placeField()
@@ -493,6 +496,11 @@ local function createTracker()
 	else
 		tracker:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -260, -220)
 	end
+	-- a point saved before the snap existed (or at another UI scale) is put on whole pixels, now and at each show
+	W.snap(tracker)
+	tracker:SetScript("OnShow", function(self)
+		W.snap(self)
+	end)
 	tracker:Hide()
 end
 
@@ -648,5 +656,338 @@ function F.diag()
 		ticks = F.stats.ticks,
 		menuWhy = F.stats.menuWhy,
 		map = field and field.card.map:Stats() or nil,
+	}
+end
+
+------------------------------------------------------------------------------------------------------ minimap button
+
+-- One button on the minimap's edge (no LibDBIcon: nothing is vendored). Left click toggles the journal, right click
+-- opens a menu, a left drag moves it around the edge. The angle and the hidden flag are saved in
+-- SkillupHelperDB.ui.minimap = { angle, hide }. What a click does and what the tooltip says come from
+-- F.minimapProvider = { toggle(), menu() -> W.menu's table, tip() -> lines } (Journal.lua sets it): this file only
+-- draws. The frame is insecure and a child of Minimap (Blizzard_Minimap/Mainline/Minimap.xml: no protected
+-- attribute), so it may be shown, hidden and moved in combat.
+local MM_SIZE, MM_PAD, MM_ANGLE = 31, 5, 215
+local MM_ICON = "Interface\\Icons\\Trade_LeatherWorking" -- the TOC's IconTexture
+local MM_BORDER = "Interface\\Minimap\\MiniMap-TrackingBorder"
+local MM_HIGHLIGHT = "Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight"
+local MM_HINT = "Left-click: journal. Right-click: menu. Drag: move."
+
+-- LibDBIcon's table: per minimap shape, which quadrants are round ({ bottom-right, bottom-left, top-right,
+-- top-left }). GetMinimapShape is a global that addons which reshape the minimap define; absent means "ROUND".
+F.MINIMAP_SHAPES = {
+	ROUND = { true, true, true, true },
+	SQUARE = { false, false, false, false },
+	["CORNER-TOPLEFT"] = { false, false, false, true },
+	["CORNER-TOPRIGHT"] = { false, false, true, false },
+	["CORNER-BOTTOMLEFT"] = { false, true, false, false },
+	["CORNER-BOTTOMRIGHT"] = { true, false, false, false },
+	["SIDE-LEFT"] = { false, true, false, true },
+	["SIDE-RIGHT"] = { true, false, true, false },
+	["SIDE-TOP"] = { false, false, true, true },
+	["SIDE-BOTTOM"] = { true, true, false, false },
+	["TRICORNER-TOPLEFT"] = { false, true, true, true },
+	["TRICORNER-TOPRIGHT"] = { true, false, true, true },
+	["TRICORNER-BOTTOMLEFT"] = { true, true, false, true },
+	["TRICORNER-BOTTOMRIGHT"] = { true, true, true, false },
+}
+
+local mm
+F.minimapStats = { clicks = 0 }
+
+-- Pure. The button's offset from the minimap's centre for an angle in degrees (0 = east, counter-clockwise), the
+-- minimap's half width and half height and its shape: on the circle of radius half + 5 in a round quadrant, on the
+-- square's edge in a square one (LibDBIcon's rule).
+function F.minimapOffset(angleDeg, halfW, halfH, shape)
+	local a = math.rad(type(angleDeg) == "number" and angleDeg or MM_ANGLE)
+	local x, y, q = math.cos(a), math.sin(a), 1
+	if x < 0 then
+		q = q + 1
+	end
+	if y > 0 then
+		q = q + 2
+	end
+	local quads = type(shape) == "string" and F.MINIMAP_SHAPES[shape] or F.MINIMAP_SHAPES.ROUND
+	halfW = type(halfW) == "number" and halfW or 0
+	local w, h = halfW + MM_PAD, (type(halfH) == "number" and halfH or halfW) + MM_PAD
+	if quads[q] then
+		return x * w, y * h
+	end
+	local dw, dh = math.sqrt(2 * w * w) - 10, math.sqrt(2 * h * h) - 10
+	return math.max(-w, math.min(x * dw, w)), math.max(-h, math.min(y * dh, h))
+end
+
+-- Pure. The angle in degrees (0 to 360) from the minimap's centre to the cursor. The cursor is in screen pixels
+-- (GetCursorPosition), the centre in the minimap's own units, `scale` the minimap's effective scale (what
+-- MinimapMixin:OnClick divides by). nil and the broken link when it cannot say.
+function F.minimapAngle(cursorX, cursorY, centerX, centerY, scale)
+	local function num(v)
+		return not W.secret(v) and type(v) == "number"
+	end
+	if not (num(cursorX) and num(cursorY) and num(centerX) and num(centerY)) then
+		return nil, "the cursor or the minimap's centre is not readable"
+	end
+	if not num(scale) or scale <= 0 then
+		scale = 1
+	end
+	local dx, dy = cursorX / scale - centerX, cursorY / scale - centerY
+	if dx == 0 and dy == 0 then
+		return nil, "the cursor is on the minimap's centre"
+	end
+	return math.deg(math.atan2(dy, dx)) % 360
+end
+
+-- Pure. Where a tooltip goes so it stays on screen: its own point and the button's point, from the button's centre
+-- and the screen's size in the same units (LibDBIcon's rule).
+function F.minimapTipAnchor(x, y, screenW, screenH)
+	if type(x) ~= "number" or type(y) ~= "number" or type(screenW) ~= "number" or type(screenH) ~= "number" then
+		return "TOPRIGHT", "BOTTOMLEFT"
+	end
+	local h = x > screenW * 2 / 3 and "RIGHT" or (x < screenW / 3 and "LEFT" or "")
+	local v = y > screenH / 2 and "TOP" or "BOTTOM"
+	return v .. h, (v == "TOP" and "BOTTOM" or "TOP") .. h
+end
+
+local function mmState()
+	local s = state("minimap")
+	if type(s.angle) ~= "number" then
+		s.angle = MM_ANGLE
+	end
+	s.hide = s.hide == true
+	return s
+end
+
+local function minimapShape()
+	local s = GetMinimapShape and GetMinimapShape() or "ROUND"
+	if W.secret(s) or type(s) ~= "string" or not F.MINIMAP_SHAPES[s] then
+		return "ROUND"
+	end
+	return s
+end
+
+-- Puts the button at its saved angle; the offsets are whole pixels.
+function F.minimapPlace()
+	if not (mm and Minimap) then
+		return false
+	end
+	local shape = minimapShape()
+	F.minimapStats.shape = shape
+	local x, y = F.minimapOffset(mmState().angle, (Minimap:GetWidth() or 0) / 2, (Minimap:GetHeight() or 0) / 2, shape)
+	mm:ClearAllPoints()
+	mm:SetPoint("CENTER", Minimap, "CENTER", W.px(mm, x), W.px(mm, y))
+	return true
+end
+
+-- The tooltip's lines: { title, line, ... }, a line a string or { text, tone } (the provider guards secrets).
+function F.minimapTipLines()
+	local p = F.minimapProvider
+	local lines = p and p.tip and p.tip()
+	if type(lines) ~= "table" or lines[1] == nil then
+		lines = { "SkillupHelper", { MM_HINT, "ash" } }
+	end
+	return lines
+end
+
+-- Adds the lines to a tooltip (ours, or the one an LDB display hands to OnTooltipShow).
+function F.minimapFillTip(tt)
+	for i, l in ipairs(F.minimapTipLines()) do
+		local s = type(l) == "table" and l[1] or l
+		local r, g, b = W.rgb(i == 1 and "gold" or (type(l) == "table" and l[2] or "ash"))
+		tt:AddLine(s, r, g, b, i > 1)
+	end
+end
+
+local function showMinimapTip(self)
+	if not GameTooltip then
+		return
+	end
+	local x, y = self:GetCenter()
+	local k = (self:GetEffectiveScale() or 1) / (UIParent:GetEffectiveScale() or 1)
+	local point, relPoint = F.minimapTipAnchor(
+		type(x) == "number" and x * k or nil,
+		type(y) == "number" and y * k or nil,
+		UIParent:GetWidth(),
+		UIParent:GetHeight()
+	)
+	GameTooltip:SetOwner(self, "ANCHOR_NONE")
+	GameTooltip:SetPoint(point, self, relPoint, 0, 0)
+	F.minimapFillTip(GameTooltip)
+	GameTooltip:Show()
+end
+
+-- A click, from the button or an LDB display: left toggles the journal, right opens the menu at `owner`.
+function F.minimapClick(button, owner)
+	F.minimapStats.clicks = F.minimapStats.clicks + 1
+	local p = F.minimapProvider or {}
+	if button == "RightButton" then
+		local ok, why = W.menu(owner or mm or UIParent, p.menu and p.menu() or nil)
+		F.minimapStats.why = not ok and why or nil
+		return ok, why
+	end
+	if not p.toggle then
+		F.minimapStats.why = "the journal is not wired to the button"
+		return false, F.minimapStats.why
+	end
+	p.toggle()
+	return true
+end
+
+local function dragTick()
+	local cx, cy = GetCursorPosition()
+	local mx, my = Minimap:GetCenter()
+	local a, why = F.minimapAngle(cx, cy, mx, my, Minimap:GetEffectiveScale())
+	if not a then
+		F.minimapStats.why = why
+		return
+	end
+	mmState().angle = math.floor(a * 10 + 0.5) / 10
+	F.minimapPlace()
+end
+
+-- Makes the button (once). nil and the broken link when the client has no Minimap frame.
+function F.minimapCreate()
+	if mm then
+		return mm
+	end
+	if not Minimap then
+		F.minimapStats.why = "the Minimap frame is absent"
+		return nil, F.minimapStats.why
+	end
+	mm = W.frame("Button", "SkillupHelperMinimapButton", Minimap)
+	mm:SetSize(MM_SIZE, MM_SIZE)
+	-- above the minimap and its own art, as LibDBIcon does; fixed, so a raise of the minimap does not bury it
+	mm:SetFrameStrata("MEDIUM")
+	mm:SetFrameLevel(8)
+	if mm.SetFixedFrameStrata then
+		mm:SetFixedFrameStrata(true)
+	end
+	if mm.SetFixedFrameLevel then
+		mm:SetFixedFrameLevel(true)
+	end
+	mm:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	mm:RegisterForDrag("LeftButton")
+	mm:SetHighlightTexture(MM_HIGHLIGHT, "ADD")
+	-- LibDBIcon's layout: a 20-px icon inside the 53-px ring texture whose ring sits in its top-left 31 px
+	mm.icon = W.tex(mm, "BACKGROUND")
+	mm.icon:SetSize(20, 20)
+	mm.icon:SetPoint("TOPLEFT", 7, -5)
+	mm.icon:SetTexture(MM_ICON)
+	mm.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+	if mm.CreateMaskTexture and mm.icon.AddMaskTexture then
+		mm.mask = mm:CreateMaskTexture()
+		mm.mask:SetAllPoints(mm.icon)
+		mm.mask:SetTexture(W.CIRCLE, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+		mm.icon:AddMaskTexture(mm.mask)
+	end
+	mm.border = W.tex(mm, "OVERLAY")
+	mm.border:SetSize(53, 53)
+	mm.border:SetPoint("TOPLEFT")
+	mm.border:SetTexture(MM_BORDER)
+
+	mm:SetScript("OnClick", function(self, button)
+		F.minimapClick(button, self)
+	end)
+	mm:SetScript("OnDragStart", function(self)
+		self.dragging = true
+		self:LockHighlight()
+		if GameTooltip then
+			GameTooltip:Hide()
+		end
+		self:SetScript("OnUpdate", dragTick)
+	end)
+	mm:SetScript("OnDragStop", function(self)
+		self:SetScript("OnUpdate", nil)
+		dragTick() -- where the button was let go; the angle is already in the saved table
+		self.dragging = false
+		self:UnlockHighlight()
+	end)
+	mm:SetScript("OnEnter", function(self)
+		if not self.dragging then
+			showMinimapTip(self)
+		end
+	end)
+	mm:SetScript("OnLeave", function()
+		if GameTooltip then
+			GameTooltip:Hide()
+		end
+	end)
+	return mm
+end
+
+-- Shows or hides the button and keeps the choice. Hidden is hidden, never destroyed.
+function F.minimapSetShown(show)
+	show = show and true or false
+	mmState().hide = not show
+	local b = F.minimapCreate()
+	if not b then
+		return false, F.minimapStats.why
+	end
+	if show then
+		F.minimapPlace()
+	end
+	b:SetShown(show)
+	return true
+end
+
+-- A LibDataBroker launcher when another addon brought LibDataBroker (it is not vendored here), so broker bars show
+-- the same click and the same tooltip. Nothing is registered with LibDBIcon even when it is loaded: the button
+-- above is the icon, and a second one would sit beside it.
+function F.minimapPublish()
+	if F.minimapLDB then
+		return true
+	end
+	local ok, ldb = pcall(function()
+		return LibStub and LibStub:GetLibrary("LibDataBroker-1.1", true)
+	end)
+	if not (ok and type(ldb) == "table" and ldb.NewDataObject) then
+		F.minimapStats.ldb = "LibDataBroker not loaded"
+		return false, F.minimapStats.ldb
+	end
+	local made, obj = pcall(ldb.NewDataObject, ldb, "SkillupHelper", {
+		type = "launcher",
+		label = "SkillupHelper",
+		icon = MM_ICON,
+		OnClick = function(owner, button)
+			F.minimapClick(button, owner)
+		end,
+		OnTooltipShow = function(tt)
+			F.minimapFillTip(tt)
+		end,
+	})
+	if not (made and obj) then
+		F.minimapStats.ldb = "LibDataBroker refused the data object"
+		return false, F.minimapStats.ldb
+	end
+	F.minimapLDB = obj
+	F.minimapStats.ldb = "published"
+	return true
+end
+
+-- At PLAYER_LOGIN, after the saved state is attached: one button, at its saved angle, hidden if the user hid it.
+function F.minimapInit()
+	local b = F.minimapCreate()
+	if b then
+		F.minimapPlace()
+		b:SetShown(not mmState().hide)
+	end
+	F.minimapPublish()
+	return b
+end
+
+function F.minimapButton()
+	return mm
+end
+
+function F.minimapDiag()
+	local s = mmState()
+	return {
+		created = mm ~= nil,
+		shown = mm ~= nil and mm:IsShown() or false,
+		angle = s.angle,
+		hide = s.hide,
+		shape = F.minimapStats.shape or minimapShape(),
+		ldb = F.minimapStats.ldb or "not tried yet (before PLAYER_LOGIN)",
+		clicks = F.minimapStats.clicks,
+		why = F.minimapStats.why,
 	}
 end
