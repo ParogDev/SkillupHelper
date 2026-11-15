@@ -86,7 +86,7 @@ describe("no false hole", function()
 				priced.recipes[spell] = r
 			end
 		end
-		-- an item TradeSkillMaster has no price for comes back as { buy = false } (and is counted as "live")
+		-- an item TradeSkillMaster has no price for comes back as { buy = false } (and is counted as "none")
 		local price, product = ns.TSM.prices(data, priced, getter(none), 0.5)
 		local cap = 300
 		for _, rk in ipairs(prof.ranks or {}) do

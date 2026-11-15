@@ -102,7 +102,8 @@ function T.prices(plan, prof, get, sellShare)
 			local v, fromExport = marketOf(i)
 			e.buy, e.where, e.export = v, v and "ah" or nil, fromExport
 		end
-		if e.buy == nil then
+		-- no price leaves buy = false (marketOf's "looked, nothing"), never a live price
+		if not e.buy then
 			counts.none = counts.none + 1
 		elseif e.export then
 			counts.export = counts.export + 1

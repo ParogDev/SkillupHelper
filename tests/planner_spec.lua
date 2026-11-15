@@ -284,6 +284,18 @@ describe("Planner scenarios", function()
 		assert.is_true(n >= 3)
 	end)
 
+	it("S5b an item with no live and no export price counts as none, never as live", function()
+		local ns = load()
+		local plan = { items = { [1] = { name = "Priced" }, [2] = { name = "Nowhere" } }, vendor = {} }
+		local prof = { recipes = { [9] = { mats = { 1, 1, 2, 1 } } } }
+		local price, _, counts = ns.TSM.prices(plan, prof, function(source, item)
+			return source == "dbmarket" and item == 1 and 70 or nil
+		end)
+		assert.same({ 1, 0, 1 }, { counts.live, counts.export, counts.none })
+		assert.is_falsy(price[2].buy)
+		assert.equal(70, price[1].buy)
+	end)
+
 	it("S6 passes 2 to 4 stay under 3 ms (budget 2 ms plus half) on the Leatherworking fixture", function()
 		local recipes = {}
 		for s, r in pairs(F.LEATHER) do
