@@ -84,10 +84,15 @@ TOP_RANK_CAP = 300
 DEFAULT_RANKS = (("Apprentice", 75, 0, 10), ("Journeyman", 150, 50, 500), ("Expert", 225, 125, 5000),
                  ("Artisan", 300, 200, 50000))
 # Skill lines with no trainer ranks: Poisons is a class skill, capped by character level.
-NO_RANKS = {40}
+NO_RANKS = {40, 633}  # Lockpicking too
 # A line with fewer craft recipes than this is not levelled by crafting (a gathering skill with a few craftables): it
 # is written with `side = true`, and the coverage check and the cost overview skip it.
 MIN_CRAFT_RECIPES = 10
+# Skills raised in the world, not (or not only) by crafting: Mining, Herbalism, Fishing, Skinning, Lockpicking.
+WORLD_LINES = (186, 182, 356, 393, 633)
+# Data/Spots.lua's rule (bandsConfirmed = false there): a world target gives skill from its requirement until this
+# many points above it.
+SPOT_GREY = 100
 
 # Reagents vendors sell (thread, dye, salt, spices, water, milk, vials). More go in overlay.json "vendor".
 VENDOR_REAGENTS = {
@@ -206,7 +211,7 @@ def load_overlay(path: Path) -> dict:
         if not isinstance(row, dict):
             raise GenError(f"{where}: must be an object")
         out = {}
-        for field in ("learn", "cost", "y", "g"):
+        for field in ("learn", "cost", "y", "g", "level"):
             v = row.get(field)
             if v is not None:
                 if isinstance(v, bool) or not isinstance(v, int) or v < 0:
@@ -227,7 +232,7 @@ def load_overlay(path: Path) -> dict:
             if not isinstance(v, dict) or not isinstance(v.get("npc"), int) or set(v) - {"name", "npc", "zone", "a", "h"}:
                 raise GenError(f"{where}.vendor: must be an object with npc and any of name, zone, a, h")
             out["vendor"] = v
-        unknown = sorted(set(row) - {"learn", "cost", "y", "g", "src", "teacher", "vendor", "note"})
+        unknown = sorted(set(row) - {"learn", "cost", "y", "g", "level", "src", "teacher", "vendor", "note"})
         if unknown:
             raise GenError(f"{where}: unknown field {unknown[0]!r}")
         recipes[int(key)] = out
@@ -331,7 +336,7 @@ def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None
             came = osrc if isinstance(osrc, str) else f"source {osrc}"
             if item is None:
                 src, teacher = "special", teacher or f"a {came}"
-        elif src == "trainer" and overlay["listed"]:
+        elif src == "trainer" and overlay["listed"] and "level" not in over:
             unconfirmed = True
         if "y" in over or "g" in over:
             stats["thresholds"] += 1
@@ -356,6 +361,8 @@ def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None
             # { name, npc, zone, a, h } (a / h = the NPC's reaction to Alliance / Horde, absent when not known)
             "from": came if src == "item" else None, "vendor": over.get("vendor") if src == "item" else None,
             "unc": unconfirmed,
+            # learned by character level, not by skill (the rogue's poisons)
+            "level": over.get("level"),
             # the recipe item: binds when picked up (never an auction buy), what a vendor would ask for one (the
             # client's BuyPrice; which vendor sells it, if any, is the overlay's to say), and the reputation it needs
             "bop": True if scroll.get("bonding") == BIND_ON_PICKUP else None,
@@ -365,8 +372,15 @@ def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None
         }
     warnings = [f"overlay: spell {s} is not a craft recipe in build {build}"
                 for s in sorted(set(overlay["recipes"]) - seen_spells)]
+    for line in WORLD_LINES:
+        # a skill raised in the world that has no craft recipe at all (Lockpicking) still gets an entry
+        if line not in professions and line_names.get(line):
+            professions[line] = {"name": line_names[line], "to": TOP_RANK_CAP, "recipes": {}}
     for line, prof in professions.items():
         prof["side"] = True if len(prof["recipes"]) < MIN_CRAFT_RECIPES else None
+        # raised mostly or wholly in the world (nodes, herbs, skins, fish, locks): its coverage is recipes plus the
+        # world spots of Data/Spots.lua, never recipes alone
+        prof["world"] = True if line in WORLD_LINES else None
         # the classic ranks, each replaced by the overlay's row of that name. A rank the overlay gives without a
         # trainer (a quest) keeps the classic skill and has no price; one it lacks altogether (the Expert Cooking
         # book) keeps the classic numbers with where = "unknown". All are confirmed = false.
@@ -477,14 +491,56 @@ def coverage(prof: dict, top: int = TOP_RANK_CAP, items: bool = True) -> list[tu
     return brackets(holes)
 
 
-def check(data: dict) -> tuple[list[str], bool]:
-    """--check: per crafting profession, the uncovered brackets with and without recipe items. True = a hole."""
+def spot_requirements(text: str) -> dict[int, list[int]]:
+    """Data/Spots.lua's world targets per skill line: the `req` of every row under `targets = {`."""
+    out: dict[int, list[int]] = {}
+    line, in_targets = None, False
+    for row in text.splitlines():
+        m = re.match(r"^\t\t\[(\d+)\] = \{", row)
+        if m:
+            line, in_targets = int(m.group(1)), False
+        elif line is not None and re.match(r"^\t\t\ttargets = \{", row):
+            in_targets = True
+        elif in_targets and re.match(r"^\t\t\t\}", row):
+            in_targets = False
+        elif in_targets:
+            m = re.search(r"\breq = (\d+)", row)
+            if m:
+                out.setdefault(line, []).append(int(m.group(1)))
+    return out
+
+
+def check(data: dict, spots: dict[int, list[int]] | None = None) -> tuple[list[str], bool]:
+    """--check: per crafting profession, the uncovered brackets with and without recipe items. True = a hole.
+    A skill raised in the world (prof["world"]) is covered by recipes plus world targets: with `spots` (the
+    requirements read from Data/Spots.lua) what neither covers is a hole; without, it only says it needs them."""
     lines, bad = [], False
     for line, prof in data["professions"].items():
-        if prof.get("side"):
-            continue
         full, plain = coverage(prof), coverage(prof, items=False)
         fmt = lambda b: ", ".join(f"{a}-{z + 1}" for a, z in b)  # noqa: E731
+        if prof.get("world"):
+            if spots is None:
+                lines.append(f"{line:>4} {prof['name']:<16} needs world spots"
+                             + (f" (recipes cover all but {fmt(full)})" if prof["recipes"] else " (no recipes)"))
+                continue
+            reqs = spots.get(line, [])
+            if not reqs:
+                # Fishing: its spots are zones with a skill, not targets with a requirement
+                lines.append(f"{line:>4} {prof['name']:<16} needs world spots; the spots file has no targets to check "
+                             "it against")
+                continue
+            left = brackets([s for a, z in full for s in range(a, z + 1)
+                             if not any(r <= s < r + SPOT_GREY for r in reqs)])
+            if left:
+                bad = True
+                lines.append(f"{line:>4} {prof['name']:<16} HOLE: neither a recipe nor a world target gives skill at "
+                             f"{fmt(left)}")
+            else:
+                lines.append(f"{line:>4} {prof['name']:<16} covered 1-{TOP_RANK_CAP} by recipes and {len(reqs)} world "
+                             "targets")
+            continue
+        if prof.get("side"):
+            continue
         if full:
             bad = True
             lines.append(f"{line:>4} {prof['name']:<16} HOLE: nothing gives skill at {fmt(full)}")
@@ -557,6 +613,8 @@ def render(data: dict) -> str:
     ]
     if data.get("source"):
         out.append(f"\tsource = {lua_str(data['source'])},")
+    # recipes per profession, so the addon can say what loaded without walking the tables
+    out.append("\tcounts = " + lua_inline({line: len(p["recipes"]) for line, p in data["professions"].items()}) + ",")
     out.append("\tvendor = {")
     out += [f"\t\t[{i}] = {lua_inline(p)}," for i, p in data["vendor"].items()]
     out += ["\t},", "\titems = {"]
@@ -566,6 +624,8 @@ def render(data: dict) -> str:
         out += [f"\t\t[{line}] = {{", f"\t\t\tname = {lua_str(prof['name'])},", f"\t\t\tto = {prof['to']},"]
         if prof.get("side"):
             out.append("\t\t\tside = true,")
+        if prof.get("world"):
+            out.append("\t\t\tworld = true,")
         if prof.get("ranks"):
             out.append("\t\t\tranks = {")
             out += [f"\t\t\t\t{lua_inline(r)}," for r in prof["ranks"]]
@@ -586,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offline", action="store_true", help="never download: use the cache only")
     ap.add_argument("--check", action="store_true",
                     help="write nothing: print per profession the skill brackets in 1..300 no recipe covers (exit 1 on a hole)")
+    ap.add_argument("--spots", help="with --check: Data/Spots.lua, so a skill raised in the world (Mining) is checked "
+                                    "against its world targets too")
     a = ap.parse_args(argv)
     try:
         cache = Path(a.cache) if a.cache else DEFAULT_CACHE
@@ -595,7 +657,13 @@ def main(argv: list[str] | None = None) -> int:
         if not data["professions"]:
             raise GenError(f"build {build}: no craft recipe found on any skill line")
         if a.check:
-            lines, bad = check(data)
+            spots = None
+            if a.spots:
+                f = Path(a.spots)
+                if not f.is_file():
+                    raise GenError(f"--spots {f.name}: no such file")
+                spots = spot_requirements(f.read_text(encoding="utf-8"))
+            lines, bad = check(data, spots)
             print(f"build {build}")
             for line in lines:
                 print(line)

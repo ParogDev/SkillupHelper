@@ -92,6 +92,9 @@ def convert(research: dict, items: dict, npcs: dict, db2: dict, retrieved: str, 
             stats["learn"] += 1
         if w.get("cost"):
             out["cost"] = int(w["cost"])
+        # a recipe with no learn skill and a character level (the rogue's poisons) is learned by level
+        if not isinstance(learn, int) and isinstance(w.get("level"), int) and w["level"] > 0:
+            out["level"] = w["level"]
         colors = w.get("colors")
         if isinstance(colors, list) and len(colors) == 4:
             if colors[1] != row["y"]:
