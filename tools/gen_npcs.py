@@ -72,7 +72,19 @@ def side(react) -> str | None:
     return "A" if a > h else "H"
 
 
-def build(w: dict, sql: dict, npcs: dict, items: dict, places: list, wowf_build: str) -> tuple[str, dict]:
+def read_seen(path: Path) -> dict:
+    """tools/data/npcs_seen.json's npcs ({ "<npc id>": { map, x, y, ... } }), empty when the file is absent."""
+    if not path.is_file():
+        return {}
+    seen = read_json(path, "seen positions").get("npcs") or {}
+    for key, row in seen.items():
+        if not isinstance(row, dict) or any(not isinstance(row.get(k), (int, float)) for k in ("map", "x", "y")):
+            raise gs.GenError(f"{path.name}: npcs[{key!r}] needs map, x and y")
+    return seen
+
+
+def build(w: dict, sql: dict, npcs: dict, items: dict, places: list, wowf_build: str,
+          seen: dict | None = None) -> tuple[str, dict]:
     zones = gs.Zones(w)
     templates = {int(t["Entry"]): t for t in sql["creature_template"]}
     spawns = collections.defaultdict(list)
@@ -129,6 +141,18 @@ def build(w: dict, sql: dict, npcs: dict, items: dict, places: list, wowf_build:
             z = hint[0] if hint else None
             row["map"] = z["id"] if z else None
             row["place"] = z["name"] if z else (area["AreaName_lang"] if area else None)
+        # a position players' games saw (tools/data/npcs_seen.json, written by tools/import_savedvars.py) wins over
+        # the Classic one: it is Forever's own
+        in_game = (seen or {}).get(str(npc_id))
+        if in_game:
+            z = zones.by_id.get(int(in_game["map"]))
+            row["map"], row["x"], row["y"] = int(in_game["map"]), round(in_game["x"], 1), round(in_game["y"], 1)
+            near = [(math.hypot(px - row["x"], py - row["y"]), place) for pm, px, py, place in places
+                    if pm == row["map"]]
+            near = [p for p in near if p[0] <= PLACE_REACH or (z and z["city"])]
+            row["place"] = min(near)[1] if near else (z["name"] if z else row.get("place"))
+            positioned = True
+            stats[("seen in game", "", "pos")] += 1
         row["role"] = ROLE_TRAINER if trains else ROLE_VENDOR
         if trains:
             row["trains"] = skill_name.get(trains[0])  # the one name Guide.seedRecords reads for role "trainer"
@@ -162,7 +186,8 @@ def build(w: dict, sql: dict, npcs: dict, items: dict, places: list, wowf_build:
             row["limited"] = collections.OrderedDict(sorted(limited.items())) or None
         if row["role"] == ROLE_VENDOR and not tpl:
             row["unsure"] = True  # not in the Classic data: vendor or drop source, the list does not say
-        row["classic"] = True if positioned else None
+        row["classic"] = True if positioned and not in_game else None
+        row["seen"] = True if in_game else None  # the position was seen in the Forever game itself
         row["nopos"] = None if positioned else True
         rows.append(row)
         for s in trains or ["vendor"]:
@@ -197,6 +222,8 @@ def main(argv=None) -> int:
     ap.add_argument("--build")
     ap.add_argument("--places", default=str(HERE.parent / "Data" / "Npcs.lua"))
     ap.add_argument("--download", action="store_true")
+    ap.add_argument("--seen", default=str(HERE / "data" / "npcs_seen.json"),
+                    help="positions seen in game (default: tools/data/npcs_seen.json, optional)")
     a = ap.parse_args(argv)
     try:
         wago = Path(a.wago)
@@ -204,7 +231,7 @@ def main(argv=None) -> int:
         text, info = build(
             gs.load_wago(wago, wowf_build, a.download), gs.load_sql(Path(a.cmangos), a.download, SQL_TABLES),
             read_json(Path(a.npcs), "NPC list"), read_json(Path(a.items), "recipe item list"),
-            read_places(Path(a.places)), wowf_build)
+            read_places(Path(a.places)), wowf_build, read_seen(Path(a.seen)))
         out = Path(a.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(out, "w", encoding="utf-8", newline="\n") as fh:
