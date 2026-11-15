@@ -57,6 +57,29 @@ describe("effectivePlan", function()
 		assert.equal(40, eff.vendor[10])
 	end)
 
+	it("walks every item row, overlay and shipped, once each (pairs alone sees only the overlay)", function()
+		local eff = L.effectivePlan(shipped(), { version = 2, items = { [1] = { mv = 123 }, [9] = { mv = 900 } } }, nil)
+		local direct = 0
+		for _ in pairs(eff.items) do
+			direct = direct + 1
+		end
+		assert.equal(2, direct)
+		local seen = {}
+		for item, row in L.eachItem(eff.items) do
+			assert.is_nil(seen[item])
+			seen[item] = row
+		end
+		assert.same({ 1, 2, 9 }, { seen[1] and 1, seen[2] and 2, seen[9] and 9 })
+		assert.same({ "Bar", 123, "Stone", 900 }, { seen[1].name, seen[1].mv, seen[2].name, seen[9].mv })
+		-- a plain table, and nothing at all
+		local plain = {}
+		for item in L.eachItem({ [5] = {} }) do
+			plain[#plain + 1] = item
+		end
+		assert.same({ 5 }, plain)
+		assert.is_nil(L.eachItem(nil)())
+	end)
+
 	it("says so when no layer loaded, and returns nothing", function()
 		local eff, report = L.effectivePlan(nil, nil, nil)
 		assert.is_nil(eff)
@@ -347,13 +370,35 @@ describe("learn ranks from the trainer", function()
 		assert.equal(45, at(shipped().professions[164], 101))
 	end)
 
-	it("matches a service keyed by name, and makes a listed recipe a trainer recipe that is in the game", function()
+	it("matches a service keyed by spell ID whatever the data's source, and makes it a recipe in the game", function()
 		local prof =
 			{ recipes = { [5] = { name = "Iron Buckle", y = 10, g = 30, src = "item", item = 1, gone = true } } }
-		local out = L.withTrainerReq(prof, { ["iron buckle"] = { skill = 5 } })
+		local out = L.withTrainerReq(prof, { [5] = { skill = 5 } })
 		assert.same({ "trainer", 5, false }, { out.recipes[5].src, out.recipes[5].learn, out.recipes[5].gone })
 		assert.equal(prof, L.withTrainerReq(prof, {}))
 		assert.equal(prof, L.withTrainerReq(prof, { [77] = { skill = 1 } }))
+	end)
+
+	it("lets a service keyed by name only reach a trainer recipe, never a same-named item recipe", function()
+		local prof = {
+			recipes = {
+				[5] = { name = "Iron Buckle", y = 10, g = 30, src = "trainer" },
+				[6] = { name = "Iron Buckle", y = 50, g = 70, src = "item", item = 1, gone = true },
+				[7] = { name = "Iron Buckle", y = 10, g = 30, src = "trainer", gone = true },
+				[8] = { name = "Old Clasp", y = 10, g = 30, gone = true },
+			},
+		}
+		local out = L.withTrainerReq(prof, { ["iron buckle"] = { skill = 5 }, ["old clasp"] = { skill = 9 } })
+		assert.same({ "trainer", 5 }, { out.recipes[5].src, out.recipes[5].learn })
+		-- the item recipe of the same name keeps its source and stays gone
+		assert.equal(prof.recipes[6], out.recipes[6])
+		-- a gone twin of a live trainer recipe is not brought back by a name
+		assert.equal(prof.recipes[7], out.recipes[7])
+		-- the only recipe of its name, no source in the data: the trainer lists it, so it is in the game
+		assert.same({ "trainer", 9, false }, { out.recipes[8].src, out.recipes[8].learn, out.recipes[8].gone })
+		-- an item recipe alone with its name is not taken over by a name either
+		local single = { recipes = { [6] = prof.recipes[6] } }
+		assert.equal(single, L.withTrainerReq(single, { ["iron buckle"] = { skill = 5 } }))
 	end)
 end)
 

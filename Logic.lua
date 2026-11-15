@@ -869,6 +869,40 @@ function L.effectivePlan(shipped, plan, custom)
 	return out, report
 end
 
+-- Every row of an item table, for a caller that must walk one: (item, row) pairs. effectivePlan's `items` holds only
+-- the rows a layer added or changed and reads the rest through __index from the shipped table, so pairs() or next()
+-- on it sees the overlay rows alone; this walks the overlay rows, then each shipped row the overlay does not replace.
+-- A plain table walks as pairs() would. Nothing in the addon iterates the item table today (every reader indexes
+-- items[id]): a new walker uses this.
+function L.eachItem(items)
+	items = type(items) == "table" and items or {}
+	local mt = getmetatable(items)
+	local base = mt and type(mt.__index) == "table" and mt.__index or nil
+	local inBase, k = false, nil
+	return function()
+		while true do
+			local v
+			if not inBase then
+				k, v = next(items, k)
+				if k ~= nil then
+					return k, v
+				end
+				inBase = true
+				if not base then
+					return nil
+				end
+			end
+			k, v = next(base, k)
+			if k == nil then
+				return nil
+			end
+			if rawget(items, k) == nil then
+				return k, v
+			end
+		end
+	end
+end
+
 -- How old the shipped data is, in plain words: "Recipe data: build 1.60.1.70938, learn ranks from Wowhead, Forever
 -- section, 2026-11-14. Your game is build 1.60.1.71000: newer than the data, so a recipe changed since may be off
 -- until the addon is updated." shipped = ns.Data.recipes (or nil); version, buildNumber = GetBuildInfo()'s first two.
@@ -916,17 +950,52 @@ function L.npcRows(shipped, custom)
 	return out
 end
 
--- What a profession trainer showed in game on top of a profession entry. req = SkillupHelperDB.trainerReq[line]:
--- { [spellID or lowercased name] = { skill, cost } }. A recipe the trainer lists is a trainer recipe (whatever the
--- data said), learned at the skill the trainer asks: the game's own word wins over Custom.lua and the shipped data.
--- Returns prof itself when nothing changes.
+-- What a profession trainer showed in game on top of a profession entry. req = SkillupHelperDB.learned.trainers[line]
+-- of this profession's own skill line (the caller picks it by the profession's id, so another profession's trainer
+-- never applies): { [spellID or lowercased name] = { skill, cost } }. A recipe the trainer lists by spell ID is a
+-- trainer recipe (whatever the data said), learned at the skill the trainer asks: the game's own word wins over
+-- Custom.lua and the shipped data. A row keyed by name only (no spell ID from the client) cannot tell same-named
+-- recipes apart, so it applies only to a recipe the data already calls a trainer recipe (or gives no source), and to
+-- a gone one only when it is the only such recipe of that name: an item, drop or vendor recipe that shares a
+-- trainer recipe's name keeps its source. Returns prof itself when nothing changes.
 function L.withTrainerReq(prof, req)
 	if type(prof) ~= "table" or type(req) ~= "table" or not next(req) then
 		return prof
 	end
+	local all = prof.recipes or {}
+	local function byNameOK(r)
+		return type(r.name) == "string" and (r.src == nil or r.src == "trainer")
+	end
+	-- lowercased name -> { n = recipes that a name-keyed row may stand for, live = how many of them are not gone },
+	-- built only when the trainer table has a name key
+	local names
+	for k in pairs(req) do
+		if type(k) == "string" then
+			names = {}
+			break
+		end
+	end
+	if names then
+		for _, r in pairs(all) do
+			if byNameOK(r) then
+				local k = r.name:lower()
+				local c = names[k] or { n = 0, live = 0 }
+				c.n = c.n + 1
+				c.live = c.live + (r.gone and 0 or 1)
+				names[k] = c
+			end
+		end
+	end
 	local recipes
-	for spell, r in pairs(prof.recipes or {}) do
-		local e = req[spell] or (type(r.name) == "string" and req[r.name:lower()]) or nil
+	for spell, r in pairs(all) do
+		local e = req[spell]
+		if e == nil and names and byNameOK(r) then
+			local k = r.name:lower()
+			local c = names[k]
+			if c and (not r.gone or (c.n == 1 and c.live == 0)) then
+				e = req[k]
+			end
+		end
 		if type(e) == "table" then
 			local over = { src = "trainer" }
 			if type(e.skill) == "number" then
@@ -959,13 +1028,21 @@ function L.findProfession(plan, info)
 	if not plan or not plan.professions or not info then
 		return nil
 	end
-	local p = plan.professions[info.professionID] or plan.professions[info.parentProfessionID or -1]
+	-- the client's ids and names may be secret values (an instance): a secret is never a key or compared
+	local function clean(v)
+		if v == nil or (issecretvalue ~= nil and issecretvalue(v)) then
+			return nil
+		end
+		return v
+	end
+	local id, parent = clean(info.professionID), clean(info.parentProfessionID)
+	local p = (id ~= nil and plan.professions[id]) or (parent ~= nil and plan.professions[parent]) or nil
 	if p then
 		return p
 	end
-	local names = { info.professionName, info.parentProfessionName }
+	local names = { clean(info.professionName) or false, clean(info.parentProfessionName) or false }
 	for _, prof in pairs(plan.professions) do
-		for _, n in pairs(names) do
+		for _, n in ipairs(names) do
 			if type(n) == "string" and prof.name and n:lower() == prof.name:lower() then
 				return prof
 			end
