@@ -530,15 +530,16 @@ end
 -- (its fourth value's belowRank).
 function G.unknownText(need, nameOf, excluded, belowRank)
 	local rank = need.kind == "trainer" and (belowRank or 0) > 0 and G.needRank(need)
-	if rank then
+	-- the same order as G.describe and G.strip: opened trainers lacking the name first, then the rank
+	if need.kind == "trainer" and need.name and (excluded or 0) > 0 then
+		return ("No trainer you've opened teaches %s. It may come from a special NPC or a recipe item."):format(
+			need.name
+		)
+	elseif rank then
 		return ("%s needs %s %s trainer or better; the trainers I know are below that."):format(
 			need.name or "This",
 			G.aRank(rank),
 			need.profession or "profession"
-		)
-	elseif need.kind == "trainer" and need.name and (excluded or 0) > 0 then
-		return ("No trainer you've opened teaches %s. It may come from a special NPC or a recipe item."):format(
-			need.name
 		)
 	elseif need.kind == "trainer" then
 		return ("No %s trainer known yet. Guards in any city point the way; I note trainers you open."):format(
@@ -602,16 +603,21 @@ end
 -- One read of a trainer's service list during a visit. The server fills the list after TRAINER_SHOW and sends
 -- TRAINER_UPDATE as it does, so: a read with no service is "not yet" (nothing saved), and a read with fewer names
 -- than one already taken in the same visit (a list still loading, a filter changed) never replaces the fuller one.
--- visit = { id, best, reads, whole } of the visit so far, or nil at a new one. Returns teaches, partial to save
--- (nil, nil: keep what is saved), the visit, and why a read was held back.
+-- visit = { id, best, reads, lastWhole, whole } of the visit so far, or nil at a new one. A list still filling can
+-- read with no unreadable name and still be short, so the visit counts as whole (G.trainerWants stops) only when two
+-- whole reads in a row give the same number of names. Returns teaches, partial to save (nil, nil: keep what is
+-- saved), the visit, and why a read was held back.
 function G.trainerRead(visit, id, names, partial, services)
 	if type(visit) ~= "table" or visit.id ~= id then
 		visit = { id = id, best = 0, reads = 0 }
 	end
 	visit.reads = (visit.reads or 0) + 1
 	names = type(names) == "table" and names or {}
-	if not partial and #names > 0 and #names >= visit.best then
-		visit.whole = true
+	if not partial and #names > 0 then
+		visit.whole = visit.lastWhole == #names or nil
+		visit.lastWhole = #names
+	else
+		visit.lastWhole = nil
 	end
 	if (tonumber(services) or 0) < 1 or #names == 0 then
 		return nil, nil, visit, "not yet: the trainer listed no services (the list fills after the window opens)"

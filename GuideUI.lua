@@ -377,7 +377,8 @@ local function learn(kind)
 		local held
 		rec.teaches, rec.teachesPartial, trainerVisit, held = G.trainerRead(trainerVisit, rec.id, names, partial, n)
 		local lt = status.lastTeaches
-		lt.held, lt.why, lt.reads = held, status.teachesWhy, trainerVisit.reads
+		-- a throw's cause (set above) wins over the last teachesWhy, which the throw may have left stale
+		lt.held, lt.why, lt.reads = held, ok and status.teachesWhy or lt.why, trainerVisit.reads
 		-- the trainer's rank as the shipped data has it (Data/Trainers.lua), for the selftest
 		for _, npc in ipairs(known()) do
 			if npc.id == rec.id then

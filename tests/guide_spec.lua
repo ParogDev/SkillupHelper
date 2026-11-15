@@ -671,6 +671,8 @@ describe("Guide over the shipped Data/Trainers.lua", function()
 			)
 			assert.equal("No Expert Leatherworking trainer known", G.strip(s).a)
 			assert.matches("needs an Expert Leatherworking trainer or better", G.unknownText(hillman, nil, 0, 1))
+			-- opened trainers lacking the name are named first, as on the chip and the strip
+			assert.matches("No trainer you've opened teaches", G.unknownText(hillman, nil, 1, 1))
 		end)
 
 		it("names the trainer's rank in its role line", function()
@@ -683,9 +685,17 @@ describe("Guide over the shipped Data/Trainers.lua", function()
 			assert.equal("Leatherworking trainer", G.describe(s).l2)
 		end)
 
-		it("stops re-reading a visit after a whole list, or after the read cap", function()
+		it("stops re-reading a visit once the whole list reads the same twice, or after the read cap", function()
 			local _, _, visit = G.trainerRead(nil, 223, {}, true, 0)
 			assert.is_true((G.trainerWants(visit)))
+			-- a short list that looks whole (still filling) keeps the visit reading, and the fuller one is saved
+			_, _, visit = G.trainerRead(visit, 223, { "A" }, false, 1)
+			assert.is_true((G.trainerWants(visit)))
+			local teaches
+			teaches, _, visit = G.trainerRead(visit, 223, { "A", "B" }, false, 2)
+			assert.same({ "A", "B" }, teaches)
+			assert.is_true((G.trainerWants(visit)))
+			-- the same count again: whole, stop
 			_, _, visit = G.trainerRead(visit, 223, { "A", "B" }, false, 2)
 			local wants, why = G.trainerWants(visit)
 			assert.is_false(wants)

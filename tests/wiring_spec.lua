@@ -444,6 +444,9 @@ describe("Trainer window", function()
 		assert.same({ ["spiced wolf meat"] = true, ["herb baked egg"] = true }, npcs["name:Tester"].teaches)
 		local burstReads = reads
 		assert.is_nil(npcs["name:Tester"].teachesPartial)
+		-- the next update reads the same whole list again: now it counts as whole (a list still filling would have grown)
+		assert.same({}, a.fire("TRAINER_UPDATE"))
+		flush()
 		-- once the whole list is in, a later update of the same visit is not read again by the guide (each read
 		-- switches the filters, which raises another update): it costs less than the burst, and the list stays
 		n = 2
