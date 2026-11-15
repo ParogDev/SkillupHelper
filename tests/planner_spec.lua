@@ -1436,14 +1436,38 @@ describe("Alternatives and exclusions", function()
 		assert.equal(0, h.shortcuts)
 	end)
 
-	it("a gap only a gated recipe covers offers it as a shortcut that fills the gap", function()
-		local recipes = { [6] = recipe("R6", M4) }
-		local p = P.run(input(recipes, {}, { trainerSeen = { [99] = true } }))
-		local gap = p.steps[1]
-		assert.equal("gap", gap.kind)
-		assert.equal(6, gap.shortcuts[1].spell)
-		assert.is_nil(gap.shortcuts[1].saves)
-		assert.equal(1, p.shortcuts)
+	it("a stretch only a gated recipe covers is planned with it and says why it is gated, never a hole", function()
+		-- R1 (learn 100) was listed by a trainer, R6 (learn 100) was not: unchecked, and the only recipe from 110
+		local recipes = { [1] = recipe("R1", M1, { g = 110 }), [6] = recipe("R6", M4, { g = 160 }) }
+		local p = P.run(input(recipes, {}, { cap = 120, trainerSeen = { [1] = true } }))
+		assert.same({ 1, 6 }, craftSpells(p))
+		for _, st in ipairs(p.steps) do
+			assert.is_not.equal("gap", st.kind)
+			if st.kind == "craft" then
+				assert.equal(st.spell == 6 and "unchecked" or nil, st.gated)
+			elseif st.kind == "train" and st.spell == 6 then
+				assert.is_true(st.unchecked)
+			end
+		end
+	end)
+
+	it("a trainer list says nothing about recipes learned above the highest skill it listed", function()
+		-- the trainer window hides what the character cannot learn yet: read at skill 100 it lists R1 only
+		local recipes = {
+			[1] = recipe("R1", M1, { learn = 90, g = 105 }),
+			[6] = recipe("R6", M4, { learn = 104, y = 104 }),
+		}
+		local p = P.run(input(recipes, {}, { trainerSeen = { [1] = true } }))
+		assert.same({ 1, 6 }, craftSpells(p))
+		for _, st in ipairs(p.steps) do
+			assert.is_nil(st.unchecked)
+			assert.is_nil(st.gated)
+			assert.is_nil(st.shortcuts)
+		end
+		-- a list that matches no recipe of the data says nothing at all
+		p = P.run(input({ [6] = recipe("R6", M4) }, {}, { trainerSeen = { [99] = true } }))
+		assert.same({ 6 }, craftSpells(p))
+		assert.is_nil(p.steps[1].unchecked)
 	end)
 end)
 

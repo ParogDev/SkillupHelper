@@ -828,7 +828,11 @@ describe("costToCap", function()
 		local none = P.costToCap(prof(), 1, 90, function() end, {})
 		assert.equal(1, none.unknownPrices)
 		assert.same({ 1 }, none.unknownItems)
-		assert.is_false(none.complete)
+		-- a missing price is never a hole: the stretch is planned, and the plan names what it could not price
+		assert.is_true(none.complete)
+		assert.same({}, none.gaps)
+		assert.equal(1, none.unpriced.count)
+		assert.equal(1, none.unpriced.items[1].item)
 	end)
 
 	it("stops at the top of the recipes and says so", function()
@@ -853,7 +857,7 @@ describe("costToCap", function()
 		p.recipes[101] = nil
 		local holes = P.costToCap(p, 1, 90, function() end, {})
 		assert.matches(
-			"nothing gives skill at 1%-90; 1 price missing from TSM$",
+			"nothing gives skill at 55%-60; 1 price missing from TSM$",
 			ns.View.costLine("B", 1, 90, holes, env)
 		)
 		assert.equal(

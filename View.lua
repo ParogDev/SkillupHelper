@@ -119,14 +119,33 @@ local function known(v, f)
 	return type(v) == "number" and tostring(math.floor(v)) or tostring(v)
 end
 
--- A rank's terms: "level 20, 5g" ("unknown" for what the trainer has not shown yet).
+-- A rank's terms: the skill it asks for and its price, "at 50, 5s" (from a trainer visit, else the data's default
+-- ranks). The skill is `at`; a rank whose skill nobody knows is trained "by <the cap before it>". The character level
+-- is said only when it matters: too low ("needs level 10, you are 8"), or not known while the rank asks for more than
+-- level 1 ("needs level 10, character level not known yet"). The player's level: st.have (the planner's), else
+-- env.level.
 function V.rankTerms(st, env)
-	return ("level %s, %s"):format(known(st.level), st.cost and env.money(st.cost) or "cost unknown")
+	local parts = {}
+	if type(st.at) == "number" then
+		parts[#parts + 1] = ("at %d"):format(st.at)
+	elseif type(st.by) == "number" then
+		parts[#parts + 1] = ("by %d"):format(st.by)
+	end
+	parts[#parts + 1] = type(st.cost) == "number" and env.money(st.cost) or "price not known yet"
+	local need = type(st.level) == "number" and st.level or nil
+	local have = (type(st.have) == "number" and st.have) or (type(env.level) == "number" and env.level) or nil
+	if need and have and have < need then
+		parts[#parts + 1] = ("needs level %d, you are %d"):format(need, have)
+	elseif need and need > 1 and not have then
+		parts[#parts + 1] = ("needs level %d, character level not known yet"):format(need)
+	end
+	return table.concat(parts, ", ")
 end
 
--- "Train Expert (225) — level 20, 5g".
+-- "Train Journeyman (to 150) at 50, 5s".
 function V.rankLine(st, env)
-	return ("Train %s (%s) — %s"):format(st.name or "the next rank", known(st.cap), V.rankTerms(st, env))
+	local cap = type(st.cap) == "number" and (" (to %d)"):format(st.cap) or ""
+	return ("Train %s%s %s"):format(st.name or "the next rank", cap, V.rankTerms(st, env))
 end
 
 local SRC_TEXT = {

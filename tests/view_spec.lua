@@ -531,17 +531,39 @@ describe("Cap model on the panel", function()
 		return d, table.concat(ns.View.text(d), "\n")
 	end
 
-	it("shows a rank step with unknown for what the trainer has not shown", function()
+	it("shows a rank step by its skill and price; the character level only when it matters", function()
 		local env = envOf(ns, {})
-		local st = { kind = "trainRank", name = "Expert", cap = 225, level = 20, cost = 50000, skill = 125 }
-		assert.equal("Train Expert (225) — level 20, 5g 0s 0c", ns.View.rankLine(st, env))
+		local st =
+			{ kind = "trainRank", name = "Expert", cap = 225, at = 125, by = 150, level = 20, have = 30, cost = 50000 }
+		st.skill = 125
+		assert.equal("Train Expert (to 225) at 125, 5g 0s 0c", ns.View.rankLine(st, env))
+		-- the shipped default ranks carry no character level: skill and price, nothing about the level
+		local journeyman = { kind = "trainRank", name = "Journeyman", cap = 150, at = 50, by = 75, cost = 500 }
+		assert.equal("at 50, 5s 0c", ns.View.rankTerms(journeyman, env))
+		assert.equal("Train Journeyman (to 150) at 50, 5s 0c", ns.View.rankLine(journeyman, env))
+		-- too low: said with both levels (st.have, else env.level)
+		local low = { name = "Expert", cap = 225, at = 125, level = 20, have = 8, cost = 5000 }
+		assert.equal("at 125, 50s 0c, needs level 20, you are 8", ns.View.rankTerms(low, env))
+		low.have = nil
+		local env8 = envOf(ns, {})
+		env8.level = 8
+		assert.equal("at 125, 50s 0c, needs level 20, you are 8", ns.View.rankTerms(low, env8))
+		-- the character level not known and the rank asks for one above 1: a trailing note, never the main fact
+		assert.equal("at 125, 50s 0c, needs level 20, character level not known yet", ns.View.rankTerms(low, env))
+		low.level = 1
+		assert.equal("at 125, 50s 0c", ns.View.rankTerms(low, env))
+		-- a rank nobody has seen the skill or price of: trained by the cap before it
+		assert.equal("by 225, price not known yet", ns.View.rankTerms({ name = "Artisan", cap = 300, by = 225 }, env))
 		assert.equal(
-			"Train Artisan (300) — level unknown, cost unknown",
+			"Train Artisan (to 300) price not known yet",
 			ns.View.rankLine({ name = "Artisan", cap = 300 }, env)
 		)
+		for _, text in ipairs({ ns.View.rankLine(journeyman, env), ns.View.rankLine({ name = "Artisan" }, env) }) do
+			assert.is_nil(text:find("level unknown", 1, true))
+		end
 		local d = show(plan({ craft(1), st, { kind = "trainRank", name = "Artisan", cap = 300 } }))
-		assert.same({ "Train Expert (225)", "level 20, 5g 0s 0c" }, { d.later[1].text, d.later[1].right })
-		assert.same({ "Train Artisan (300)", "level unknown, cost unknown" }, { d.later[2].text, d.later[2].right })
+		assert.same({ "Train Expert (225)", "at 125, 5g 0s 0c" }, { d.later[1].text, d.later[1].right })
+		assert.same({ "Train Artisan (300)", "price not known yet" }, { d.later[2].text, d.later[2].right })
 		local card = show(plan({ st }))
 		assert.same(
 			{ "gold", "Train Expert (225)", "needs skill 125" },
