@@ -1930,6 +1930,7 @@ local function finishCore(ctx, baseline, have, commits, own)
 					item = i,
 					count = math.ceil(o.pre[i] * crafts - EPS),
 					spell = ctx.makers[i] and ctx.makers[i].spell,
+					n = ctx.makers[i] and ctx.makers[i].n,
 				}
 			end
 			local soldHere = 0

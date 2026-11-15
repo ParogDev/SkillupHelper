@@ -464,6 +464,41 @@ describe("View description", function()
 		held[4233], can[3817], can[3768] = 0, 0, 0
 		a = ns.View.actions(card, env)[1]
 		assert.same({ 3768, false, "Craft 8 Cured Medium Hide first" }, { a.spell, a.enabled, a.label })
+		-- the client has no count for the step's recipe yet: the reagent's button stays
+		can[3768], can[3817] = nil, 16
+		a = ns.View.actions(card, env)[1]
+		assert.same({ 3817, 8 }, { a.spell, a.count })
+		-- no Show recipe away from Blizzard's window
+		env.dock = "tsm"
+		assert.equal(1, #ns.View.actions(card, env))
+	end)
+
+	it("skips a pre-craft it cannot make and counts casts by the recipe's yield", function()
+		local card = {
+			kind = "craft",
+			spell = 9,
+			crafts = 4,
+			mats = {},
+			pre = {
+				{ count = 4, name = "No Recipe", item = 1 },
+				{ count = 4, name = "Not Yet", item = 2, spell = 20 },
+				{ count = 5, name = "Pair", item = 3, spell = 30, n = 2 },
+			},
+		}
+		local can = { [9] = 0, [20] = 0, [30] = 10 }
+		local env = {
+			have = function()
+				return 0
+			end,
+			craftable = function(spell)
+				return can[spell]
+			end,
+		}
+		local a = ns.View.actions(card, env)[1]
+		-- 5 wanted, 2 a cast: 3 casts, 6 made
+		assert.same({ 30, 3, "Craft 6 Pair first" }, { a.spell, a.count, a.label })
+		-- an item the planner names no recipe for gets no button
+		assert.is_nil(ns.View.preAction({ pre = { card.pre[1] } }, env))
 	end)
 
 	it("buys a step's vendor reagents at an open merchant that sells them", function()
@@ -945,7 +980,9 @@ describe("Cap model on the panel", function()
 		assert.equal("1s 50c for this step", card.lines[3].text)
 		-- what must be crafted first is never a droppable note
 		assert.same({ "First craft 3 item 9" }, { card.lines[4].text, card.lines[4].note })
-		assert.equal(4, #card.lines)
+		-- the planner named no recipe for item 9: the card says the button cannot make it
+		assert.equal("No learned recipe makes item 9: craft it by hand", card.lines[5].text)
+		assert.equal(5, #card.lines)
 	end)
 
 	it("marks a trainer recipe not checked at a trainer", function()

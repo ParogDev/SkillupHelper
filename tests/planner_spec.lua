@@ -507,7 +507,7 @@ describe("Worked examples", function()
 		assert.equal("Heavy Leather Ammo Pouch buy", seq[5])
 		assert.equal(5, #seq)
 		local llp = plan.steps[1]
-		assert.same({ { item = I.CURED, count = llp.crafts, spell = 3816 } }, llp.pre)
+		assert.same({ { item = I.CURED, count = llp.crafts, spell = 3816, n = 1 } }, llp.pre)
 		-- rule 2: the 92 Medium Leather belong to the Shoulders step, so Dark Leather Pants is no alternative here
 		assert.is_nil(llp.alt)
 		assert.same({ 115, 145 }, { plan.steps[3].from, plan.steps[3].to })
@@ -563,7 +563,7 @@ describe("Owned raw reagents of an intermediate", function()
 		local plan = P.run(input)
 		local st = plan.steps[1]
 		assert.equal("Light Leather Pants", st.name)
-		assert.same({ { item = I.CURED, count = st.crafts, spell = 3816 } }, st.pre)
+		assert.same({ { item = I.CURED, count = st.crafts, spell = 3816, n = 1 } }, st.pre)
 		local bought = {}
 		for _, b in ipairs(st.buy) do
 			bought[b.item] = b.count
