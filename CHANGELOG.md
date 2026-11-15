@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- A step that crafts a reagent first (Cured Medium Hide from your own Medium Hide and Salt) gets a working button:
+  "Craft 8 Cured Medium Hide first" makes the reagent, and Show recipe opens its recipe. Once the bags hold enough,
+  the button crafts the step itself. Before, the button only named the reagent and could not be clicked.
+
 ## 0.3.0
 
 - Recipes are ranked by what you pay: materials plus effort. Selling what you craft no longer makes a dearer recipe

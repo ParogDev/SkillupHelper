@@ -591,8 +591,12 @@ local function nextCard(st, env, listed)
 	card.pre = {}
 	for _, p in ipairs(st.pre or {}) do
 		local name = env.nameOf(p.item)
-		card.pre[#card.pre + 1] = { count = p.count, name = name }
+		card.pre[#card.pre + 1] = { count = p.count, name = name, item = p.item, spell = p.spell, n = p.n }
 		card.notes[#card.notes + 1] = ("Craft %d %s first"):format(p.count, name)
+		if type(p.spell) ~= "number" then
+			-- the planner names no recipe for it: the button cannot craft it, and the card says why
+			card.notes[#card.notes + 1] = ("No learned recipe makes %s: craft it by hand"):format(name)
+		end
 	end
 	if st.alt then
 		card.alt = ("Or use stock: %dx %s, %s more over the path"):format(
@@ -1684,14 +1688,21 @@ function V.actions(card, env)
 	if type(env.craftable) ~= "function" then
 		return nil, "env.craftable missing"
 	end
+	-- a reagent the step crafts first (curing owned hides): while the bags hold fewer than the step needs and the
+	-- client can make some, Craft makes that reagent, and Show recipe points at its recipe. It goes first, ahead of a
+	-- partial craft of the step (the step's crafts then run in one press), and whatever the client says of the
+	-- step's own recipe (no count yet for it is no reason to hide the reagent's button).
+	local pre = V.preAction(card, env)
 	local can, why = env.craftable(card.spell)
-	if type(can) ~= "number" then
+	if type(can) ~= "number" and not pre then
 		return nil, why
 	end
 	local want = math.max(1, math.floor(card.crafts or 1))
-	local n = math.max(0, math.min(want, math.floor(can)))
+	local n = math.max(0, math.min(want, math.floor(type(can) == "number" and can or 0)))
 	local craft = { id = "craft", spell = card.spell, count = n, enabled = n > 0 }
-	if n > 0 then
+	if pre then
+		craft = pre
+	elseif n > 0 then
 		craft.label = ("Craft %d"):format(n)
 		if n < want then
 			craft.tip = ("Materials for %d of the %d crafts"):format(n, want)
@@ -1707,9 +1718,38 @@ function V.actions(card, env)
 	end
 	out[#out + 1] = craft
 	if env.dock == "blizzard" then
-		out[#out + 1] = { id = "open", spell = card.spell, enabled = true, label = "Show recipe" }
+		out[#out + 1] = { id = "open", spell = craft.spell, enabled = true, label = "Show recipe" }
 	end
 	return out
+end
+
+-- The Craft button for the first pre-craft of a card still short in the bags ({ count, item, spell } from the
+-- planner's step.pre; count is the step's whole need, so the bags' units of that reagent count against it), when
+-- the client can make at least one now. nil when every pre-craft is covered, not learned or not craftable yet (the
+-- step's own button then says what is missing).
+function V.preAction(card, env)
+	for _, p in ipairs(card.pre or {}) do
+		if type(p.spell) == "number" and type(p.count) == "number" then
+			local held = type(env.have) == "function" and p.item and env.have(p.item) or 0
+			local short = math.ceil(p.count - (type(held) == "number" and held or 0))
+			if short > 0 then
+				-- count is in items; the client crafts in casts of p.n items each
+				local yield = (type(p.n) == "number" and p.n > 0) and p.n or 1
+				local need = math.ceil(short / yield)
+				local can = env.craftable(p.spell)
+				local n = type(can) == "number" and math.min(need, math.floor(can)) or 0
+				if n > 0 then
+					local a = { id = "craft", spell = p.spell, count = n, enabled = true }
+					a.label = ("Craft %d %s first"):format(n * yield, p.name)
+					if n < need then
+						a.tip = ("Materials for %d of the %d %s"):format(n * yield, short, p.name)
+					end
+					return a
+				end
+			end
+		end
+	end
+	return nil
 end
 
 -- The panel's height: `fixed` (what always shows) plus the optional pieces that fit under `limit` (the docked
