@@ -591,7 +591,8 @@ local function nextCard(st, env, listed)
 	card.pre = {}
 	for _, p in ipairs(st.pre or {}) do
 		local name = env.nameOf(p.item)
-		card.pre[#card.pre + 1] = { count = p.count, name = name, item = p.item, spell = p.spell, n = p.n }
+		card.pre[#card.pre + 1] =
+			{ count = p.count, make = p.make, name = name, item = p.item, spell = p.spell, n = p.n }
 		card.notes[#card.notes + 1] = ("Craft %d %s first"):format(p.count, name)
 		if type(p.spell) ~= "number" then
 			-- the planner names no recipe for it: the button cannot craft it, and the card says why
@@ -753,7 +754,8 @@ local function cardFace(card, st, env)
 	-- notes: what must be crafted first, then the first of the plan's own notes
 	local pre = {}
 	for _, p in ipairs(card.pre or {}) do
-		pre[#pre + 1] = ("%d %s"):format(p.count, p.name)
+		-- the units to craft (make), not the step's whole need: the bags' units are already counted
+		pre[#pre + 1] = ("%d %s"):format(p.make or p.count, p.name)
 	end
 	if #pre > 0 then
 		-- not a note the fit may drop: it is what to do before this step
@@ -870,7 +872,7 @@ local function blockers(card)
 		end
 	end
 	for _, p in ipairs(card.pre or {}) do
-		list[#list + 1] = ("Craft %d %s first"):format(p.count, p.name)
+		list[#list + 1] = ("Craft %d %s first"):format(p.make or p.count, p.name)
 	end
 	if #list == 0 then
 		for _, m in ipairs(card.mats or {}) do
@@ -1901,14 +1903,23 @@ end
 -- The card's link lines, one per journal page that holds more for this plan: { page, text, tone, tip, action }.
 -- "Shopping: 1s 88c, 2 stops" opens the journal's Shopping page, "3 reagents on your other characters, not queued"
 -- its Alts and mail page. A click never changes the panel.
-local function cardLinks(d, profession)
+local function cardLinks(d, profession, card)
 	local out = {}
 	local shop = d.shopping
 	if shop.blocks and #shop.blocks > 0 then
+		-- a craft card that buys nothing itself: the list is for the steps after it, so say so
+		local later = card and card.kind == "craft" and card.mats and #card.mats > 0
+		for _, m in ipairs(later and card.mats or {}) do
+			if m.buy then
+				later = false
+			end
+		end
 		out[#out + 1] = {
 			page = "shopping",
 			tone = "gold",
-			text = ("Shopping: %s"):format((shop.title:gsub("^Total ", ""))),
+			text = (later and "Shopping for later steps: %s" or "Shopping: %s"):format(
+				(shop.title:gsub("^Total ", ""))
+			),
 			tip = "Open the shopping list in the journal",
 		}
 	end
@@ -2252,7 +2263,7 @@ function V.describe(m, env)
 			nx.actions = nx.actions or {}
 			table.insert(nx.actions, 1, ma)
 		end
-		nx.links = cardLinks(d, profession)
+		nx.links = cardLinks(d, profession, nx)
 		nx.bar = V.actionBar(nx)
 		-- Journal.lua's minimap tip still reads the card as `next.name` and `next.verb` (the description's old
 		-- shape): these two fields keep it speaking until it reads `now.title` and `now.sub`
