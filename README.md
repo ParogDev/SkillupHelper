@@ -82,3 +82,8 @@ These rules hold for every plan, every replan and every alternative the panel of
   `tools/data/overlay.manual.json`. No text from the site is copied.
 
 What you see at a trainer in game is saved and wins over both.
+
+The data is checked against the game's newest build every day (`tools/update_data.py`, the `data-update`
+workflow), and what your own game learned can be shared so everyone's data gets it: open a "Share what my game
+learned" issue. Every source, its licence, which one wins and what the shared table holds (no character, realm or
+account name) are in [docs/data-sources.md](docs/data-sources.md).

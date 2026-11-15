@@ -19,6 +19,15 @@
 - The "TSM data age unknown" line is gone: the age is only shown when it is known.
 - For maintainers: `tools/gen_recipes.py` rebuilds the data from the wago.tools export of the client
   (`--check` lists uncovered skill ranges), with `tools/data/overlay.json` on top.
+- A recipe sold by a vendor now says where: "sold by Kelsey Yance in Stranglethorn Vale".
+- What your game teaches the addon (what trainers ask, what vendors sell and for how much, where the trainers and
+  vendors you opened stand, the skill at which a recipe changed colour, how often a craft gave a point) is kept in
+  one table of the saved file, `learned`. It holds no character, realm, account or guild name. You can share it
+  with a "Share what my game learned" issue so the shipped data gets it; `docs/data-sources.md` lists everything
+  the addon saves and what stays private. Your saved trainer ranks and learned NPCs move into it on first load.
+- For maintainers: `tools/update_data.py` looks for a newer game build every day (the `data-update` workflow),
+  regenerates the data and opens a pull request with a report of what changed. `tools/import_savedvars.py` merges
+  shared files under a written rule (a newer build wins, otherwise two files must agree, conflicts are reported).
 
 ## 0.2.16
 
