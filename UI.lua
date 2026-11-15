@@ -1390,6 +1390,12 @@ function UI.create()
 		ns.setShown(false, true)
 	end)
 	f.hide = hide
+	-- the open-journal button left of the hide control (Journal.lua, guarded: the panel never depends on it)
+	f.journal = ns.Provider and ns.Provider.openButton(f) or nil
+	if f.journal then
+		f.skill:ClearAllPoints()
+		f.skill:SetPoint("TOPRIGHT", -56, -PAD)
+	end
 
 	local bar = CreateFrame("StatusBar", nil, f)
 	bar:SetPoint("TOPLEFT", PAD, -34)

@@ -32,6 +32,10 @@ else
 		"UnitLevel", "GetProfessions", "GetProfessionInfo", "C_TooltipInfo", "Enum", "IsTradeskillTrainer",
 		"GetTrainerServiceCost", "GetTrainerServiceDescription", "GetTrainerServiceLevelReq",
 		"GetTrainerServiceSkillReq", "GetTrainerTradeskillRankValues",
+		-- the journal, map view, field card and skills (JournalUI, MapCanvas, Widgets, Skills, Journal)
+		"CreateColor", "GetBindingKey", "GetCurrentBindingSet", "GetCursorPosition", "IsAltKeyDown",
+		"IsControlKeyDown", "IsShiftKeyDown", "OpenWorldMap", "SaveBindings", "SetBinding", "C_SkillInfo",
+		"UnitClassBase", "GetLocale", "UnitFactionGroup", "UnitClass", "C_SuperTrack", "UISpecialFrames",
 	}
 end
 -- FrameXML globals for the vendor buy: the merchant window and bag constants.

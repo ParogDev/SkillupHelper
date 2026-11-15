@@ -736,7 +736,11 @@ function evaluate()
 	end
 	angleGoal = (f and pick and pick.bearing) and G.arrowAngle(pick.bearing, f) or nil
 	local held = now - (view.since or now)
+	-- one floating widget at a time: while a spot is tracked (the tracker, Journal.lua) the chip stands aside
+	local yields = ns.Provider and ns.Provider.chipYields and ns.Provider.chipYields() or false
+	status.yields = yields or nil
 	want.visible = view.d ~= nil
+		and not yields
 		and not (phase == "done" and held > DONE_HOLD)
 		and not (phase == "notnow" and held > NOTNOW_HOLD)
 	want.row = want.visible and view.d.action ~= nil
