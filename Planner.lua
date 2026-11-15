@@ -1314,8 +1314,9 @@ end
 -- What `crafts` crafts of o take, reagent by reagent: the bags first (pool, drawn down), then for an intermediate the
 -- variant crafts (o.pre) the craft, then the auction house or vendor. A stock-only variant crafts only as many as its
 -- owned non-vendor raws allow (15 Medium Hide: 15 cures, Salt bought) and buys the rest of the intermediate ready-
--- made, as at buy prices that is the cheaper route. Returns uses, buys and made: item -> units.
-local function supplyOf(ctx, o, crafts, pool)
+-- made, as at buy prices that is the cheaper route. A variant that buys the intermediate cures from spare raws too
+-- (spare: the stock pass's rem, drawn down here). Returns uses, buys and made: item -> units.
+local function supplyOf(ctx, o, crafts, pool, spare)
 	local uses, buys, made = {}, {}, {}
 	local function supply(i, need, depth)
 		local use = math.min(math.max(pool[i] or 0, 0), need)
@@ -1328,12 +1329,34 @@ local function supplyOf(ctx, o, crafts, pool)
 			return
 		end
 		local mk = ctx.makers[i]
-		if mk and o.pre[i] and depth < 3 then
+		-- a variant that buys the intermediate still cures from owned raws first (a committed step keeps the plain
+		-- variant, and its "buy 7 Cured Medium Hide" must not stand while 10 Medium Hide sit in the bags)
+		-- Only true spares (spare: what no step of the plan counts on, rule 2) feed this.
+		local ownedRaw = false
+		if mk and not o.pre[i] and depth == 0 and spare then
+			for r in pairs(mk.mats) do
+				local own = math.min(pool[r] or 0, spare[r] or 0)
+				ownedRaw = ownedRaw or (not isVendor(ctx, r) and own >= mk.mats[r] - EPS)
+			end
+		end
+		if mk and (o.pre[i] or ownedRaw) and depth < 3 then
 			local c = short
-			if o.stockOnly then
+			if o.stockOnly or not o.pre[i] then
 				for _, r in ipairs(sortedKeys(mk.mats)) do
 					if not isVendor(ctx, r) then
-						c = math.min(c, math.floor(math.max(pool[r] or 0, 0) / mk.mats[r] + EPS) * mk.n)
+						local own = math.max(pool[r] or 0, 0)
+						if not o.pre[i] then
+							own = math.min(own, spare[r] or 0)
+						end
+						c = math.min(c, math.floor(own / mk.mats[r] + EPS) * mk.n)
+					end
+				end
+			end
+			if c > EPS and not o.pre[i] then
+				local casts = math.ceil(c / mk.n - EPS)
+				for r, q in pairs(mk.mats) do
+					if spare[r] then
+						spare[r] = math.max(0, spare[r] - casts * q)
 					end
 				end
 			end
@@ -1824,6 +1847,11 @@ local function finishCore(ctx, baseline, have, commits, own)
 		pool[i] = q
 	end
 	local sold = {}
+	-- raws no step counts on (the stock pass's rem): a step that buys an intermediate cures from these first
+	local spareRaw = {}
+	for i, q in pairs(st.rem) do
+		spareRaw[i] = q
+	end
 	local cur = ctx.skill
 	local steps = plan.steps
 	for idx, seg in ipairs(segs) do
@@ -1978,7 +2006,7 @@ local function finishCore(ctx, baseline, have, commits, own)
 			for i, q in pairs(pool) do
 				poolBefore[i] = q
 			end
-			local uses, buys, made = supplyOf(ctx, o, crafts, pool)
+			local uses, buys, made = supplyOf(ctx, o, crafts, pool, spareRaw)
 			for _, i in ipairs(sortedKeys(uses)) do
 				step.used[#step.used + 1] = { item = i, count = math.floor(uses[i] + EPS) }
 			end

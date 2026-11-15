@@ -712,6 +712,18 @@ describe("Hillman's Shoulders from owned hides", function()
 			assert.equal(math.min(15, st.crafts - 1), st.pre[1].make)
 		end
 	end)
+
+	-- A saved AH trip commits the step to the plain recipe (rule 3), which buys cured hides. Bought or not, the hides
+	-- in the bags are cured first: only the shortfall past them is bought.
+	it("a committed step cures owned hides before buying cured ones", function()
+		local inp = input(133, bags(), 99)
+		inp.commit = { { spell = 3768, to = 142 } }
+		local st = shoulders(P.run(inp))[1]
+		assert.equal(133, st.from)
+		assert.equal(1, #st.pre)
+		assert.equal(math.min(15, st.crafts - 1), st.pre[1].make)
+		assert.equal(math.max(0, st.crafts - 16), bought(st, 4233))
+	end)
 end)
 
 describe("AH trip", function()
