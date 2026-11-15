@@ -11,7 +11,7 @@ if ns.Data.custom == nil then
 end
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.3.3"
+ns.CODE_VERSION = "0.3.4"
 
 -- The data the planner reads, built once from the three layers (Logic.effectivePlan): the shipped Data/Recipes.lua,
 -- an optional local Data/Plan.lua on top, the optional SkillupHelper_Custom table on top of both. ns.Data.layers says

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.4
+
+- A step uses the intermediates already in your bags. With 15 Cured Medium Hide and some Medium Leather on hand,
+  Hillman's Shoulders asked you to buy Medium Hide and Salt and cure more hides. The "cure your own hides" route now
+  applies only when the bags hold the raw hides it cures, not just another reagent of the same recipe.
+
 ## 0.3.3
 
 - The TOC no longer lists `Data\Custom.lua`, a file nobody ships, so its load warning is gone from every start.
