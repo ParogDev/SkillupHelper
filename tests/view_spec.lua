@@ -1006,6 +1006,29 @@ describe("Cap model on the panel", function()
 		assert.same({ 2, "Craft 3 Recipe 3" }, { e[2].n, e[2].title })
 	end)
 
+	-- In game: "You have every reagent" and "Shopping: 1g 22s 68c, 2 stops" on one card. The list is the later steps'.
+	it("says the shopping list is for later steps when the card's own step buys nothing", function()
+		local shopping = {
+			order = { "ah" },
+			ah = { { item = 2318, name = "Light Leather", count = 6, price = 20, kind = "reagent", step = 2 } },
+		}
+		local own = craft(1, { buy = {}, used = { { item = 2318, count = 6 } } })
+		local d = show(plan({ own, craft(2) }, { shopping = shopping, profKey = "Leatherworking" }))
+		assert.equal("Shopping for later steps: 1s 20c, 1 stop", d.now.links[1].text)
+	end)
+
+	-- The pre-craft line names the units to craft, not the step's whole need (the bags already hold some).
+	it("names the units to craft first, the bags' units left out", function()
+		local card = show(plan({ craft(1, { pre = { { item = 9, count = 13, make = 12, spell = 3817 } } }) })).now
+		local found
+		for _, l in ipairs(card.lines) do
+			if l.text:find("^First craft") then
+				found = l.text
+			end
+		end
+		assert.equal("First craft 12 item 9", found)
+	end)
+
 	it("shows plan.shopping once per place in travel order, and the AH block is the list it keeps", function()
 		local shopping = {
 			order = { "trainer", "vendor", "ah", "vendor" },
