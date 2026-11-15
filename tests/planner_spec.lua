@@ -538,12 +538,17 @@ describe("Owned raw reagents of an intermediate", function()
 		assert.same({}, st.pre)
 	end)
 
+	it("buys the intermediate when a reagent of its recipe has no price", function()
+		local input = pantsInput(16)
+		input.price[I.SALT] = nil
+		local st = P.run(input).steps[1]
+		assert.equal("Light Leather Pants", st.name)
+		assert.same({}, st.pre)
+	end)
+
 	it("cures owned hides and buys Salt instead of buying cured hides", function()
 		local input = pantsInput(16)
 		local plan = P.run(input)
-		for _, l in ipairs(F.describe(plan, input.items)) do
-			print("  " .. l)
-		end
 		local st = plan.steps[1]
 		assert.equal("Light Leather Pants", st.name)
 		assert.same({ { item = I.CURED, count = st.crafts, spell = 3816 } }, st.pre)

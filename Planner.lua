@@ -130,6 +130,11 @@ local function expand(ctx, item, qty, depth, skipSpell, force)
 			best = { total, mats, pre }
 		end
 	end
+	-- a forced craft that cannot be priced (a sub-reagent without a price) falls back to buying: the caller sees no
+	-- intermediate and builds no stock-only variant
+	if not best and buy then
+		best = { buy * qty, { [item] = qty }, {} }
+	end
 	return best
 end
 
@@ -762,7 +767,8 @@ local function stockPass(ctx, base, have, route)
 	for _, o in ipairs(base.opts) do
 		usable[#usable + 1], seen[o] = o, true
 	end
-	-- a stock-only variant of a recipe item counts only when the baseline buys that recipe anyway
+	-- stock-only variants follow the plain rule above (no recipe to buy), except that the variant of a recipe sold as
+	-- an item (src "item") counts when the baseline buys that recipe anyway
 	local inBase = {}
 	for _, o in ipairs(base.opts) do
 		inBase[o.spell] = true
