@@ -512,6 +512,50 @@ describe("Worked examples", function()
 	end)
 end)
 
+describe("Owned raw reagents of an intermediate", function()
+	local P
+	before_each(function()
+		P = load().Planner
+	end)
+
+	-- Light Leather Pants needs a Cured Light Hide. Bought, it costs 200; cured from a Light Hide (125) and Salt (50)
+	-- it costs 175, under the 20% CRAFT_SAVING bar, so at buy prices the plan buys it. With 16 Light Hide in the
+	-- bags the hide costs only its salvage (62.5): the step cures its own hides and buys Salt.
+	local function pantsInput(hides)
+		local recipes = {
+			[9195] = F.LEATHER[9195],
+			[3816] = F.LEATHER[3816],
+		}
+		local input = F.input(recipes, { [9195] = true, [3816] = true }, 100, 102, { [I.HIDE] = hides })
+		input.price[I.CURED].buy = 200
+		return input
+	end
+
+	it("buys the intermediate when none of its raw reagent is owned", function()
+		local plan = P.run(pantsInput(0))
+		local st = plan.steps[1]
+		assert.equal("Light Leather Pants", st.name)
+		assert.same({}, st.pre)
+	end)
+
+	it("cures owned hides and buys Salt instead of buying cured hides", function()
+		local input = pantsInput(16)
+		local plan = P.run(input)
+		for _, l in ipairs(F.describe(plan, input.items)) do
+			print("  " .. l)
+		end
+		local st = plan.steps[1]
+		assert.equal("Light Leather Pants", st.name)
+		assert.same({ { item = I.CURED, count = st.crafts, spell = 3816 } }, st.pre)
+		local bought = {}
+		for _, b in ipairs(st.buy) do
+			bought[b.item] = b.count
+		end
+		assert.is_nil(bought[I.CURED])
+		assert.equal(st.crafts, bought[I.SALT])
+	end)
+end)
+
 describe("AH trip", function()
 	local P
 	before_each(function()

@@ -105,11 +105,12 @@ local function isVendor(ctx, item)
 end
 
 -- (cost, materials, intermediates) for qty of item: bought, or crafted through a learned recipe when that saves
--- CRAFT_SAVING or the item has no price (tools/tsm/skillup.py _expand). nil when neither works.
-local function expand(ctx, item, qty, depth, skipSpell)
+-- CRAFT_SAVING or the item has no price (tools/tsm/skillup.py _expand). nil when neither works. force: craft this
+-- item whenever a learned recipe can, whatever buying it costs (the stock-only variants of P.prepare).
+local function expand(ctx, item, qty, depth, skipSpell, force)
 	local buy = buyOf(ctx, item)
 	local best
-	if buy then
+	if buy and not (force and ctx.makers[item] and depth > 0 and ctx.makers[item].spell ~= skipSpell) then
 		best = { buy * qty, { [item] = qty }, {} }
 	end
 	local maker = ctx.makers[item]
@@ -283,6 +284,7 @@ function P.prepare(input)
 		z = P.zOf(input.luck) or P.TRIP_Z,
 		options = {},
 		hidden = {}, -- gated options the plan never picks, offered in step.shortcuts and step.others
+		stockOnly = {}, -- variants that craft an intermediate from owned raw reagents: the stock pass only
 		unconfirmed = 0, -- trainer recipes planned while no trainer of this profession was read yet
 		mismatch = {},
 		makers = {},
@@ -399,6 +401,32 @@ function P.prepare(input)
 			local into = gated and ctx.hidden or ctx.options
 			for _, o in ipairs(list) do
 				into[#into + 1] = o
+			end
+			-- stock-only variants: one per reagent a learned recipe makes but the cheaper route buys (curing a hide saves
+			-- under CRAFT_SAVING at buy prices). Only the stock pass uses them, where an owned raw reagent (16 Medium
+			-- Hide) costs its salvage: then the step crafts that reagent and buys the rest (Salt).
+			if ok and not gated then
+				local variant = #list
+				for _, item in ipairs(sortedKeys(plain)) do
+					if ctx.makers[item] and not pre[item] then
+						local fm, fp, fok = {}, {}, true
+						for _, other in ipairs(sortedKeys(plain)) do
+							local got = expand(ctx, other, plain[other], 2, spell, other == item)
+							if not got then
+								fok = false
+								break
+							end
+							merge(fm, got[2])
+							merge(fp, got[3])
+						end
+						if fok and fp[item] then
+							variant = variant + 1
+							local o = newOption(ctx, base, fm, fp, variant)
+							o.stockOnly = true
+							ctx.stockOnly[#ctx.stockOnly + 1] = o
+						end
+					end
+				end
 			end
 		end
 	end
@@ -734,9 +762,16 @@ local function stockPass(ctx, base, have, route)
 	for _, o in ipairs(base.opts) do
 		usable[#usable + 1], seen[o] = o, true
 	end
-	for _, o in ipairs(ctx.options) do
-		if not seen[o] and o.src ~= "item" then
-			usable[#usable + 1] = o
+	-- a stock-only variant of a recipe item counts only when the baseline buys that recipe anyway
+	local inBase = {}
+	for _, o in ipairs(base.opts) do
+		inBase[o.spell] = true
+	end
+	for _, list in ipairs({ ctx.options, ctx.stockOnly or {} }) do
+		for _, o in ipairs(list) do
+			if not seen[o] and (o.src ~= "item" or (o.stockOnly and inBase[o.spell])) then
+				usable[#usable + 1] = o
+			end
 		end
 	end
 	-- per option the cost of one craft with its surplus reagents at salvage does not depend on the level: only p does
