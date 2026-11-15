@@ -287,7 +287,8 @@ local function fromText(o)
 	end
 	local v = o.recipeVendor
 	if type(v) == "table" and v.name then
-		return "sold by " .. tostring(v.name)
+		-- place: the zone the vendor stands in, by name (tools/gen_recipes.py, from the client's area and map tables)
+		return "sold by " .. tostring(v.name) .. (type(v.place) == "string" and (" in " .. v.place) or "")
 	end
 	return o.from and (FROM_TEXT[o.from] or tostring(o.from)) or nil
 end

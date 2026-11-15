@@ -474,7 +474,12 @@ local function nextCard(st, env, listed)
 			card.cost = "recipe price unknown"
 		elseif st.where == "vendor" then
 			local who = st.vendor and st.vendor.name
-			card.verb = ("Buy it from %s for %s"):format(who and tostring(who) or "its vendor", money(st.price))
+			local place = who and type(st.vendor.place) == "string" and (" in " .. st.vendor.place) or ""
+			card.verb = ("Buy it from %s%s for %s"):format(
+				who and tostring(who) or "its vendor",
+				place,
+				money(st.price)
+			)
 		else
 			card.verb = ("Buy it on the AH for %s"):format(money(st.price))
 		end

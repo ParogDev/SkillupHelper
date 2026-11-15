@@ -61,6 +61,9 @@ CSV_URL = "https://wago.tools/db2/{table}/csv?build={build}&locale=enUS"
 USER_AGENT = "Mozilla/5.0 (compatible; skilluphelper-gen/1.0)"
 TABLES = ("SkillLine", "SkillLineAbility", "SpellReagents", "SpellEffect", "SpellName", "ItemSparse", "ItemEffect",
           "ItemXItemEffect")
+# Names only: where a recipe vendor stands (the overlay gives an AreaTable id, the game a UiMap id). Without them a
+# vendor is written without a place. They are downloaded with the rest, and skipped when --offline and not cached.
+OPTIONAL_TABLES = ("AreaTable", "UiMap")
 EFFECT_CREATE_ITEM = 24
 TRIGGER_LEARN = 6  # ItemEffect.TriggerType: the item teaches SpellID
 ACQUIRE_AUTO = 1  # SkillLineAbility.AcquireMethod: learned with the profession
@@ -75,6 +78,8 @@ SOURCES = ("auto", "trainer", "item", "special", "unlisted")
 ITEM_SOURCES = ("vendor", "quest", "drop", "crafted", "other")
 OVERLAY_SOURCES = ("auto", "trainer", "item", "special") + ITEM_SOURCES
 EMPTY_OVERLAY = {"recipes": {}, "vendor": set(), "listed": set(), "ranks": {}, "source": {}}
+# The one vendor of a recipe item: zone = an AreaTable id (the research export), map = a UiMap id (seen in game).
+VENDOR_FIELDS = {"name", "npc", "zone", "map", "a", "h"}
 # The highest profession rank cap (Artisan). The client data holds no rank table.
 TOP_RANK_CAP = 300
 
@@ -107,6 +112,7 @@ LUA_KEYWORDS = frozenset("and break do else elseif end false for function if in 
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_OVERLAY = HERE / "data" / "overlay.json"
+DEFAULT_MANUAL = HERE / "data" / "overlay.manual.json"
 DEFAULT_OUT = HERE.parent / "Data" / "Recipes.lua"
 DEFAULT_CACHE = HERE / ".cache"
 
@@ -164,11 +170,16 @@ def resolve(cache: Path, build: str | None, download: bool, get=http_get) -> tup
     return cache / build, build
 
 
-def fetch_tables(folder: Path, build: str, download: bool = True, get=http_get) -> dict[str, list[dict]]:
+def fetch_tables(folder: Path, build: str, download: bool = True, get=http_get, tables: tuple = TABLES,
+                 optional: tuple = OPTIONAL_TABLES) -> dict[str, list[dict]]:
+    """The CSV rows per table. An `optional` table is fetched like the others, and left out when it is not cached and
+    --offline is given."""
     out = {}
-    for table in TABLES:
+    for table in tuple(tables) + tuple(t for t in optional if t not in tables):
         f = folder / f"{table}.enUS.csv"
         if not (f.is_file() and f.stat().st_size > 0):
+            if not download and table not in tables:
+                continue
             if not download:
                 raise GenError(f"recipe data missing: {f} is not cached and --offline given")
             url = CSV_URL.format(table=table, build=build)
@@ -229,8 +240,8 @@ def load_overlay(path: Path) -> dict:
             out["teacher"] = row["teacher"]
         v = row.get("vendor")
         if v is not None:
-            if not isinstance(v, dict) or not isinstance(v.get("npc"), int) or set(v) - {"name", "npc", "zone", "a", "h"}:
-                raise GenError(f"{where}.vendor: must be an object with npc and any of name, zone, a, h")
+            if not isinstance(v, dict) or not isinstance(v.get("npc"), int) or set(v) - VENDOR_FIELDS:
+                raise GenError(f"{where}.vendor: must be an object with npc and any of name, zone, map, a, h")
             out["vendor"] = v
         unknown = sorted(set(row) - {"learn", "cost", "y", "g", "level", "src", "teacher", "vendor", "note"})
         if unknown:
@@ -257,6 +268,33 @@ def load_overlay(path: Path) -> dict:
     return {"recipes": recipes, "vendor": set(vendor), "listed": set(listed), "ranks": ranks, "source": source}
 
 
+def with_manual(overlay: dict, manual: dict) -> dict:
+    """The hand-kept overlay (tools/data/overlay.manual.json: corrections, and what tools/import_savedvars.py took
+    from the game) laid over the imported one: a recipe's fields one by one, a rank row's fields by rank name, the
+    vendor reagents added. import_wowhead.py folds the same file's recipes in when it writes overlay.json; doing it
+    here too means a correction reaches Data/Recipes.lua without a new research export."""
+    recipes = {spell: dict(row) for spell, row in overlay["recipes"].items()}
+    for spell, row in manual["recipes"].items():
+        recipes.setdefault(spell, {}).update(row)
+    ranks = {line: [dict(r) for r in rows] for line, rows in overlay["ranks"].items()}
+    for line, rows in manual["ranks"].items():
+        have = {r["name"]: r for r in ranks.setdefault(line, [])}
+        for r in rows:
+            if r["name"] in have:
+                have[r["name"]].update(r)
+            else:
+                ranks[line].append(dict(r))
+        ranks[line].sort(key=lambda r: r["cap"])
+    return {**overlay, "recipes": recipes, "ranks": ranks, "vendor": set(overlay["vendor"]) | set(manual["vendor"])}
+
+
+def place_names(t: dict[str, list[dict]]) -> tuple[dict[int, str], dict[int, str]]:
+    """AreaTable id -> name and UiMap id -> name; empty when the optional tables are absent."""
+    areas = {int(r["ID"]): (r.get("AreaName_lang") or "").strip() for r in t.get("AreaTable") or []}
+    maps = {int(r["ID"]): (r.get("Name_lang") or "").strip() for r in t.get("UiMap") or []}
+    return areas, maps
+
+
 # ---------------------------------------------------------------- recipe data
 
 
@@ -274,10 +312,11 @@ def count(n: float):
 def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None) -> tuple[dict, list[str]]:
     """The whole Recipes.lua table from the CSV rows, and warnings (overlay entries that match no recipe)."""
     overlay = {**EMPTY_OVERLAY, **(overlay or {})}
-    stats = {"thresholds": 0, "listed_gone": 0}
+    stats = {"thresholds": 0, "listed_gone": 0, "vendor_no_place": 0}
     # child lines share the parent's name; the recipes sit on the parent, whose own row names it
     line_names = {int(r["ID"]): (r.get("DisplayName_lang") or "").strip() for r in t["SkillLine"]}
     spell_names = {int(r["ID"]): r["Name_lang"] for r in t["SpellName"]}
+    areas, maps = place_names(t)
     items = {}
     for r in t["ItemSparse"]:
         items[int(r["ID"])] = {
@@ -342,7 +381,15 @@ def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None
             stats["thresholds"] += 1
         yellow, grey = over.get("y", yellow), over.get("g", grey)
         scroll = items.get(item, {}) if item is not None else {}
-        learn = over.get("learn", scroll.get("reqSkillRank") or None)
+        vendor = over.get("vendor") if src == "item" else None
+        if vendor:
+            # where the vendor stands, by name: the map the game showed it on, else the research export's area
+            place = maps.get(vendor.get("map")) or areas.get(vendor.get("zone"))
+            if place:
+                vendor = {**vendor, "place": place}
+            elif (areas or maps) and (vendor.get("map") or vendor.get("zone")):
+                stats["vendor_no_place"] += 1
+        learn =over.get("learn", scroll.get("reqSkillRank") or None)
         # an item the recipe needs (a reagent, the product, its recipe item) with no ItemSparse row is not in the
         # game in this build: the recipe stays in the file, flagged, and the planner leaves it out
         needs = list(reagents[spell]) + [i for i in (product, item) if i is not None]
@@ -358,8 +405,9 @@ def build_data(t: dict[str, list[dict]], build: str, overlay: dict | None = None
             "makes": product, "n": count(made) if product else None, "src": src, "item": item, "learn": learn,
             "teacher": teacher, "cost": over.get("cost"),
             # the recipe item's source (vendor, quest, drop, crafted) and the one vendor the overlay names for it:
-            # { name, npc, zone, a, h } (a / h = the NPC's reaction to Alliance / Horde, absent when not known)
-            "from": came if src == "item" else None, "vendor": over.get("vendor") if src == "item" else None,
+            # { name, npc, zone, map, place, a, h } (zone = an AreaTable id, map = a UiMap id, place = that zone's name
+            # from the client tables; a / h = the NPC's reaction to Alliance / Horde, absent when not known)
+            "from": came if src == "item" else None, "vendor": vendor,
             "unc": unconfirmed,
             # learned by character level, not by skill (the rogue's poisons)
             "level": over.get("level"),
@@ -601,8 +649,9 @@ def render(data: dict) -> str:
         "-- many, src = auto | trainer | item | special, item = the recipe item, learn = the skill needed to learn it,",
         "-- bop = the recipe item binds when picked up, buy = its vendor price, faction / rep = the reputation it needs,",
         "-- gone = an item the recipe needs is not in this build's item data (left out of plans), from = where the recipe",
-        "-- item comes from (vendor, quest, drop, crafted), vendor = the one vendor known to sell it, unc = a trainer",
-        "-- recipe no source confirms. src = unlisted: not in the overlay's list for its profession (a gated shortcut).",
+        "-- item comes from (vendor, quest, drop, crafted), vendor = the one vendor known to sell it (place = the zone it",
+        "-- stands in), unc = a trainer recipe no source confirms. src = unlisted: not in the overlay's list for its",
+        "-- profession (a gated shortcut).",
         "-- No auction prices: those come from TradeSkillMaster in game.",
         "-- luacheck: ignore",
         "local _, ns = ...",
@@ -643,6 +692,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cache", help="folder of <build>/<Table>.enUS.csv, or one build's folder (default: tools/.cache)")
     ap.add_argument("--out", help="Lua file to write (default: Data/Recipes.lua)")
     ap.add_argument("--overlay", help="overlay file (default: tools/data/overlay.json)")
+    ap.add_argument("--manual", help="hand-kept overlay laid on top (default: tools/data/overlay.manual.json)")
     ap.add_argument("--offline", action="store_true", help="never download: use the cache only")
     ap.add_argument("--check", action="store_true",
                     help="write nothing: print per profession the skill brackets in 1..300 no recipe covers (exit 1 on a hole)")
@@ -652,7 +702,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cache = Path(a.cache) if a.cache else DEFAULT_CACHE
         folder, build = resolve(cache, a.build, not a.offline)
-        overlay = load_overlay(Path(a.overlay) if a.overlay else DEFAULT_OVERLAY)
+        overlay = with_manual(load_overlay(Path(a.overlay) if a.overlay else DEFAULT_OVERLAY),
+                              load_overlay(Path(a.manual) if a.manual else DEFAULT_MANUAL))
         data, warnings = build_data(fetch_tables(folder, build, not a.offline), build, overlay)
         if not data["professions"]:
             raise GenError(f"build {build}: no craft recipe found on any skill line")
