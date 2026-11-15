@@ -713,6 +713,32 @@ describe("Hillman's Shoulders from owned hides", function()
 		end
 	end)
 
+	-- Not only cures: any intermediate a learned recipe makes. Heavy Armor Kit (3780) takes 5 Heavy Leather (4234),
+	-- made by 20649 from 5 Medium Leather (2319). At buy prices Heavy Leather (296) beats 5 Medium Leather (495); with
+	-- 200 Medium Leather in the bags the step makes its whole shortfall from them in one batch, the 3 owned first.
+	it("batches any intermediate from owned raws, not just cured hides", function()
+		local recipes = { [3780] = LW[3780], [20649] = LW[20649] }
+		local inp = input(146, { [2319] = 200, [4234] = 3 }, 99)
+		inp.recipes, inp.learned = recipes, { [3780] = true, [20649] = true }
+		inp.price[4234] = { buy = 296, where = "ah", salvage = 148 }
+		local plan = P.run(inp)
+		local list = {}
+		for _, st in ipairs(plan.steps) do
+			if st.kind == "craft" and st.spell == 3780 then
+				list[#list + 1] = st
+			end
+		end
+		assert.equal(1, #list)
+		local st = list[1]
+		assert.equal(1, #st.pre)
+		assert.same(
+			{ 4234, 20649, 5 * st.crafts - 3, 5 * st.crafts },
+			{ st.pre[1].item, st.pre[1].spell, st.pre[1].make, st.pre[1].count }
+		)
+		assert.equal(0, bought(st, 4234))
+		assert.equal(0, bought(st, 2319))
+	end)
+
 	-- A saved AH trip commits the step to the plain recipe (rule 3), which buys cured hides. Bought or not, the hides
 	-- in the bags are cured first: only the shortfall past them is bought.
 	it("a committed step cures owned hides before buying cured ones", function()

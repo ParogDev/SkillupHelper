@@ -5,10 +5,12 @@
 - One recipe over one stretch of skill is one step. Hillman's Shoulders showed as "Craft 5, 133-137" then
   "Craft 8, 137-142": the first step cured your own hides, the second bought cured ones. Now it is one step that
   cures what your Medium Hide covers and buys only the rest ready-made.
-- The cure count covers the step. "First craft" and the craft button ask for every cured hide the step needs beyond
-  the ones already in your bags, in one go, instead of a step-sized sliver of it.
-- A cured hide already in your bags counts toward the step, also when the step cures the rest.
-- A step you saved an AH list for still cures the spare hides in your bags before it asks you to buy cured ones.
+- The same goes for every reagent a recipe you know makes: cured hides, Heavy Leather, bolts of cloth, bars, kits.
+  "First craft" and the craft button ask for the step's whole shortfall beyond what your bags hold, in one batch,
+  instead of a step-sized sliver of it.
+- Reagents of that kind already in your bags count toward the step first, also when the step crafts the rest.
+- Crafting from raw materials you own comes before buying the finished reagent, also on a step you saved an AH list
+  for. Raw materials a later step needs stay untouched.
 - When the step on the card needs nothing bought, its shopping line reads "Shopping for later steps", so it no
   longer looks like it contradicts "You have every reagent".
 
