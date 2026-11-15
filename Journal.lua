@@ -557,15 +557,18 @@ function P.settingsPage(s)
 		{ kind = "key", label = "Key to open the journal", value = clean(key) or "not set" },
 	}
 	local custom = ns.Data and ns.Data.layers and ns.Data.layers.custom
+	local customErrors = {}
+	for _, list in ipairs({ type(custom) == "table" and custom.errors or {}, P.custom and P.custom.errors or {} }) do
+		for _, e in ipairs(list) do
+			customErrors[#customErrors + 1] = e
+		end
+	end
 	local data = ns.Where.dataRows({
 		recipes = ns.Data and ns.Data.recipes,
 		spots = ns.Data and ns.Data.spots,
 		trainers = ns.Data and ns.Data.trainers,
 		tsm = s.prices and s.prices.ok and { age = "live", missing = 0 } or nil,
-		custom = ns.Data and ns.Data.custom and {
-			loaded = true,
-			errors = type(custom) == "table" and custom.errors or {},
-		} or nil,
+		custom = ns.Data and ns.Data.custom and { loaded = true, errors = customErrors } or nil,
 	})
 	for _, row in ipairs(data) do
 		if row.id == "tsm" and row.state == "broken" and s.prices then
@@ -596,6 +599,7 @@ function P.learnedLists()
 		{ id = "trainers", title = "Trainer recipe lists" },
 		{ id = "colors", title = "Recipe colours seen" },
 		{ id = "npcs", title = "Trainers and vendors visited" },
+		{ id = "vendors", title = "Vendor prices seen" },
 		{ id = "skillups", title = "Skill-ups counted" },
 	}
 	for _, e in ipairs(LISTS) do
@@ -1034,6 +1038,8 @@ function P.selftest(st)
 		panelCard = P.diag.panelCard,
 		tracked = P.tracked() ~= nil,
 		chipYields = P.chipYields(),
+		customPlaces = P.custom,
+		worldTries = P.diag.tries,
 	}
 	local sk = {}
 	if ns.Skills then
@@ -1090,13 +1096,274 @@ local function wire()
 end
 P.run("wire", wire)
 
+------------------------------------------------------------------------------------------- Custom.lua: places, NPCs
+
+local function pct(v)
+	return type(v) == "number" and v >= 0 and v <= 100
+end
+
+-- One custom spot of a world line, checked and filled in to the shape of Data/Spots.lua. -> spot, or nil and why.
+local function customSpot(def, id, e)
+	if type(id) ~= "string" or id == "" then
+		return nil, "a spot needs a text id"
+	end
+	if type(e) ~= "table" then
+		return nil, "not a table"
+	end
+	if type(e.map) ~= "number" then
+		return nil, "map must be a uiMap id (a number)"
+	end
+	if not (pct(e.x) and pct(e.y)) then
+		return nil, "x and y must be map percent, 0 to 100"
+	end
+	if def.kind == "fish" then
+		return nil, "Fishing has zones, not spots: not customisable yet"
+	end
+	if type(e.gets) ~= "table" or #e.gets == 0 then
+		return nil, "gets must list what is there: { { t = target key, n = count } }"
+	end
+	local req, top = math.huge, 0
+	for i, g in ipairs(e.gets) do
+		local t = type(g) == "table" and def.targets and def.targets[g.t]
+		if not t then
+			return nil,
+				("gets[%d]: no target %q in this skill's targets (Data/Spots.lua)"):format(i, tostring(g and g.t))
+		end
+		if type(t.req) == "number" then
+			req, top = math.min(req, t.req), math.max(top, t.req)
+		end
+	end
+	local pts = e.pts or { e.x, e.y }
+	if type(pts) ~= "table" or #pts < 2 or #pts % 2 ~= 0 then
+		return nil, "pts must be x, y pairs in map percent"
+	end
+	for i = 1, #pts do
+		if not pct(pts[i]) then
+			return nil, ("pts[%d] is not map percent"):format(i)
+		end
+	end
+	local pk = {}
+	for i = 1, #pts / 2 do
+		pk[i] = type(e.pk) == "table" and e.pk[i] or 1
+	end
+	return {
+		id = id,
+		map = e.map,
+		zone = type(e.zone) == "string" and e.zone or "",
+		area = e.area,
+		note = e.note,
+		x = e.x,
+		y = e.y,
+		r = type(e.r) == "number" and e.r or 2,
+		sites = #pk,
+		pts = pts,
+		pk = pk,
+		gets = e.gets,
+		req = req ~= math.huge and req or 1,
+		top = top,
+		startA = 1,
+		startH = 1,
+		custom = true,
+	}
+end
+
+local function customTrainer(e)
+	if type(e) ~= "table" or type(e.id) ~= "number" or type(e.name) ~= "string" then
+		return nil, "needs id (a number) and name"
+	end
+	if type(e.map) ~= "number" or not (pct(e.x) and pct(e.y)) then
+		return nil, "needs map (uiMap id) and x, y in map percent"
+	end
+	if e.role ~= "trainer" and e.role ~= "recipes" then
+		return nil, 'role must be "trainer" or "recipes"'
+	end
+	if e.role == "trainer" and type(e.trains) ~= "string" then
+		return nil, "a trainer needs trains = the profession's name"
+	end
+	if e.faction ~= nil and e.faction ~= "A" and e.faction ~= "H" and e.faction ~= "B" then
+		return nil, 'faction must be "A", "H" or "B"'
+	end
+	local row = {}
+	for k, v in pairs(e) do
+		row[k] = v
+	end
+	row.place = row.place or "?"
+	row.faction = row.faction or "B"
+	row.custom = true
+	return row
+end
+
+-- Data/Custom.lua's `spots` and `trainers` on top of the shipped Data/Spots.lua and Data/Trainers.lua.
+--   spots = { [skill line] = { [spot id] = spot | false } }: a new id adds a spot, a shipped id replaces it, false
+--           leaves it out. A spot: map, x, y, gets = { { t = target key, n } }, optional pts, pk, zone, area, note.
+--   trainers = { row, ... }: a row with a shipped id replaces it. Rows as in Data/Trainers.lua.
+-- Every bad entry is left out and named. Returns { applied, errors }.
+function P.applyCustom(spots, trainers, custom)
+	local report = { applied = 0, errors = {} }
+	if type(custom) ~= "table" then
+		return report
+	end
+	local function bad(what, why)
+		report.errors[#report.errors + 1] = what .. ": " .. why
+	end
+	for line, list in pairs(type(custom.spots) == "table" and custom.spots or {}) do
+		local def = type(spots) == "table" and type(spots.skills) == "table" and spots.skills[line]
+		if not def then
+			bad(("spots[%s]"):format(tostring(line)), "not a world skill line (633, 186, 182, 393)")
+		elseif type(list) == "table" then
+			for id, e in pairs(list) do
+				local at
+				for i, s in ipairs(def.spots or {}) do
+					if s.id == id then
+						at = i
+					end
+				end
+				if e == false then
+					if at then
+						table.remove(def.spots, at)
+						report.applied = report.applied + 1
+					else
+						bad(("spots[%d][%s]"):format(line, tostring(id)), "no shipped spot with this id to leave out")
+					end
+				else
+					local spot, why = customSpot(def, id, e)
+					if not spot then
+						bad(("spots[%d][%s]"):format(line, tostring(id)), why)
+					else
+						def.spots = def.spots or {}
+						if at then
+							def.spots[at] = spot
+						else
+							def.spots[#def.spots + 1] = spot
+						end
+						report.applied = report.applied + 1
+					end
+				end
+			end
+		end
+	end
+	if type(custom.trainers) == "table" and type(trainers) == "table" then
+		local byId = {}
+		for i, r in ipairs(trainers) do
+			byId[r.id] = i
+		end
+		for i, e in ipairs(custom.trainers) do
+			local row, why = customTrainer(e)
+			if not row then
+				bad(("trainers[%d]"):format(i), why)
+			elseif byId[row.id] then
+				trainers[byId[row.id]] = row
+				report.applied = report.applied + 1
+			else
+				trainers[#trainers + 1] = row
+				byId[row.id] = #trainers
+				report.applied = report.applied + 1
+			end
+		end
+	end
+	return report
+end
+
+--------------------------------------------------------------------------- world tries (learned.skillups, Learned.lua)
+
+-- The gather and pick-lock spells, all ranks (Classic ids; unconfirmed for Forever until the first launch records a
+-- try): a successful cast is one try at a skill-up on the target nearest the player.
+P.TRY_SPELL = {
+	[1804] = 633, -- Pick Lock
+	[2575] = 186,
+	[2576] = 186,
+	[3564] = 186,
+	[10248] = 186, -- Mining
+	[2366] = 182,
+	[2368] = 182,
+	[3570] = 182,
+	[11993] = 182, -- Herb Gathering
+	[8613] = 393,
+	[8617] = 393,
+	[8618] = 393,
+	[10768] = 393, -- Skinning
+}
+P.TRY_YD = 15 -- a data position this close to the player is the target that was used
+P.TRY_SETTLE = 2 -- seconds for the skill-up message to arrive
+P.diag.tries = { recorded = 0, unplaced = 0, last = nil }
+
+-- The target key of the data position of `line` nearest `here` ({ map, x, y } normalised), within P.TRY_YD yards;
+-- nil and why otherwise.
+function P.nearestTarget(spots, line, here)
+	local def = type(spots) == "table" and spots.skills and spots.skills[line]
+	if not def or type(here) ~= "table" or type(here.x) ~= "number" then
+		return nil, "no position or no data for this skill"
+	end
+	local size = spots.maps and spots.maps[here.map]
+	if not size then
+		return nil, "this map's size is not in the data"
+	end
+	local best, bestYd
+	for _, s in ipairs(def.spots or {}) do
+		if s.map == here.map and type(s.pts) == "table" then
+			for i = 1, math.floor(#s.pts / 2) do
+				local yd = ns.Where.yards(size, here.x, here.y, s.pts[2 * i - 1] / 100, s.pts[2 * i] / 100)
+				local g = s.gets and s.gets[(s.pk and s.pk[i]) or 1]
+				if yd and g and g.t and (not bestYd or yd < bestYd) then
+					best, bestYd = g.t, yd
+				end
+			end
+		end
+	end
+	if best and bestYd <= P.TRY_YD then
+		return best
+	end
+	return nil, "no data position within " .. P.TRY_YD .. " yards"
+end
+
+local function rankOf(line)
+	local r = ns.Skills.read(line, ns.Skills.env())
+	return type(r) == "table" and type(r.rank) == "number" and r.rank or nil
+end
+
+-- One gather or pick-lock cast: noted as a try (and a skill-up when the rank rose within P.TRY_SETTLE seconds).
+function P.worldTry(spell)
+	local line = P.TRY_SPELL[clean(spell) or 0]
+	local learned = line and ns.learned and ns.learned() or nil
+	if not (line and type(learned) == "table" and ns.Learned and ns.Learned.noteTry) then
+		return false
+	end
+	local here = hereNow()
+	local key, why = P.nearestTarget(ns.Data.spots, line, here)
+	local skill = rankOf(line)
+	if not key or not skill then
+		P.diag.tries.unplaced = P.diag.tries.unplaced + 1
+		P.diag.tries.last = why or "skill unknown"
+		return false
+	end
+	C_Timer.After(P.TRY_SETTLE, function()
+		P.run("world try", function()
+			local now = rankOf(line)
+			ns.Learned.noteTry(learned, line, key, skill, type(now) == "number" and now > skill)
+			P.diag.tries.recorded = P.diag.tries.recorded + 1
+			P.diag.tries.last = key
+		end)
+	end)
+	return true
+end
+
+P.custom = P.run("custom", function()
+	return P.applyCustom(ns.Data.spots, ns.Data.trainers, ns.Data.custom)
+end) or { applied = 0, errors = { "Data/Custom.lua spots and trainers could not be applied" } }
+
 local ev = CreateFrame("Frame")
 P.eventFrame = ev
 for _, e in ipairs({ "PLAYER_LOGIN", "PLAYER_LOGOUT", "ZONE_CHANGED_NEW_AREA" }) do
 	ev:RegisterEvent(e)
 end
-ev:SetScript("OnEvent", function(_, event)
-	if event == "PLAYER_LOGIN" then
+P.diag.tries.event = pcall(ev.RegisterUnitEvent, ev, "UNIT_SPELLCAST_SUCCEEDED", "player") and "registered"
+	or "UNIT_SPELLCAST_SUCCEEDED not registered: world tries are not counted"
+ev:SetScript("OnEvent", function(_, event, unit, _, spell)
+	if event == "UNIT_SPELLCAST_SUCCEEDED" then
+		if unit == "player" and P.TRY_SPELL[clean(spell) or 0] then
+			P.run("world try", P.worldTry, spell)
+		end
+	elseif event == "PLAYER_LOGIN" then
 		P.run("state", function()
 			ns.JournalUI.setState(P.ui())
 		end)
@@ -1106,6 +1373,10 @@ ev:SetScript("OnEvent", function(_, event)
 				ui.seen = ns.CODE_VERSION
 				P.pulse = true
 				print(P.TEXT.firstRun:format(ns.CODE_VERSION))
+			end
+			local errs = P.custom and P.custom.errors or {}
+			if #errs > 0 then
+				print(("SkillupHelper: Data/Custom.lua places and NPCs: %d left out. First: %s"):format(#errs, errs[1]))
 			end
 		end)
 		P.run("tracker", P.updateTracker)

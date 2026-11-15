@@ -415,6 +415,143 @@ describe("Provider: a view-model for every page", function()
 	end)
 end)
 
+describe("World tries (learned.skillups)", function()
+	it("records a gather cast on the nearest data position, and nothing when none is near", function()
+		local a = login({ skillInfo = { [186] = { rank = 60, maxRank = 150 } } })
+		local spots = a.ns.Data.spots
+		local s
+		for _, sp in ipairs(spots.skills[186].spots) do
+			if sp.pts and spots.maps[sp.map] then
+				s = sp
+				break
+			end
+		end
+		local want = s.gets[s.pk[1]].t
+		local here = { map = s.map, x = s.pts[1] / 100, y = s.pts[2] / 100 }
+		assert.equal(want, a.P.nearestTarget(spots, 186, here))
+		assert.is_nil(a.P.nearestTarget(spots, 186, { map = s.map, x = 0.999, y = 0.001 }))
+		-- no map position from the client: not placed, not recorded
+		assert.is_false(a.P.worldTry(2575))
+		assert.equal(1, a.P.diag.tries.unplaced)
+		-- standing on the spot's first point: one try at 60
+		a.env.C_Map = {
+			GetBestMapForUnit = function()
+				return s.map
+			end,
+			GetPlayerMapPosition = function()
+				return {
+					GetXY = function()
+						return here.x, here.y
+					end,
+				}
+			end,
+		}
+		a.env.IsInInstance = function()
+			return false
+		end
+		a.env.C_Timer = {
+			After = function(_, fn)
+				fn()
+			end,
+		}
+		assert.is_true(a.P.worldTry(2575))
+		local tries = a.ns.learned().skillups[186][want]
+		local n = 0
+		for _, e in pairs(tries) do
+			n = n + e.t
+		end
+		assert.equal(1, n)
+		assert.equal(1, a.P.diag.tries.recorded)
+		assert.is_false(a.P.worldTry(99999), "not a gather spell")
+	end)
+end)
+
+describe("Data/Custom.lua places and NPCs", function()
+	local function firstTarget(def)
+		local keys = {}
+		for k, t in pairs(def.targets) do
+			if type(t.req) == "number" and t.objects then
+				keys[#keys + 1] = k
+			end
+		end
+		table.sort(keys)
+		return keys[1]
+	end
+
+	it("adds, replaces and leaves out spots and trainers, and the new spot builds a where card", function()
+		local a = loadAddon({})
+		local spots, trainers = a.ns.Data.spots, a.ns.Data.trainers
+		local def = spots.skills[633]
+		local target = firstTarget(def)
+		local shipped = def.spots[1].id
+		local n, nt = #def.spots, #trainers
+		local custom = {
+			spots = {
+				[633] = {
+					["lock:custom:test"] = {
+						map = def.spots[1].map,
+						zone = "Test",
+						x = 50,
+						y = 50,
+						gets = { { t = target, n = 3 } },
+						pts = { 49, 49, 51, 49, 51, 51 },
+					},
+					[shipped] = false,
+				},
+			},
+			trainers = {
+				{ id = trainers[1].id, name = "Renamed", map = 1454, x = 50, y = 50, role = "recipes" },
+				{ id = 999001, name = "My Trainer", map = 1454, x = 40, y = 60, role = "trainer", trains = "Mining" },
+			},
+		}
+		local r = a.ns.Provider.applyCustom(spots, trainers, custom)
+		assert.same({}, r.errors)
+		assert.equal(4, r.applied)
+		assert.equal(n, #def.spots) -- one added, one left out
+		local added
+		for _, s in ipairs(def.spots) do
+			assert.not_equal(shipped, s.id)
+			if s.id == "lock:custom:test" then
+				added = s
+			end
+		end
+		assert.is_true(added.custom)
+		assert.equal(nt + 1, #trainers)
+		assert.equal("Renamed", trainers[1].name)
+		local W = a.ns.Where
+		local q = W.query({ data = spots, line = 633, skill = added.req, cap = 300, level = 60, faction = "H" })
+		local where = W.where(q, added)
+		assert.equal("lock:custom:test", where.key)
+		assert.is_table(where.route)
+	end)
+
+	it("names every bad entry and applies none of them", function()
+		local a = loadAddon({})
+		local spots, trainers = a.ns.Data.spots, a.ns.Data.trainers
+		local n = #spots.skills[633].spots
+		local r = a.ns.Provider.applyCustom(spots, trainers, {
+			spots = {
+				[633] = {
+					["lock:x:1"] = { map = 1418, x = 150, y = 10, gets = { { t = "nope", n = 1 } } },
+					["lock:x:2"] = { map = 1418, x = 10, y = 10, gets = { { t = "nope", n = 1 } } },
+					["no-such-spot"] = false,
+				},
+				[999] = {},
+			},
+			trainers = { { id = 1, name = "x", map = 1, x = 1, y = 1, role = "boss" } },
+		})
+		assert.equal(0, r.applied)
+		assert.equal(5, #r.errors)
+		assert.equal(n, #spots.skills[633].spots)
+		local text = table.concat(r.errors, "\n")
+		assert.truthy(text:find("map percent", 1, true))
+		assert.truthy(text:find('no target "nope"', 1, true))
+		assert.truthy(text:find("no shipped spot", 1, true))
+		assert.truthy(text:find("not a world skill line", 1, true))
+		assert.truthy(text:find("role must be", 1, true))
+	end)
+end)
+
 describe("Settings page", function()
 	-- slash command -> the journal control (key, value, action extras) that must leave the same SavedVariables
 	local CASES = {
