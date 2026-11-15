@@ -4,7 +4,7 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.3.1"
+ns.CODE_VERSION = "0.3.2"
 
 -- The data the planner reads, built once from the three layers (Logic.effectivePlan): the shipped Data/Recipes.lua,
 -- an optional local Data/Plan.lua on top, an optional Data/Custom.lua on top of both. ns.Data.layers says what
