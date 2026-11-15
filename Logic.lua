@@ -390,8 +390,8 @@ local EXCLUDE_FLAG = { dungeon = true, ahPatterns = true }
 -- Writes one More-tab control into SkillupHelperDB, under the keys the slash commands write:
 --   luck (db.luck, one of L.LUCKS, nil resets), effort (db.effort, copper >= 0, nil resets), noRecipeBuys,
 --   noAlts and resale ("Count selling what I craft", off by default) (true or nil), dungeon / ahPatterns
---   (db.exclude[key]: true leaves them out), special (db.exclude.special: false plans special teachers, nil leaves them out), allow / notNow (db.exclude[key][spell]: true or nil; one
---   clears the other, as /skillup allow and /skillup exclude <spellID> do).
+--   (db.exclude[key]: true leaves them out), special (db.exclude.special: false plans special teachers, nil leaves
+--   them out), allow / notNow (db.exclude[key][spell]: true or nil; one clears the other, as /skillup allow and /skillup exclude <spellID> do).
 -- a = { key, value, spell }. Returns true, or false and the broken link.
 function L.applySetting(db, a)
 	if type(db) ~= "table" then
