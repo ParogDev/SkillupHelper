@@ -808,3 +808,92 @@ describe("AH list", function()
 		assert.same({}, calls)
 	end)
 end)
+
+describe("Secret values from the vendor and the bags", function()
+	local SECRET = {}
+	local NAMES = {
+		"issecretvalue",
+		"GetMerchantNumItems",
+		"GetMerchantItemID",
+		"GetMerchantItemMaxStack",
+		"GetMerchantFilter",
+		"C_MerchantFrame",
+		"C_Container",
+		"NUM_BAG_SLOTS",
+		"NUM_TOTAL_EQUIPPED_BAG_SLOTS",
+	}
+	local saved
+
+	before_each(function()
+		saved = {}
+		for _, k in ipairs(NAMES) do
+			saved[k] = rawget(_G, k)
+		end
+	end)
+
+	after_each(function()
+		for _, k in ipairs(NAMES) do
+			rawset(_G, k, saved[k])
+		end
+	end)
+
+	local function client(info, stack, free)
+		_G.issecretvalue = function(v)
+			return v == SECRET
+		end
+		_G.GetMerchantNumItems = function()
+			return 1
+		end
+		_G.GetMerchantItemID = function()
+			return 2318
+		end
+		_G.GetMerchantItemMaxStack = function()
+			return SECRET
+		end
+		_G.GetMerchantFilter = nil
+		_G.C_MerchantFrame = {
+			GetItemInfo = function()
+				return info
+			end,
+		}
+		_G.NUM_BAG_SLOTS, _G.NUM_TOTAL_EQUIPPED_BAG_SLOTS = 0, 0
+		_G.C_Container = {
+			GetContainerNumFreeSlots = function()
+				return free, 0
+			end,
+		}
+		local ns = load({})
+		ns.merchantOpen = true
+		_G.C_Item.GetItemInfo = function()
+			return nil, nil, nil, nil, nil, nil, nil, stack
+		end
+		_G.C_Item.GetItemCount = function()
+			return SECRET
+		end
+		return ns
+	end
+
+	it("a secret vendor offer is not now, never an error", function()
+		local ns = client({ price = 10, stackCount = SECRET, numAvailable = -1 }, 20, 1)
+		local offer, why = ns.UI.merchantOffer(2318)
+		assert.is_nil(offer)
+		assert.matches("secret", why)
+	end)
+
+	it("a secret max stack is dropped from a readable offer", function()
+		local ns = client({ price = 10, stackCount = 5, numAvailable = -1 }, 20, 1)
+		local offer = ns.UI.merchantOffer(2318)
+		assert.equal(5, offer.lot)
+		assert.is_nil(offer.maxStack)
+	end)
+
+	it("a secret stack size makes the bag room unknown", function()
+		local ns = client({}, SECRET, 1)
+		assert.is_nil(ns.UI.bagRoom(2318))
+	end)
+
+	it("a secret free-slot count or bag count counts as nothing", function()
+		local ns = client({}, 20, SECRET)
+		assert.equal("number", type(ns.UI.bagRoom(2318)))
+	end)
+end)

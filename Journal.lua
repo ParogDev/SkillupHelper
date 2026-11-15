@@ -522,7 +522,7 @@ local function shoppingPage(line, s)
 	end
 	local last = ns.UI and ns.UI.last
 	local model = ns.UI and ns.UI.model
-	if ns.tradeSkillOpen and type(last) == "table" and type(model) == "table" and model.professionID == line then
+	if ns.tradeSkillOpen and type(last) == "table" and type(model) == "table" and clean(model.professionID) == line then
 		return last.shopping
 	end
 	return { empty = P.TEXT.notNowShopping:format(nameOf(line, s)) }
@@ -1617,7 +1617,7 @@ P.diag.tries.event = pcall(ev.RegisterUnitEvent, ev, "UNIT_SPELLCAST_SUCCEEDED",
 	or "UNIT_SPELLCAST_SUCCEEDED not registered: world tries are not counted"
 ev:SetScript("OnEvent", function(_, event, unit, _, spell)
 	if event == "UNIT_SPELLCAST_SUCCEEDED" then
-		if unit == "player" and P.TRY_SPELL[clean(spell) or 0] then
+		if clean(unit) == "player" and P.TRY_SPELL[clean(spell) or 0] then
 			P.run("world try", P.worldTry, spell)
 		end
 	elseif event == "PLAYER_LOGIN" then

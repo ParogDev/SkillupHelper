@@ -110,7 +110,7 @@ end
 -- The player's position: { continent, x, y (world yards), map, mx, my (percent) }, or nil and why ("not now").
 local function here()
 	local okInst, inInstance = pcall(IsInInstance)
-	if okInst and inInstance and not secret(inInstance) then
+	if okInst and not secret(inInstance) and inInstance then
 		return nil, "in an instance"
 	end
 	local map = C_Map.GetBestMapForUnit("player")
@@ -201,7 +201,8 @@ local function merchantStock()
 		if okId and type(item) == "number" and not secret(item) and okInfo and type(info) == "table" then
 			local price, stack, left = info.price, info.stackCount, info.numAvailable
 			local sold = { item = item }
-			if type(price) == "number" and not secret(price) and not info.hasExtendedCost and price > 0 then
+			local extended = secret(info.hasExtendedCost) or info.hasExtendedCost
+			if type(price) == "number" and not secret(price) and not extended and price > 0 then
 				local per = (type(stack) == "number" and not secret(stack) and stack > 0) and stack or 1
 				sold.price = math.floor(price / per * 100 + 0.5) / 100
 			end
@@ -293,7 +294,7 @@ local function trainerServices()
 	for _, f in ipairs(turnedOn) do
 		pcall(SetTrainerServiceTypeFilter, f, false)
 		local ok, on = pcall(GetTrainerServiceTypeFilter, f)
-		if not ok or on then
+		if not ok or secret(on) or on then
 			fail(("trainer filter %s not restored after reading the list"):format(f))
 		end
 	end
@@ -639,12 +640,12 @@ local function isOurPin()
 		return false
 	end
 	local p = C_Map.GetUserWaypoint()
-	if not p or p.uiMapID ~= waypointOurs.map or not p.position then
+	if not p or secret(p.uiMapID) or p.uiMapID ~= waypointOurs.map or not p.position then
 		return false
 	end
 	-- GetUserWaypoint gives a plain { x, y } table on this client, not a Vector2D (no GetXY)
 	local x, y = p.position.x, p.position.y
-	if type(x) ~= "number" or type(y) ~= "number" then
+	if secret(x) or secret(y) or type(x) ~= "number" or type(y) ~= "number" then
 		return false
 	end
 	return math.abs(x - waypointOurs.x) < 1e-3 and math.abs(y - waypointOurs.y) < 1e-3

@@ -35,6 +35,14 @@ local function secret(v)
 	return issecretvalue ~= nil and issecretvalue(v)
 end
 
+-- A client count, or `default` when it is missing, not a number or a secret value.
+local function cnt(v, default)
+	if secret(v) or type(v) ~= "number" then
+		return default
+	end
+	return v
+end
+
 local function count(kind)
 	UI.stats.animations = UI.stats.animations + 1
 	UI.stats.played[kind] = (UI.stats.played[kind] or 0) + 1
@@ -82,6 +90,9 @@ function UI.craftable(spell)
 	return nil, "the client gave no craftable count (GetCraftableCount, numAvailable)"
 end
 
+-- The MerchantItemInfo fields an offer reads: any one secret makes the offer "not now".
+local OFFER_FIELDS = { "price", "stackCount", "numAvailable", "hasExtendedCost", "currencyID", "isPurchasable" }
+
 -- The open merchant's offer for an item: { index, price, lot, maxStack, available } (Logic.vendorLots), or nil and
 -- the link that broke. The merchant API reads the vendor, not a frame: it answers the same under Blizzard's
 -- MerchantFrame and TSM's vendoring window.
@@ -100,6 +111,11 @@ function UI.merchantOffer(item)
 			if not ok or type(info) ~= "table" then
 				return nil, "C_MerchantFrame.GetItemInfo failed: " .. tostring(info)
 			end
+			for _, k in ipairs(OFFER_FIELDS) do
+				if secret(info[k]) then
+					return nil, "the vendor's offer is a secret value here"
+				end
+			end
 			if info.hasExtendedCost or info.currencyID then
 				return nil, "costs more than gold here"
 			end
@@ -111,7 +127,7 @@ function UI.merchantOffer(item)
 				index = i,
 				price = info.price or 0,
 				lot = math.max(1, info.stackCount or 1),
-				maxStack = type(maxStack) == "number" and maxStack or nil,
+				maxStack = cnt(maxStack, nil),
 				available = info.numAvailable,
 			}
 		end
@@ -126,27 +142,30 @@ end
 -- family, the reagent bag for a crafting reagent) times its stack size, plus the top of a partial stack.
 function UI.bagRoom(item)
 	local _, _, _, _, _, _, _, stack, _, _, _, _, _, _, _, _, isReagent = C_Item.GetItemInfo(item)
+	stack = cnt(stack, nil)
 	if not stack then
-		return nil -- item info not cached yet: room unknown, the client refuses a buy that does not fit
+		return nil -- item info not cached yet (or a secret): room unknown, the client refuses a buy that does not fit
 	end
-	local family = C_Item.GetItemFamily and C_Item.GetItemFamily(item) or 0
+	isReagent = not secret(isReagent) and isReagent == true
+	local family = cnt(C_Item.GetItemFamily and C_Item.GetItemFamily(item), 0)
 	local bags = NUM_BAG_SLOTS or 4
 	local free = 0
 	for bag = 0, NUM_TOTAL_EQUIPPED_BAG_SLOTS or bags do
 		local n, bagFamily = C_Container.GetContainerNumFreeSlots(bag)
-		if type(n) == "number" and n > 0 then
+		n, bagFamily = cnt(n, 0), cnt(bagFamily, 0)
+		if n > 0 then
 			local fits
 			if bag > bags then
-				fits = isReagent == true
+				fits = isReagent
 			else
-				fits = (bagFamily or 0) == 0 or bit.band(bagFamily, family or 0) ~= 0
+				fits = bagFamily == 0 or bit.band(bagFamily, family) ~= 0
 			end
 			if fits then
 				free = free + n
 			end
 		end
 	end
-	return ns.Logic.bagRoom(free, stack, C_Item.GetItemCount(item) or 0)
+	return ns.Logic.bagRoom(free, stack, cnt(C_Item.GetItemCount(item), 0))
 end
 
 -- The env View.describe reads the client through.
@@ -202,7 +221,7 @@ local function buy(a)
 	end
 	local bought, err = {}, nil
 	for _, it in ipairs(fresh.items) do
-		local done, before = 0, C_Item.GetItemCount(it.item) or 0
+		local done, before = 0, cnt(C_Item.GetItemCount(it.item), 0)
 		for _, n in ipairs(it.calls) do
 			local ok, e = pcall(BuyMerchantItem, it.index, n)
 			if not ok then
@@ -235,8 +254,9 @@ function UI.noteBags()
 	UI.buyPending = false
 	local last = UI.stats.lastBuy
 	for _, it in ipairs(last and last.items or {}) do
-		if it.got == nil then
-			it.got = (C_Item.GetItemCount(it.item) or 0) - (it.before or 0)
+		local now = cnt(C_Item.GetItemCount(it.item), nil)
+		if it.got == nil and now then
+			it.got = now - (it.before or 0)
 			if it.got < it.requested and not UI.stats.lastBuyError then
 				UI.stats.lastBuyError = ("item %d: asked for %d, the bags got %d"):format(it.item, it.requested, it.got)
 			end
@@ -1002,9 +1022,9 @@ local function newPath(f)
 	s.right:SetJustifyH("RIGHT")
 	s.right:SetWordWrap(false)
 	local function under(self)
-		local cx = GetCursorPosition and GetCursorPosition()
+		local cx = cnt(GetCursorPosition and GetCursorPosition(), nil)
 		local scale, left, w = self:GetEffectiveScale(), self:GetLeft(), self:GetWidth()
-		if type(cx) ~= "number" or type(left) ~= "number" or not scale or scale <= 0 or not w or w <= 0 then
+		if not cx or type(left) ~= "number" or not scale or scale <= 0 or not w or w <= 0 then
 			return nil
 		end
 		return ns.View.stripAt(self.model, (cx / scale - left) / w)
@@ -1806,7 +1826,7 @@ end
 
 local function commodityResults(item)
 	local list = {}
-	local n = C_AuctionHouse.GetNumCommoditySearchResults(item) or 0
+	local n = cnt(C_AuctionHouse.GetNumCommoditySearchResults(item), 0)
 	for i = 1, n do
 		local r = C_AuctionHouse.GetCommoditySearchResultInfo(item, i)
 		if type(r) == "table" and not secret(r.unitPrice) and not secret(r.quantity) then
@@ -1818,10 +1838,10 @@ end
 
 local function itemResults(key)
 	local list = {}
-	local n = C_AuctionHouse.GetNumItemSearchResults(key) or 0
+	local n = cnt(C_AuctionHouse.GetNumItemSearchResults(key), 0)
 	for i = 1, n do
 		local r = C_AuctionHouse.GetItemSearchResultInfo(key, i)
-		if type(r) == "table" and not secret(r.buyoutAmount) then
+		if type(r) == "table" and not secret(r.buyoutAmount) and not secret(r.quantity) and not secret(r.auctionID) then
 			list[#list + 1] = {
 				auctionID = r.auctionID,
 				buyoutAmount = r.buyoutAmount,

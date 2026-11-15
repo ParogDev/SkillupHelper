@@ -17,6 +17,14 @@ local function secret(v)
 	return issecretvalue ~= nil and issecretvalue(v) or false
 end
 
+-- A client count, or `default` when it is missing, not a number or a secret value.
+local function cnt(v, default)
+	if secret(v) or type(v) ~= "number" then
+		return default
+	end
+	return v
+end
+
 local function db()
 	return SkillupHelperDB
 end
@@ -60,19 +68,19 @@ end
 
 -- This character's bags, bank and mailbox units of an item, and its bag stacks (unlocked ones only).
 local function live(item)
-	local bags = C_Item.GetItemCount(item) or 0
-	local all = C_Item.GetItemCount(item, true) or bags
+	local bags = cnt(C_Item.GetItemCount(item), 0)
+	local all = cnt(C_Item.GetItemCount(item, true), bags)
 	local mail = 0
 	if type(TSM_API) == "table" and type(TSM_API.GetMailQuantity) == "function" then
 		local ok, n = pcall(TSM_API.GetMailQuantity, "i:" .. item)
-		mail = ok and type(n) == "number" and n or 0
+		mail = ok and cnt(n, 0) or 0
 	end
 	local stacks, locked = {}, false
 	for bag = 0, NUM_BAG_SLOTS + 1 do
-		for slot = 1, C_Container.GetContainerNumSlots(bag) or 0 do
+		for slot = 1, cnt(C_Container.GetContainerNumSlots(bag), 0) do
 			local info = C_Container.GetContainerItemInfo(bag, slot)
 			if info and not secret(info.itemID) and not secret(info.stackCount) and info.itemID == item then
-				if info.isLocked then
+				if secret(info.isLocked) or info.isLocked then
 					locked = true -- a split or move the server has not confirmed yet
 				else
 					stacks[#stacks + 1] = { bag = bag, slot = slot, n = info.stackCount or 1 }
@@ -88,8 +96,8 @@ local function freeSlots()
 	local out = {}
 	for bag = 0, NUM_BAG_SLOTS do
 		local free, family = C_Container.GetContainerNumFreeSlots(bag)
-		if (free or 0) > 0 and family == 0 then
-			for slot = 1, C_Container.GetContainerNumSlots(bag) or 0 do
+		if cnt(free, 0) > 0 and cnt(family, -1) == 0 then
+			for slot = 1, cnt(C_Container.GetContainerNumSlots(bag), 0) do
 				if not C_Container.GetContainerItemInfo(bag, slot) then
 					out[#out + 1] = { bag = bag, slot = slot }
 				end
@@ -103,8 +111,8 @@ local function freeCount()
 	local n = 0
 	for bag = 0, NUM_BAG_SLOTS do
 		local free, family = C_Container.GetContainerNumFreeSlots(bag)
-		if family == 0 then
-			n = n + (free or 0)
+		if cnt(family, -1) == 0 then
+			n = n + cnt(free, 0)
 		end
 	end
 	return n
@@ -114,8 +122,8 @@ local function attachedNow()
 	local out, any = {}, false
 	for i = 1, ns.Alts.MAX_ATTACH do
 		local ok, name, itemID, _, n = pcall(GetSendMailItem, i)
-		if ok and name and itemID and not secret(itemID) and not secret(n) then
-			out[itemID] = (out[itemID] or 0) + (n or 1)
+		if ok and not secret(name) and name and not secret(itemID) and itemID and not secret(n) then
+			out[itemID] = (out[itemID] or 0) + cnt(n, 1)
 			any = true
 		end
 	end
@@ -129,7 +137,7 @@ local function formBusy()
 	end
 	local _, any = attachedNow()
 	local name = SendMailNameEditBox and SendMailNameEditBox:GetText() or ""
-	return any or (name ~= "" and not secret(name))
+	return any or (not secret(name) and name ~= "")
 end
 
 ----------------------------------------------------------------------------------------------------------- the panel
@@ -385,6 +393,7 @@ local function splitStack(a)
 		or secret(info.itemID)
 		or secret(info.stackCount)
 		or info.itemID ~= a.item
+		or secret(info.isLocked)
 		or info.isLocked
 		or (info.stackCount or 1) <= a.take
 	then

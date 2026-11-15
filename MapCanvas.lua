@@ -244,7 +244,7 @@ end
 -- The player on `map`: { x, y, facing, onMap }, or nil and why ("not now": instance, secret, no map).
 function M.position(map)
 	local okInst, inInstance = pcall(IsInInstance)
-	if okInst and inInstance and not secret(inInstance) then
+	if okInst and not secret(inInstance) and inInstance then
 		return nil, "in an instance"
 	end
 	if not (C_Map and C_Map.GetPlayerMapPosition) then

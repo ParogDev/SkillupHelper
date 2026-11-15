@@ -1644,7 +1644,7 @@ function W.slider(parent, w)
 	function c:FromCursor()
 		local left, scale = self.hit:GetLeft(), self.hit:GetEffectiveScale()
 		local cx = GetCursorPosition()
-		if not (left and cx and scale and scale > 0) then
+		if W.secret(cx) or not (left and cx and scale and scale > 0) then
 			return self.cur
 		end
 		local frac = math.max(0, math.min(1, (cx / scale - left - 5) / math.max(1, (w - 4) - 10)))

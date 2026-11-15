@@ -993,7 +993,7 @@ local function timeline(parent)
 		local vm = self.vm
 		local left, top, scale = self:GetLeft(), self:GetTop(), self:GetEffectiveScale()
 		local cx, cy = GetCursorPosition()
-		if not (vm and left and top and cx and cy and scale and scale > 0) then
+		if W.secret(cx) or W.secret(cy) or not (vm and left and top and cx and cy and scale and scale > 0) then
 			return nil
 		end
 		local lx, ly = cx / scale - left, top - cy / scale
