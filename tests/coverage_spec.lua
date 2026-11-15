@@ -125,7 +125,7 @@ describe("the shipped recipe data", function()
 		table.sort(ids)
 	end)
 
-	local function cost(prof, recipeItems)
+	local function cost(prof, recipeItems, resale)
 		local recipeItem = {}
 		for _, r in pairs(prof.recipes) do
 			if r.item then
@@ -141,6 +141,7 @@ describe("the shipped recipe data", function()
 			ranks = prof.ranks and RANKS or nil,
 			cap = not prof.ranks and 300 or nil,
 			recipeItems = recipeItems,
+			resale = resale,
 		})
 	end
 
@@ -182,76 +183,87 @@ describe("the shipped recipe data", function()
 		assert.is_true(enchants > 100)
 	end)
 
-	it("can cost every crafting profession from 1 to 300 with no gap", function()
-		local failures, seenHoles = {}, {}
-		for _, id in ipairs(ids) do
-			local prof = data.professions[id]
-			local t0 = os.clock()
-			local r = cost(prof, true)
-			print(
-				("%s: %s, %d steps, %d recipes to buy, training %s, %.2f s"):format(
-					prof.name,
-					r.complete and ns.Logic.money(r.total) or "INCOMPLETE",
-					#r.steps,
-					#r.recipesToBuy,
-					ns.Logic.money(r.trainingCost),
-					os.clock() - t0
-				)
-			)
-			assert.is_true(r.total == r.total and math.abs(r.total) < math.huge, prof.name .. ": a finite total")
-			assert.equal(0, r.unknownPrices, prof.name)
-			-- every step's recipe is in the data; a trainer recipe is trained, and a recipe item bought, before its
-			-- first craft
-			local got = {}
-			for i, st in ipairs(r.steps) do
-				if st.kind == "train" or st.kind == "buyRecipe" then
-					got[st.spell] = st.kind
-				elseif st.kind == "craft" then
-					local row = prof.recipes[st.spell]
-					local at = ("%s step %d %s"):format(prof.name, i, tostring(st.name))
-					assert.is_not_nil(row, at .. ": not in the data")
-					if row.src == "trainer" then
-						assert.equal("train", got[st.spell], at .. ": crafted before it is trained")
-					elseif row.src == "item" then
-						assert.equal("buyRecipe", got[st.spell], at .. ": crafted before its recipe is bought")
-					else
-						assert.equal("auto", row.src, at)
+	-- both modes of "Count selling what I craft": off (the default) and on
+	for _, resale in ipairs({ false, true }) do
+		it(
+			("can cost every crafting profession from 1 to 300 with no gap (resale %s)"):format(
+				resale and "on" or "off"
+			),
+			function()
+				local failures, seenHoles = {}, {}
+				for _, id in ipairs(ids) do
+					local prof = data.professions[id]
+					local t0 = os.clock()
+					local r = cost(prof, true, resale)
+					print(
+						("%s: %s, %d steps, %d recipes to buy, training %s, %.2f s"):format(
+							prof.name,
+							r.complete and ns.Logic.money(r.total) or "INCOMPLETE",
+							#r.steps,
+							#r.recipesToBuy,
+							ns.Logic.money(r.trainingCost),
+							os.clock() - t0
+						)
+					)
+					assert.is_true(
+						r.total == r.total and math.abs(r.total) < math.huge,
+						prof.name .. ": a finite total"
+					)
+					assert.equal(0, r.unknownPrices, prof.name)
+					-- every step's recipe is in the data; a trainer recipe is trained, and a recipe item bought, before its
+					-- first craft
+					local got = {}
+					for i, st in ipairs(r.steps) do
+						if st.kind == "train" or st.kind == "buyRecipe" then
+							got[st.spell] = st.kind
+						elseif st.kind == "craft" then
+							local row = prof.recipes[st.spell]
+							local at = ("%s step %d %s"):format(prof.name, i, tostring(st.name))
+							assert.is_not_nil(row, at .. ": not in the data")
+							if row.src == "trainer" then
+								assert.equal("train", got[st.spell], at .. ": crafted before it is trained")
+							elseif row.src == "item" then
+								assert.equal("buyRecipe", got[st.spell], at .. ": crafted before its recipe is bought")
+							else
+								assert.equal("auto", row.src, at)
+							end
+						end
+					end
+					local known = KNOWN_HOLES[id]
+					if known then
+						seenHoles[id] = true
+						assert.same(known.brackets, bracketsOf(r.gaps), prof.name .. ": KNOWN_HOLES is out of date")
+					elseif prof.world then
+						-- recipes plus world targets: what neither covers is a hole, named level by level
+						local left = worldHoles(id, r.gaps)
+						if left == nil then
+							print(
+								prof.name
+									.. ": needs world spots (Data/Spots.lua is not here); recipes leave "
+									.. describeGaps(prof, r.gaps)
+							)
+						elseif #left > 0 then
+							failures[#failures + 1] = ("%s (%d): neither a recipe nor a world target gives skill at %s"):format(
+								prof.name,
+								id,
+								table.concat(left, ", ")
+							)
+						end
+					elseif not r.complete then
+						failures[#failures + 1] = ("%s (%d) is not covered:\n  %s"):format(
+							prof.name,
+							id,
+							describeGaps(prof, r.gaps)
+						)
 					end
 				end
-			end
-			local known = KNOWN_HOLES[id]
-			if known then
-				seenHoles[id] = true
-				assert.same(known.brackets, bracketsOf(r.gaps), prof.name .. ": KNOWN_HOLES is out of date")
-			elseif prof.world then
-				-- recipes plus world targets: what neither covers is a hole, named level by level
-				local left = worldHoles(id, r.gaps)
-				if left == nil then
-					print(
-						prof.name
-							.. ": needs world spots (Data/Spots.lua is not here); recipes leave "
-							.. describeGaps(prof, r.gaps)
-					)
-				elseif #left > 0 then
-					failures[#failures + 1] = ("%s (%d): neither a recipe nor a world target gives skill at %s"):format(
-						prof.name,
-						id,
-						table.concat(left, ", ")
-					)
+				assert.equal("", table.concat(failures, "\n"))
+				for id in pairs(KNOWN_HOLES) do
+					assert.is_true(seenHoles[id], "KNOWN_HOLES names a profession the data does not have: " .. id)
 				end
-			elseif not r.complete then
-				failures[#failures + 1] = ("%s (%d) is not covered:\n  %s"):format(
-					prof.name,
-					id,
-					describeGaps(prof, r.gaps)
-				)
 			end
-		end
-		assert.equal("", table.concat(failures, "\n"))
-		for id in pairs(KNOWN_HOLES) do
-			assert.is_true(seenHoles[id], "KNOWN_HOLES names a profession the data does not have: " .. id)
-		end
-	end)
+		)
+	end
 
 	it("says which brackets need a bought recipe when only trainer recipes are used", function()
 		local got = {}

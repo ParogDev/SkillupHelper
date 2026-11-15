@@ -812,7 +812,11 @@ describe("costToCap", function()
 	end
 
 	it("totals materials, sales back, training and recipes for a profession not learned yet", function()
-		local r = P.costToCap(prof(), 1, 90, flat, { items = shipped().items })
+		-- resale off (the default) counts no sale back; on, the products' vendor value comes back
+		local off = P.costToCap(prof(), 1, 90, flat, { items = shipped().items })
+		assert.equal(0, off.back)
+		assert.equal(off.spent + off.trainingCost, off.total)
+		local r = P.costToCap(prof(), 1, 90, flat, { items = shipped().items, resale = true })
 		assert.is_true(r.complete)
 		assert.same({}, r.gaps)
 		assert.equal(90, r.reached)

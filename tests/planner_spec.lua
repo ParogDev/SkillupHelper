@@ -1538,3 +1538,82 @@ describe("Shopping by place", function()
 		end
 	end)
 end)
+
+describe("Count selling what I craft (resale setting)", function()
+	local P
+	before_each(function()
+		P = load().Planner
+	end)
+	-- Blacksmithing 55: Rough Grinding Stone (2 Rough Stone at 8c, vendors for 5c) against Coarse Grinding Stone
+	-- (2 Coarse Stone at 60c, sells for about 2s on the AH, the market takes hundreds, vendors for 10c)
+	local ROUGH, COARSE, RG, CG = 2835, 2836, 3470, 3478
+	local function input(resale)
+		return {
+			skill = 55,
+			cap = 56,
+			recipes = {
+				[3320] = { y = 45, g = 85, k = 1, name = "Rough Grinding Stone", mats = { ROUGH, 2 }, src = "trainer" },
+				[3326] = {
+					y = 50,
+					g = 90,
+					k = 1,
+					name = "Coarse Grinding Stone",
+					mats = { COARSE, 2 },
+					src = "trainer",
+				},
+			},
+			learned = { [3320] = true, [3326] = true },
+			price = {
+				[ROUGH] = { buy = 8, where = "ah", salvage = 2 },
+				[COARSE] = { buy = 60, where = "ah", salvage = 15 },
+			},
+			product = { [3320] = { vendor = 5, takes = 0 }, [3326] = { vendor = 10, sell = 200, takes = 400 } },
+			items = { [ROUGH] = { name = "Rough Stone" }, [COARSE] = { name = "Coarse Stone" }, [RG] = {}, [CG] = {} },
+			have = {},
+			effort = 20,
+			resale = resale,
+		}
+	end
+
+	it(
+		"off (the default): Rough wins, ranked by what the player pays; the card notes the sale, nothing counts",
+		function()
+			local plan = P.run(input(nil))
+			assert.same({ "Rough Grinding Stone buy" }, crafts(plan))
+			local st = plan.steps[1]
+			assert.equal(0, st.cash.back)
+			assert.is_false(has(st.tags, "needs AH sale"))
+			-- Coarse: no credit, so 2 * 60 + 20 effort over a 0.875 chance
+			local ctx = P.prepare(input(nil))
+			for _, o in ipairs(ctx.options) do
+				assert.is_false(P.sells(o))
+				assert.equal(0, P.backOf(o, 0))
+				if o.spell == 3326 then
+					assert.near(140 / 0.875, (P.costPt(ctx, o, 55, 0, nil, P.chance)), 1e-6)
+				end
+			end
+			-- Rough vendors for 5c: information on the card, not a credit
+			assert.equal(st.crafts * 5, st.resale.back)
+		end
+	)
+
+	it("on: Coarse wins, its AH sale paying for the stone", function()
+		local plan = P.run(input(true))
+		assert.same({ "Coarse Grinding Stone buy" }, crafts(plan))
+		local st = plan.steps[1]
+		assert.equal(st.crafts * 200, st.cash.back)
+		assert.is_true(has(st.tags, "needs AH sale"))
+		assert.is_nil(st.resale)
+	end)
+
+	it("costToCap counts no sale when off and the sale when on", function()
+		local inp = input(nil)
+		local prof = { recipes = inp.recipes }
+		local opts = { price = inp.price, product = inp.product, items = inp.items, cap = 56, learned = inp.learned }
+		local off = P.costToCap(prof, 55, 56, nil, opts)
+		assert.equal(0, off.back)
+		opts.resale = true
+		local on = P.costToCap(prof, 55, 56, nil, opts)
+		assert.is_true(on.back > 0)
+	end)
+end)

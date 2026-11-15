@@ -352,6 +352,10 @@ describe("Planner in the scan and the panel", function()
 			end,
 		}
 		ns = load({})
+		-- the design note's cooking cases count product sales: "Count selling what I craft" on
+		ns.settings = function()
+			return { resale = true }
+		end
 		ns.Scan.resetCaches()
 	end)
 

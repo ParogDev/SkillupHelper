@@ -309,6 +309,9 @@ function P.prepare(input)
 		effort = input.effort or P.EFFORT,
 		-- true: plan only with recipes already known or trainable (the "/skillup recipes off" setting)
 		noRecipeBuys = input.noRecipeBuys == true,
+		-- true: selling the products counts against a recipe's cost (the "Count selling what I craft" setting, off by
+		-- default). Off: recipes are ranked by what the player pays, with no credit for any sale, AH or vendor.
+		resale = input.resale == true,
 		z = P.zOf(input.luck) or P.TRIP_Z,
 		options = {},
 		-- gated options: offered in step.shortcuts and step.others, and planned only where nothing else gives skill
@@ -490,6 +493,8 @@ function P.prepare(input)
 				sell = prod.sell,
 				takes = prod.takes or 0,
 				prodExport = prod.export,
+				-- resale off: the product's sale is information only (step.resale), never a credit
+				noResale = not ctx.resale or nil,
 			}
 			local plain = pairsOf(r.mats)
 			local list = { newOption(ctx, base, plain, nil, 1) }
@@ -521,18 +526,30 @@ function P.prepare(input)
 end
 
 -- Whether o's product goes to the AH: only when the sale beats the vendor and the market takes any.
--- costPt, stockPass and finish all count proceeds by this one rule.
-local function sells(o)
+-- costPt, stockPass and finish all count proceeds by this one rule. wouldSell ignores the resale setting (the card's
+-- note); sells is the rule the plan ranks and counts by: never true with resale off (o.noResale).
+local function wouldSell(o)
 	return o.sell ~= nil and o.sell > o.vendor and o.takes > 0
+end
+local function sells(o)
+	return not o.noResale and wouldSell(o)
 end
 P.sells = sells
 
--- What one craft of o brings back when cum crafts of it were already sold.
-local function backOf(o, cum)
-	if sells(o) and (cum or 0) < o.takes then
+-- What one craft of o would bring back when cum crafts of it were already sold, whatever the setting.
+local function resaleOf(o, cum)
+	if wouldSell(o) and (cum or 0) < o.takes then
 		return o.sell
 	end
 	return o.vendor
+end
+
+-- What one craft of o brings back when cum crafts of it were already sold: 0 with resale off.
+local function backOf(o, cum)
+	if o.noResale then
+		return 0
+	end
+	return resaleOf(o, cum)
 end
 P.backOf = backOf
 
@@ -1834,7 +1851,21 @@ local function finishCore(ctx, baseline, have, commits, own)
 				soldHere = math.max(0, math.min(crafts, o.takes - (sold[o.spell] or 0)))
 				sold[o.spell] = (sold[o.spell] or 0) + soldHere
 			end
-			step.cash = { out = out, back = soldHere * (o.sell or 0) + (crafts - soldHere) * o.vendor }
+			if o.noResale then
+				-- resale off: nothing comes back; what selling would bring is a note on the card, never a credit
+				step.cash = { out = out, back = 0 }
+				local each = resaleOf(o, 0)
+				if each > 0 and crafts > 0 then
+					local n = wouldSell(o) and math.min(crafts, o.takes) or crafts
+					step.resale = {
+						back = n * each + (crafts - n) * o.vendor,
+						crafts = crafts,
+						ah = wouldSell(o) and n or 0,
+					}
+				end
+			else
+				step.cash = { out = out, back = soldHere * (o.sell or 0) + (crafts - soldHere) * o.vendor }
+			end
 			if source ~= "buy" and step.color ~= "orange" then
 				local later = false
 				for j = idx + 1, #segs do
@@ -2489,7 +2520,7 @@ end
 --   learned = { [spell] = true } (default: every `auto` recipe, learned with the profession);
 --   ranks (default prof.ranks), cap (the live cap; default: the first rank cap above `from`, and that rank's cost is
 --   counted when from <= 1: a profession not learned yet), level, exclude, trainerSeen, effort, luck;
---   recipeItems = false: plan with trainer and auto recipes only.
+--   recipeItems = false: plan with trainer and auto recipes only; resale = true: selling products counts.
 -- Returns { total, spent, back, trainingCost, steps, gaps = { { from, to, why, reason } }, recipesToBuy = { { spell,
 -- name, item, price } }, unknownPrices (reagents that have no price), unknownItems, unknownRecipeItems (tradeable
 -- recipe items with no price), unpriced (what the plan itself buys at an unknown price: plan.unpriced), reached,
@@ -2581,6 +2612,7 @@ function P.costToCap(prof, from, to, priceFn, opts)
 		effort = opts.effort,
 		luck = opts.luck,
 		noRecipeBuys = opts.recipeItems == false,
+		resale = opts.resale == true,
 		have = {},
 	})
 	local out = {

@@ -136,6 +136,8 @@ function F.input(recipes, learned, skill, cap, have, extra)
 		product = products(recipes),
 		have = have or {},
 		effort = 20,
+		-- the design note's cases count product sales: the "Count selling what I craft" setting on
+		resale = true,
 	}
 	for k, v in pairs(extra or {}) do
 		input[k] = v

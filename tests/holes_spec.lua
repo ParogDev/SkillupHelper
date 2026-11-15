@@ -205,7 +205,9 @@ describe("no false hole", function()
 				local listed = {}
 				for _, u in ipairs(st.unpriced or {}) do
 					listed[#listed + 1] = u.item
-					assert.is_string(u.name)
+					-- named from the data's items; a reagent the generated items table lacks (211422, found with
+					-- resale off) has no name here and the panel asks the client for it
+					assert.is_true(type(u.name) == "string" or data.items[u.item] == nil, tostring(u.item))
 					assert.is_true(u.count > 0)
 					byItem[u.item] = (byItem[u.item] or 0) + u.count
 				end
@@ -223,7 +225,7 @@ describe("no false hole", function()
 		for _, e in ipairs(p.unpriced.items) do
 			assert.is_nil(e.recipe)
 			assert.equal(byItem[e.item], e.count)
-			assert.is_string(e.name)
+			assert.is_true(type(e.name) == "string" or data.items[e.item] == nil, tostring(e.item))
 		end
 		-- every price known: nothing unpriced, on the plan or on a step
 		local full = plan(prof, 28)
