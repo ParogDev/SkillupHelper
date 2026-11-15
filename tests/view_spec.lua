@@ -143,10 +143,14 @@ describe("View description", function()
 		local p = ns.Planner.run(input)
 		p.prices, p.ageHours = { live = 0, export = 12 }, 30
 		local d = ns.View.describe({ profession = "Cooking", skill = 173, maxSkill = 225, planner = p }, envOf(ns, {}))
-		assert.equal("TSM prices are 30 h old: sync the TSM app; 12 prices from the export", d.header.stale)
-		p.ageHours = nil
+		assert.equal(
+			"TSM prices are 30 h old: sync the TSM app; 12 prices not from TSM (bundled or exported)",
+			d.header.stale
+		)
+		-- no local Data/Plan.lua: the age is not known, and no warning is made up
+		p.ageHours, p.prices = nil, { live = 5, export = 0 }
 		d = ns.View.describe({ profession = "Cooking", skill = 173, maxSkill = 225, planner = p }, envOf(ns, {}))
-		assert.matches("^TSM data age unknown", d.header.stale)
+		assert.is_nil(d.header.stale)
 	end)
 
 	it("shows a buy step's stock alternative, and the hold list and verdicts under Shopping's Stock", function()
@@ -554,7 +558,7 @@ describe("Cap model on the panel", function()
 		assert.matches("Train Expert between 125 and 150", all, 1, true)
 		assert.equal("Artisan needs level 35, you are 30", d.capBlock)
 		assert.matches("^Artisan needs level 35, you are 30", d.notice)
-		assert.equal("Data/Plan.lua covers to 140", d.more.data[1])
+		assert.equal("The recipe data covers to 140", d.more.data[1])
 		-- coverage up to the cap says nothing: no data lines, but the tab holds the settings and is never dimmed
 		local full = show(plan({ craft(1) }, { coverage = { to = 150 } }))
 		assert.same({}, full.more.data)

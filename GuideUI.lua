@@ -1115,7 +1115,9 @@ local function init()
 		g.pin = nil
 	end
 	gdb = g
-	seeds = G.seedRecords(ns.Data.npcs)
+	-- the shipped seeds, then the player's own (Data/Custom.lua npcs, checked by Logic.validateCustom)
+	local data = ns.plan and ns.plan()
+	seeds = G.seedRecords(ns.Logic.npcRows(ns.Data.npcs, data and data.npcs))
 	knownList = nil
 	status.seeds = #seeds
 	-- records learned before 0.2.8 have no town: give them one (a seed's nearby, else the map's name)

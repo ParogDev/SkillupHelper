@@ -403,7 +403,8 @@ function G.seedRecords(rows)
 			y = r.y,
 			place = r.place,
 			sells = sells,
-			trains = ROLE_TRAINS[r.role],
+			-- role "trainer" (Data/Custom.lua) names its profession itself
+			trains = ROLE_TRAINS[r.role] or (r.role == "trainer" and r.trains or nil),
 			auction = r.role == "auction" or nil,
 			seed = true,
 		}

@@ -306,7 +306,8 @@ function P.prepare(input)
 		local r = recipes[spell]
 		local y, g = r.y, r.g
 		local learned = ctx.learned[spell] == true
-		local out = excluded(input.exclude, spell, r, learned)
+		-- gone: an item the recipe needs is not in the game data (Data/Recipes.lua); a learned one is real
+		local out = excluded(input.exclude, spell, r, learned) or (r.gone == true and not learned)
 		local diff = input.difficulty and input.difficulty[spell]
 		if not out and learned and diff ~= nil and y and g then
 			local cc, tc = CLIENT_COLOR[diff], colorOf(skill, y, g)
@@ -344,8 +345,18 @@ function P.prepare(input)
 			-- it unless the user said "use it" (exclude.allow[spell]) or enabled special teachers; it is offered as a
 			-- shortcut on the steps it would make cheaper, or on a gap it fills.
 			local allowed = input.exclude and input.exclude.allow and input.exclude.allow[spell] == true
+			-- a recipe item: one that binds when picked up is never an auction buy (a drop, a quest, a vendor), and a
+			-- tradeable one is a buy only while it has a price. Both are gated: shown as shortcuts that say why.
+			local bop = src == "item" and r.bop == true
+			local recipePrice = (src == "item" and not bop) and buyOf(ctx, r.item or -1) or nil
+			local noPrice = src == "item" and not bop and recipePrice == nil
 			local gated = not allowed
-				and (unchecked or (src == "special" and not (input.exclude and input.exclude.special == false)))
+				and (
+					unchecked
+					or bop
+					or noPrice
+					or (src == "special" and not (input.exclude and input.exclude.special == false))
+				)
 			local at = -math.huge
 			if not learned then
 				at = r.learn or (src == "item" and 0 or y)
@@ -368,9 +379,12 @@ function P.prepare(input)
 				unchecked = unchecked or nil,
 				gated = gated or nil,
 				allowed = allowed or nil,
-				teacher = src == "special" and r.teacher or nil,
+				teacher = (src == "special" or bop) and r.teacher or nil,
 				recipeItem = r.item,
-				recipePrice = src == "item" and buyOf(ctx, r.item or -1) or nil,
+				recipePrice = recipePrice,
+				bop = bop or nil,
+				noPrice = noPrice or nil,
+				trainCost = src == "trainer" and r.cost or nil,
 				vendor = prod.vendor or 0,
 				sell = prod.sell,
 				takes = prod.takes or 0,
@@ -603,7 +617,10 @@ local function baselineFor(ctx, chance)
 	for _, o in ipairs(ctx.options) do
 		if o.src ~= "item" then
 			opts[#opts + 1] = o
-		elseif o.recipePrice and not ctx.noRecipeBuys then
+		elseif o.bop or not o.recipePrice then
+			-- here only because the user said "Use it" (exclude.allow): they can get the recipe, nothing to buy
+			opts[#opts + 1] = o
+		elseif not ctx.noRecipeBuys then
 			cands[#cands + 1] = o
 		end
 	end
@@ -1114,13 +1131,18 @@ P.SHORTCUT_MIN = 100 -- copper: a gated recipe saving less than this over a step
 
 -- A shortcut entry: the gated option o, what it saves over the step (nil on a gap), and what it takes to get it.
 local function shortcutOf(o, saves)
-	local needs
+	local needs, why
 	if o.src == "special" then
 		needs = o.teacher or "a special teacher"
 	elseif o.unchecked then
 		needs = "no trainer you opened teaches it"
+	elseif o.bop then
+		-- a recipe item that binds when picked up: never an auction buy; the data may say who has it
+		why = "its recipe binds when picked up" .. (o.teacher and (": " .. o.teacher) or "")
+	elseif o.noPrice then
+		why = "no auction price today"
 	end
-	return { spell = o.spell, name = o.name, saves = saves, src = o.src, needs = needs }
+	return { spell = o.spell, name = o.name, saves = saves, src = o.src, needs = needs, why = why, bop = o.bop }
 end
 
 -- Other ways to cover a craft step: every spell the baseline priced at each of the step's levels, its extra cost over
@@ -1387,8 +1409,14 @@ local function finishCore(ctx, baseline, have, commits, own)
 				}
 			elseif o.train and not announced[o.spell] then
 				announced[o.spell] = true
-				steps[#steps + 1] =
-					{ kind = "train", spell = o.spell, name = o.name, at = o.at, unchecked = o.unchecked }
+				steps[#steps + 1] = {
+					kind = "train",
+					spell = o.spell,
+					name = o.name,
+					at = o.at,
+					unchecked = o.unchecked,
+					cost = o.trainCost,
+				}
 			end
 			local crafts
 			local source = seg.source
@@ -2050,6 +2078,137 @@ function P.finish(ctx, baseline, have, opts)
 	plan.trip = tripOf(ctx, plan.steps, baseline.formula.chance, opts.gold)
 	plan.shopping = P.shoppingOf(ctx, plan.steps, plan.trip)
 	return plan
+end
+
+-- What it costs to level a profession entry (Data/Recipes.lua's shape: { recipes, ranks }) from skill `from` to `to`,
+-- for any profession, also one the character does not have: the real planner, run with nothing in the bags.
+-- priceFn(item) -> copper to buy one, or nil (no price). opts (all optional):
+--   vendor = { [item] = copper }, items = { [item] = { sell, ... } } (the data's tables);
+--   price, product: ready tables in Planner.prepare's shape (TSM.prices' result) instead of priceFn;
+--   learned = { [spell] = true } (default: every `auto` recipe, learned with the profession);
+--   ranks (default prof.ranks), cap (the live cap; default: the first rank cap above `from`, and that rank's cost is
+--   counted when from <= 1: a profession not learned yet), level, exclude, trainerSeen, effort, luck;
+--   recipeItems = false: plan with trainer and auto recipes only.
+-- Returns { total, spent, back, trainingCost, steps, gaps = { { from, to, why } }, recipesToBuy = { { spell, name,
+-- item, price } }, unknownPrices (items a recipe needs that have no price), unknownItems, reached, complete }.
+-- total = spent - back + recipe items + trainingCost, in copper, buying for the luck percentile (rule 1). A gap is a
+-- stretch no recipe covers: with complete data there is none.
+function P.costToCap(prof, from, to, priceFn, opts)
+	opts = opts or {}
+	local recipes = type(prof) == "table" and prof.recipes or {}
+	local vendor = opts.vendor or {}
+	local price = opts.price
+	local built = price == nil
+	price = price or {}
+	local unknown, unknownItems = {}, {}
+	local function need(i)
+		if built and price[i] == nil and not unknown[i] then
+			local v = vendor[i]
+			if v then
+				price[i] = { buy = v, where = "vendor", salvage = 0 }
+			else
+				local p = priceFn and priceFn(i)
+				if type(p) == "number" and p == p then
+					price[i] = { buy = p, where = "ah", salvage = 0 }
+				end
+			end
+		end
+		if not (price[i] and price[i].buy) and not unknown[i] then
+			unknown[i] = true
+			unknownItems[#unknownItems + 1] = i
+		end
+	end
+	local learned = opts.learned
+	local auto = {}
+	for spell, r in pairs(recipes) do
+		if not r.gone then
+			for k = 1, #(r.mats or {}) - 1, 2 do
+				need(r.mats[k])
+			end
+			if r.src == "item" and r.item and not r.bop then
+				need(r.item)
+			end
+		end
+		if r.src == "auto" then
+			auto[spell] = true
+		end
+	end
+	table.sort(unknownItems)
+	learned = learned or auto
+	local ranks = opts.ranks or prof.ranks or {}
+	local cap, first = opts.cap, nil
+	if not cap then
+		for _, rk in ipairs(ranks) do
+			if rk.cap and rk.cap > from and (not cap or rk.cap < cap) then
+				cap, first = rk.cap, rk
+			end
+		end
+		cap = cap or to
+	end
+	local plan = P.run({
+		skill = from,
+		cap = cap,
+		target = to,
+		level = opts.level,
+		ranks = ranks,
+		exclude = opts.exclude,
+		trainerSeen = opts.trainerSeen,
+		recipes = recipes,
+		items = opts.items or {},
+		learned = learned,
+		price = price,
+		product = opts.product,
+		effort = opts.effort,
+		luck = opts.luck,
+		noRecipeBuys = opts.recipeItems == false,
+		have = {},
+	})
+	local out = {
+		steps = plan.steps,
+		gaps = {},
+		recipesToBuy = {},
+		spent = 0,
+		back = 0,
+		trainingCost = 0,
+		unknownPrices = #unknownItems,
+		unknownItems = unknownItems,
+		reached = plan.cap,
+		capBlock = plan.capBlock,
+	}
+	if first and from <= 1 and type(first.cost) == "number" then
+		out.trainingCost = first.cost
+	end
+	local recipeCost = 0
+	for _, st in ipairs(plan.steps) do
+		if st.kind == "gap" then
+			out.gaps[#out.gaps + 1] = { from = st.from, to = st.to, why = "no recipe gives skill" }
+		elseif st.kind == "craft" then
+			out.spent = out.spent + (st.cash and st.cash.out or 0)
+			out.back = out.back + (st.cash and st.cash.back or 0)
+		elseif st.kind == "buyRecipe" then
+			recipeCost = recipeCost + (st.price or 0)
+			out.recipesToBuy[#out.recipesToBuy + 1] =
+				{ spell = st.spell, name = st.name, item = st.item, price = st.price }
+		elseif st.kind == "train" then
+			out.trainingCost = out.trainingCost + (tonumber(st.cost) or 0)
+		end
+	end
+	-- the ranks trained on the way (a rank inside one long step has no step of its own: step.rankUp)
+	for _, up in ipairs(plan.rankUps or {}) do
+		out.trainingCost = out.trainingCost + (tonumber(up.cost) or 0)
+	end
+	if (plan.cap or from) < to then
+		local why = "no rank raises the cap"
+		if plan.capBlock then
+			why = "the next rank is blocked (" .. tostring(plan.capBlock.reason) .. ")"
+		elseif plan.coverage then
+			why = "no recipe gives skill past " .. tostring(plan.coverage.to)
+		end
+		out.gaps[#out.gaps + 1] = { from = plan.cap or from, to = to, why = why }
+	end
+	out.total = out.spent - out.back + recipeCost + out.trainingCost
+	out.complete = #out.gaps == 0
+	return out
 end
 
 -- The whole planner in one call (tests, and the panel when nothing is cached).

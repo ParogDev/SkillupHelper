@@ -317,13 +317,26 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 	local cacheKey = prof.name or prof
 	-- the recipes the plan may use, with the client-built ones' thresholds: a recipe learned (or a threshold the
 	-- client narrowed) since the last run prices its reagents and replans
-	local recipeKey = {}
+	local recipeKey, learnKey = {}, {}
 	for spell, r in pairs(prof.recipes or {}) do
 		recipeKey[#recipeKey + 1] = r.live and (spell .. "~" .. tostring(r.y) .. "-" .. tostring(r.g))
 			or tostring(spell)
+		-- how and when an unlearned recipe is learned (a trainer visit or Data/Custom.lua changes it): replans
+		if not learned[spell] and (r.learn or r.src) then
+			learnKey[#learnKey + 1] = spell .. "@" .. tostring(r.learn) .. tostring(r.src)
+		end
 	end
 	table.sort(recipeKey)
 	recipeKey = table.concat(recipeKey, ",")
+	table.sort(learnKey)
+	learnKey = table.concat(learnKey, ",")
+	local nLearned, learnedKey = 0, {}
+	for spell in pairs(learned) do
+		nLearned = nLearned + 1
+		learnedKey[#learnedKey + 1] = spell
+	end
+	table.sort(learnedKey)
+	learnedKey = table.concat(learnedKey, ",")
 	local pc = priceCache[cacheKey]
 	-- salvage values depend on the sell-share setting: a changed share refetches like an expired entry
 	if
@@ -332,20 +345,24 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		or now < pc.at
 		or pc.sellShare ~= settings.sellShare
 		or pc.recipeKey ~= recipeKey
+		or pc.learnedKey ~= learnedKey
 	then
-		local price, product, counts = ns.TSM.prices(plan, prof, nil, settings.sellShare)
+		-- the shipped data lists every recipe of the profession: price only those that can still matter, the ones
+		-- not grey yet and the learned ones (a learned grey recipe may make a reagent)
+		local priced = { name = prof.name, recipes = {} }
+		for spell, r in pairs(prof.recipes or {}) do
+			if learned[spell] or (not r.gone and (type(r.g) ~= "number" or r.g > skill)) then
+				priced.recipes[spell] = r
+			end
+		end
+		local price, product, counts = ns.TSM.prices(plan, priced, nil, settings.sellShare)
 		pc = { at = now, price = price, product = product, counts = counts, stamp = (pc and pc.stamp or 0) + 1 }
 		pc.sellShare = settings.sellShare
 		pc.recipeKey = recipeKey
+		pc.learnedKey = learnedKey
 		priceCache[cacheKey] = pc
 	end
 	local effort = settings.effort or (plan and plan.effort) or ns.Planner.EFFORT
-	local nLearned, learnedKey = 0, {}
-	for spell in pairs(learned) do
-		nLearned = nLearned + 1
-		learnedKey[#learnedKey + 1] = spell
-	end
-	table.sort(learnedKey)
 	local noRecipeBuys = settings.noRecipeBuys == true
 	local luck = settings.luck or ns.Planner.LUCK
 	local key = table.concat({
@@ -356,7 +373,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		tostring(noRecipeBuys),
 		luck,
 		nLearned,
-		table.concat(learnedKey, ","),
+		learnedKey,
+		learnKey,
 		target,
 		tostring(caps.level),
 		S.ranksKey(ranks),
@@ -476,8 +494,14 @@ function S.build(plan)
 		return { why = "C_TradeSkillUI gave no profession with a skill (base and child info empty)", diag = diag }
 	end
 	local skill = info.skillLevel
+	local function lookup(fn)
+		return fn and (fn(info.professionID) or (base and fn(base.professionID)) or fn(info.parentProfessionID)) or nil
+	end
 	local prof = ns.Logic.findProfession(plan, info) or ns.Logic.findProfession(plan, base)
+	-- what a trainer showed in game (the skill it asks for each recipe) goes over the data's learn ranks
+	prof = ns.Logic.withTrainerReq(prof, lookup(ns.savedTrainerReq))
 	local thresholds = prof and prof.recipes or {}
+	local removed = prof and prof.removed or {}
 	local vendor = plan and plan.vendor or {}
 	local ids, idSource = recipeIDs()
 	local recipes = {}
@@ -517,8 +541,8 @@ function S.build(plan)
 					difficulties[id] = difficulty
 				end
 				local th = ns.Logic.thresholds(thresholds[id])
-				if not thresholds[id] then
-					-- not in the export: plan it from the client, its colours narrowing the yellow threshold
+				if not thresholds[id] and not removed[id] then
+					-- not in the data: plan it from the client, its colours narrowing the yellow threshold
 					S.noteColor(colorSeen, id, skill, difficulty)
 					local entry, skipWhy = S.liveEntry({
 						name = r.name,
@@ -569,10 +593,13 @@ function S.build(plan)
 	}
 	-- the cap model: ranks learned at the trainer (SkillupHelperDB.ranks), the character level and the exclusions
 	local settings = ns.settings and ns.settings() or {}
-	local function lookup(fn)
-		return fn and (fn(info.professionID) or (base and fn(base.professionID)) or fn(info.parentProfessionID)) or nil
-	end
 	local ranks = S.ranksArray(lookup(ns.savedRanks))
+	if #ranks == 0 and prof and type(prof.ranks) == "table" then
+		-- no trainer read yet: the data's default ranks (flagged confirmed = false), so the plan runs past the live
+		-- cap; the first trainer visit replaces them
+		ranks = prof.ranks
+		model.ranksAssumed = true
+	end
 	-- recipes seen in this profession's trainer list (nil when no trainer was ever read)
 	local trainerSeen = lookup(ns.savedTrainerSeen)
 	local level = UnitLevel and clean(UnitLevel("player")) or nil
@@ -601,21 +628,26 @@ function S.build(plan)
 			"Data/Plan.lua is version 1 (no recipe reagents): the price plan needs regenerating on the PC, then /reload"
 	end
 	if prof then
+		-- the offline rows of a local Data/Plan.lua, when it has them (the shipped data has none: planState "none")
 		model.step, model.nextStep, model.planState = ns.Logic.planStep(prof, skill)
 		model.shopping, model.craftsLeft = ns.Logic.stepShopping(model.step, skill, S.have)
 		model.buyRecipes = ns.Logic.recipesToBuy(prof, skill, function(spell)
 			return learned[spell] or false
 		end)
-	elseif model.planner then
-		-- no export for this profession: planned from the client's recipes and TSM's live prices alone, nothing broken
-		model.planner.clientOnly = true
-	elseif merged and plan and ns.View and ns.View.atCapLine(model) then
-		-- planned from the client, at the live cap: not now, nothing broken (an absent Data/Plan.lua still says so)
-		model.planWhy = ns.View.atCapLine(model)
+	end
+	local capLine = merged and plan and ns.View and ns.View.atCapLine(model) or nil
+	if model.planner then
+		if not prof then
+			-- no data for this profession: planned from the client's recipes and TSM's live prices alone
+			model.planner.clientOnly = true
+		end
+	elseif capLine and not (prof and prof.rows) then
+		-- at the live cap: not now, nothing broken (a local Data/Plan.lua's rows stand in when it has them)
+		model.planWhy = capLine
 	elseif not plan then
-		model.planWhy = "Data/Plan.lua absent: the price plan was not generated for this copy of the addon"
-	else
-		model.planWhy = ("Data/Plan.lua has no plan for %s (id %s)"):format(
+		model.planWhy = "No recipe data: Data/Recipes.lua did not load (a broken copy of the addon: reinstall it)"
+	elseif not prof then
+		model.planWhy = ("The recipe data has no profession %s (id %s)"):format(
 			tostring(info.professionName),
 			tostring(info.professionID)
 		)
@@ -819,6 +851,64 @@ function S.playerSkillLine(name, values)
 	return nil, ("trainer's profession %s is not one of yours (GetProfessions)"):format(tostring(name or "unnamed"))
 end
 
+-- The player's professions by skill line id: { [id] = { skill, cap } } (GetProfessions; secrets left out).
+function S.playerSkills()
+	local out = {}
+	if not GetProfessions or not GetProfessionInfo then
+		return out
+	end
+	local function pack(...)
+		return { n = select("#", ...), ... }
+	end
+	local list = pack(GetProfessions())
+	for i = 1, list.n do
+		if list[i] then
+			local _, _, rank, maxRank, _, _, skillLine = GetProfessionInfo(list[i])
+			rank, maxRank, skillLine = clean(rank), clean(maxRank), clean(skillLine)
+			if type(skillLine) == "number" and type(rank) == "number" then
+				out[skillLine] = { skill = rank, cap = type(maxRank) == "number" and maxRank or nil }
+			end
+		end
+	end
+	return out
+end
+
+-- What levelling one profession of the data costs at TSM's prices now (Planner.costToCap): from the character's
+-- skill when it has the profession (own = { skill, cap }), else from 1 as a profession not learned yet. Recipes
+-- already learned are not known here (the profession window is closed): only the ones learned with the profession
+-- count as known. Returns the result, from, to; or nil, from, to and why.
+function S.costOf(plan, id, prof, own, settings)
+	settings = settings or {}
+	local from, to = own and own.skill or 1, tonumber(prof.to) or 300
+	if from >= to then
+		return nil, from, to, "already there"
+	end
+	local priced = { recipes = {} }
+	for spell, r in pairs(prof.recipes or {}) do
+		if not r.gone and (type(r.g) ~= "number" or r.g > from) then
+			priced.recipes[spell] = r
+		end
+	end
+	local price, product = ns.TSM.prices(plan, priced, nil, settings.sellShare)
+	local saved = S.ranksArray(ns.savedRanks and ns.savedRanks(id))
+	local ok, r = pcall(ns.Planner.costToCap, prof, from, to, nil, {
+		price = price,
+		product = product,
+		items = plan.items,
+		cap = own and own.cap or nil,
+		ranks = #saved > 0 and saved or nil,
+		exclude = settings.exclude,
+		trainerSeen = ns.savedTrainerSeen and ns.savedTrainerSeen(id) or nil,
+		effort = settings.effort or plan.effort,
+		luck = settings.luck,
+		recipeItems = not settings.noRecipeBuys,
+	})
+	if not ok then
+		return nil, from, to, "planner failed: " .. tostring(r)
+	end
+	return r, from, to
+end
+
 -- The trainerSeen key of a recipe service: its spell ID when the trainer gave one, else its lowercased name (the same
 -- key the vendor guide keeps in SkillupHelperDB.guide.npcs[id].teaches). The planner matches either.
 function S.trainerKey(sv)
@@ -847,6 +937,23 @@ function S.trainerSeenSet(services, names)
 		end
 	end
 	return seen, byName
+end
+
+-- What the trainer asks for each recipe service: { [trainerKey] = { skill = n, cost = copper } } (a field the trainer
+-- did not give, or gave as a secret, stays nil; a service with neither is left out). Saved as
+-- SkillupHelperDB.trainerReq[skillLine]: the learn rank of a trainer recipe, which no client table holds.
+function S.trainerReqSet(services, names)
+	local out = {}
+	for _, sv in ipairs(services or {}) do
+		if sv.type ~= "header" and not S.rankOrder(sv, names) then
+			local key = S.trainerKey(sv)
+			local skill, cost = tonumber(sv.skillRank), tonumber(sv.cost)
+			if key and (skill or cost) then
+				out[key] = { skill = skill, cost = cost }
+			end
+		end
+	end
+	return out
 end
 
 -- The spell ID of a trainer service: C_TooltipInfo.GetTrainerService(i) is TooltipData whose `id` is the spell ID
@@ -905,10 +1012,17 @@ function S.readTrainer()
 			services[#services + 1] = sv
 		elseif sv.type ~= "header" then
 			sv.spellID = serviceSpellID(i)
+			-- the skill the trainer asks for the recipe, and its price: the learn rank no client table holds
+			if GetTrainerServiceSkillReq then
+				local _, skillRank = GetTrainerServiceSkillReq(i)
+				sv.skillRank = clean(skillRank)
+			end
+			sv.cost = GetTrainerServiceCost and clean((GetTrainerServiceCost(i)))
 		end
 	end
 	local parsed = S.parseRankServices(services, values, names)
 	parsed.seen, parsed.seenByName = S.trainerSeenSet(all, names)
+	parsed.req = S.trainerReqSet(all, names)
 	local skillLine, why = S.playerSkillLine(profName, values.maxRank and values or nil)
 	if not skillLine then
 		return nil, why

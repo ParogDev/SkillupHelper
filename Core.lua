@@ -4,7 +4,41 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.16"
+ns.CODE_VERSION = "0.3.0"
+
+-- The data the planner reads, built once from the three layers (Logic.effectivePlan): the shipped Data/Recipes.lua,
+-- an optional local Data/Plan.lua on top, an optional Data/Custom.lua on top of both. ns.Data.layers says what
+-- loaded (selftest.data). A Data/Custom.lua that breaks the merge is left out and named, never a Lua error.
+function ns.plan()
+	if ns.Data.effective == nil then
+		local ok, eff, report = pcall(ns.Logic.effectivePlan, ns.Data.recipes, ns.Data.plan, ns.Data.custom)
+		if not ok then
+			local err = tostring(eff)
+			ok, eff, report = pcall(ns.Logic.effectivePlan, ns.Data.recipes, ns.Data.plan, nil)
+			if not ok then
+				eff, report = nil, { error = "data layers failed: " .. tostring(eff) }
+			end
+			report.custom = { applied = 0, errors = { "Data/Custom.lua could not be applied: " .. err } }
+		end
+		ns.Data.effective = eff or false
+		ns.Data.layers = report
+	end
+	return ns.Data.effective or nil
+end
+
+-- One chat line when Data/Custom.lua has entries that were left out (all of them are in selftest.data.custom).
+function ns.customNotice()
+	local c = ns.Data.layers and ns.Data.layers.custom
+	local errors = type(c) == "table" and c.errors or {}
+	if #errors == 0 then
+		return nil
+	end
+	return ("SkillupHelper: Data/Custom.lua: %d entr%s left out. First: %s"):format(
+		#errors,
+		#errors == 1 and "y" or "ies",
+		errors[1]
+	)
+end
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -43,6 +77,9 @@ function ns.capTables(saved)
 	-- colorSeen[spellID] = { o = highest skill seen orange, y = lowest seen yellow or green }, for learned recipes the
 	-- export does not list: it narrows their estimated yellow threshold (Scan.yellowOf)
 	saved.colorSeen = type(saved.colorSeen) == "table" and saved.colorSeen or {}
+	-- trainerReq[skillLineID][spellID or lowercased name] = { skill, cost }: what a trainer asks for each recipe it
+	-- lists, read in game (Scan.readTrainer). It wins over the data's learn ranks (Logic.withTrainerReq).
+	saved.trainerReq = type(saved.trainerReq) == "table" and saved.trainerReq or {}
 	return saved
 end
 
@@ -79,7 +116,10 @@ local function refreshSelftest()
 	st.build, st.interface, st.project = build .. "." .. tostring(buildNumber), interface, WOW_PROJECT_ID
 	st.loadedAt = st.loadedAt or date("%Y-%m-%d %H:%M:%S")
 	st.savedAt = date("%Y-%m-%d %H:%M:%S")
-	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent"
+	-- the data layers: the shipped build and recipe counts per profession, the local plan, the custom file
+	ns.plan()
+	st.data = ns.Data.layers
+	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent (optional: the shipped data plans alone)"
 	st.lastScan = ns.lastScan
 	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
 	st.scans = ns.scans
@@ -91,9 +131,10 @@ local function refreshSelftest()
 	st.lastTrainerRead = ns.lastTrainerRead
 	st.tsm = ns.TSM.status()
 	st.craftedEvent = ns.craftedEvent
+	-- known only with a local Data/Plan.lua (its pricesAt); unknown is not stale
 	local age = ns.TSM.ageHours(ns.Data.plan)
 	st.tsmAgeHours = age and math.floor(age * 10 + 0.5) / 10
-	st.tsmStale = age == nil or age > ns.TSM.STALE_HOURS
+	st.tsmStale = age ~= nil and age > ns.TSM.STALE_HOURS
 	st.lastError = ns.lastError
 	st.panelErrors = ns.panelErrors
 	st.guide = ns.GuideUI and ns.GuideUI.status()
@@ -163,7 +204,7 @@ function ns.refresh()
 	pending = true
 	C_Timer.After(0.3, function()
 		pending = false
-		local ok, model = pcall(ns.Scan.build, ns.Data.plan)
+		local ok, model = pcall(ns.Scan.build, ns.plan())
 		if not ok then
 			ns.lastError = tostring(model)
 			model = { why = "scan failed: " .. tostring(model) }
@@ -211,7 +252,9 @@ function ns.scanSummary(model)
 			mismatches = p.colourMismatch,
 			priceSources = p.prices,
 			tsmAgeHours = ageHours and math.floor(ageHours * 10 + 0.5) / 10,
-			tsmStale = ageHours == nil or ageHours > ns.TSM.STALE_HOURS,
+			tsmStale = ageHours ~= nil and ageHours > ns.TSM.STALE_HOURS,
+			-- the plan ran on the data's default ranks: no trainer of this profession was read yet
+			ranksAssumed = model.ranksAssumed,
 		}
 		local list = {}
 		for i, st in ipairs(p.steps) do
@@ -247,6 +290,10 @@ end
 -- The saved ranks of one skill line ({ [cap] = rank }), or nil.
 function ns.savedTrainerSeen(skillLineID)
 	return db and skillLineID and db.trainerSeen and db.trainerSeen[skillLineID] or nil
+end
+
+function ns.savedTrainerReq(skillLineID)
+	return db and skillLineID and db.trainerReq and db.trainerReq[skillLineID] or nil
 end
 
 function ns.savedRanks(skillLineID)
@@ -294,6 +341,14 @@ function ns.onTrainer()
 				"SkillupHelper: trainer read. Recipes no trainer you've opened teaches are shortcuts now; another trainer can confirm them."
 			)
 		end
+	end
+	if parsed and parsed.skillLine and next(parsed.req or {}) then
+		-- the planner's cache key carries each recipe's learn rank: the next scan replans
+		local req = db.trainerReq[parsed.skillLine] or {}
+		for key, e in pairs(parsed.req) do
+			req[key] = e
+		end
+		db.trainerReq[parsed.skillLine] = req
 	end
 	ns.lastTrainerRead = why
 end
@@ -551,6 +606,10 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 		end
 		ns.TSM.register()
 		refreshSelftest()
+		local notice = ns.customNotice()
+		if notice then
+			print(notice)
+		end
 	elseif event == "PLAYER_LOGOUT" then
 		refreshSelftest()
 	elseif event == "TRADE_SKILL_SHOW" then
@@ -587,7 +646,7 @@ function ns.capCommand(cmd, arg)
 		if #ids == 0 then
 			print("SkillupHelper: no ranks saved yet: open your profession trainer once.")
 		end
-		local plan = ns.Data.plan
+		local plan = ns.plan()
 		for _, id in ipairs(ids) do
 			local p = plan and plan.professions and plan.professions[id]
 			print(("SkillupHelper: %s (%s)"):format(p and p.name or "skill line", tostring(id)))
@@ -729,7 +788,7 @@ function ns.settingsView()
 	return {
 		luck = db and db.luck or ns.Planner.LUCK,
 		effort = db and db.effort,
-		defaultEffort = ns.Data.plan and ns.Data.plan.effort or ns.Planner.EFFORT,
+		defaultEffort = ns.plan() and ns.plan().effort or ns.Planner.EFFORT,
 		noRecipeBuys = db and db.noRecipeBuys,
 		noAlts = db and db.noAlts,
 		dungeon = ex.dungeon,
@@ -740,6 +799,46 @@ function ns.settingsView()
 	}
 end
 
+-- "/skillup cost [profession]": one line per crafting profession of the data (or the one named): what levelling it
+-- to the top costs at TSM's prices now, the skill brackets no recipe covers, and how many prices TSM lacks. One
+-- profession per frame: each is a whole planner run.
+function ns.costCommand(arg)
+	local plan = ns.plan()
+	if not plan then
+		print("SkillupHelper: no recipe data loaded (Data/Recipes.lua).")
+		return true
+	end
+	local want = (arg or ""):lower()
+	local ids = {}
+	for id, prof in pairs(plan.professions) do
+		local name = tostring(prof.name or id):lower()
+		if (want == "" and not prof.side) or (want ~= "" and (name:find(want, 1, true) or tostring(id) == want)) then
+			ids[#ids + 1] = id
+		end
+	end
+	table.sort(ids)
+	if #ids == 0 then
+		print(("SkillupHelper: no profession named %q in the recipe data."):format(want))
+		return true
+	end
+	local own = ns.Scan.playerSkills()
+	local env = { money = ns.Logic.money }
+	local i = 0
+	local function nextOne()
+		i = i + 1
+		local id = ids[i]
+		if not id then
+			return
+		end
+		local prof = plan.professions[id]
+		local r, from, to, why = ns.Scan.costOf(plan, id, prof, own[id], ns.settings())
+		print("SkillupHelper: " .. ns.View.costLine(prof.name or id, from, to, r, env, why))
+		C_Timer.After(0, nextOne)
+	end
+	nextOne()
+	return true
+end
+
 SLASH_SKILLUPHELPER1 = "/skillup"
 -- "/skillup effort 30": copper charged per craft by the planner ("/skillup effort" resets to the plan's default).
 -- "/skillup recipes off": plan without buying recipe items ("on" plans with them again, the default).
@@ -747,6 +846,9 @@ function ns.command(msg)
 	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
 	if cmd == "ranks" or cmd == "exclude" then
 		return ns.capCommand(cmd, arg)
+	end
+	if cmd == "cost" then
+		return ns.costCommand(arg)
 	end
 	if cmd == "allow" then
 		local spell = tonumber(arg)
@@ -803,7 +905,7 @@ function ns.command(msg)
 	print(
 		("SkillupHelper: effort %s copper a craft."):format(
 			db and db.effort and tostring(db.effort)
-				or "default (" .. tostring(ns.Data.plan and ns.Data.plan.effort or 20) .. ")"
+				or "default (" .. tostring(ns.plan() and ns.plan().effort or ns.Planner.EFFORT) .. ")"
 		)
 	)
 	ns.refresh()

@@ -46,7 +46,7 @@ local function rgb(name)
 end
 
 local function itemName(item, fallback)
-	local plan = ns.Data and ns.Data.plan
+	local plan = ns.plan and ns.plan()
 	local info = plan and plan.items and plan.items[item]
 	fallback = fallback or (info and info.name)
 	return ns.Scan and ns.Scan.itemName(item, fallback) or fallback or ("item " .. item)
@@ -534,7 +534,7 @@ local function iconOf(card)
 		if type(r) == "table" and r.icon and not (issecretvalue and issecretvalue(r.icon)) then
 			return r.icon
 		end
-		local plan = ns.Data and ns.Data.plan
+		local plan = ns.plan and ns.plan()
 		for _, prof in pairs(plan and plan.professions or {}) do
 			local row = prof.recipes and prof.recipes[card.spell]
 			if row and row.makes and C_Item.GetItemIconByID then

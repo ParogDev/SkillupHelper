@@ -118,7 +118,8 @@ function T.prices(plan, prof, get, sellShare)
 		for k = 1, #mats - 1, 2 do
 			addItem(mats[k])
 		end
-		if r.item then
+		-- a recipe item that binds when picked up is never bought: no price asked
+		if r.item and not r.bop then
 			addItem(r.item)
 		end
 		if r.makes then

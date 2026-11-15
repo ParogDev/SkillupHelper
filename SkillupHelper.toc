@@ -10,7 +10,9 @@
 ## X-License: MIT
 ## IconTexture: Interface\Icons\Trade_LeatherWorking
 
+Data\Recipes.lua
 Data\Plan.lua
+Data\Custom.lua
 Data\Npcs.lua
 Logic.lua
 Guide.lua

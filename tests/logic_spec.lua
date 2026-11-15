@@ -240,7 +240,7 @@ describe("Scan and panel", function()
 
 	it("names a missing plan file and a linked window", function()
 		local m = ns.Scan.build(nil)
-		assert.matches("Plan.lua absent", m.planWhy)
+		assert.matches("Data/Recipes.lua did not load", m.planWhy)
 		_G.C_TradeSkillUI.IsTradeSkillLinked = function()
 			return true
 		end
@@ -373,7 +373,7 @@ describe("Planner in the scan and the panel", function()
 		assert.matches("2 7x Hot Lion Chops, from stock", text, 1, true)
 		assert.matches("Rockscale Cod 28s 11c", text, 1, true)
 		assert.matches("TSM prices are 30 h old", text)
-		assert.matches("prices from the export", text)
+		assert.matches("prices not from TSM", text)
 		assert.matches("Train Goldthorn Tea", text)
 	end)
 
@@ -649,7 +649,7 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal("0.2.16", ns.CODE_VERSION)
+		assert.equal("0.3.0", ns.CODE_VERSION)
 	end)
 end)
 

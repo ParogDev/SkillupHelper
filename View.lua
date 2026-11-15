@@ -235,7 +235,9 @@ function V.shortcutRows(cuts, env)
 	for _, c in ipairs(cuts or {}) do
 		local what = c.saves and ("Shortcut: %s saves %s"):format(tostring(c.name or c.spell), env.money(c.saves))
 			or ("Fills this gap: %s"):format(tostring(c.name or c.spell))
-		local text = c.needs and ("%s (needs: %s)"):format(what, tostring(c.needs)) or what
+		local text = c.needs and ("%s (needs: %s)"):format(what, tostring(c.needs))
+			or (c.why and ("%s (%s)"):format(what, tostring(c.why)))
+			or what
 		out[#out + 1] = {
 			text = text,
 			use = {
@@ -616,15 +618,14 @@ end
 -- The quiet line about price freshness, or nil when the prices are live and recent.
 local function staleLine(p)
 	local parts = {}
+	-- the age comes from a local Data/Plan.lua (pricesAt); without one it is not known, and nothing is claimed
 	local age = p.ageHours
-	if age == nil then
-		parts[#parts + 1] = "TSM data age unknown"
-	elseif age > ns.TSM.STALE_HOURS then
+	if age ~= nil and age > ns.TSM.STALE_HOURS then
 		parts[#parts + 1] = ("TSM prices are %.0f h old: sync the TSM app"):format(age)
 	end
 	local export = p.prices and p.prices.export or 0
 	if export > 0 then
-		parts[#parts + 1] = ("%d prices from the export"):format(export)
+		parts[#parts + 1] = ("%d prices not from TSM (bundled or exported)"):format(export)
 	end
 	return #parts > 0 and table.concat(parts, "; ") or nil
 end
@@ -1239,6 +1240,39 @@ function V.atCapLine(m)
 	return ("At your cap (%d): the next rank at the trainer raises it."):format(cap)
 end
 
+-- One line of "/skillup cost": what Planner.costToCap found for a profession. r = its result, or nil and why.
+function V.costLine(name, from, to, r, env, why)
+	local head = ("%s %d to %d"):format(tostring(name), from, to)
+	if type(r) ~= "table" then
+		return ("%s: no estimate (%s)"):format(head, tostring(why or "the planner failed"))
+	end
+	local parts = {}
+	if r.trainingCost and r.trainingCost > 0 then
+		parts[#parts + 1] = "training " .. env.money(r.trainingCost)
+	end
+	local n = #(r.recipesToBuy or {})
+	if n > 0 then
+		parts[#parts + 1] = ("%d recipe%s to buy"):format(n, n == 1 and "" or "s")
+	end
+	local state = "complete"
+	if #(r.gaps or {}) > 0 then
+		local gaps = {}
+		for _, g in ipairs(r.gaps) do
+			gaps[#gaps + 1] = ("%d-%d"):format(math.floor(g.from), math.floor(g.to))
+		end
+		state = "nothing gives skill at " .. table.concat(gaps, ", ")
+	end
+	local missing = r.unknownPrices or 0
+	return ("%s: %s%s; %s; %s"):format(
+		head,
+		env.money(r.total),
+		#parts > 0 and (" (" .. table.concat(parts, ", ") .. ")") or "",
+		state,
+		missing == 0 and "every price from TSM"
+			or ("%d price%s missing from TSM"):format(missing, missing == 1 and "" or "s")
+	)
+end
+
 ------------------------------------------------------------------------------------------------- the AH buy rows
 
 -- One AH list row (Logic.ahList) at the open AH. live: what the AH said about the item (UI.lua keeps it):
@@ -1679,7 +1713,7 @@ function V.describe(m, env, opts)
 		local data = d.more.data
 		local cov = p.coverage and p.coverage.to
 		if type(cov) == "number" and (not m.maxSkill or cov < m.maxSkill) then
-			data[#data + 1] = ("Data/Plan.lua covers to %d"):format(cov)
+			data[#data + 1] = ("The recipe data covers to %d"):format(cov)
 		end
 		for _, line in ipairs(V.routeLines(p)) do
 			data[#data + 1] = line
