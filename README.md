@@ -57,7 +57,7 @@ keeps what still works.
 | `/skillup` | shows or hides the docked panel; with no profession window open, the journal |
 
 The other slash commands still work. Each one is also a control on the journal's Settings page and writes the same
-setting: `/skillup luck 95`, `/skillup effort 30`, `/skillup recipes off`, `/skillup exclude dungeon|ahpatterns|special|<spellID>`,
+setting: `/skillup luck 95`, `/skillup effort 30`, `/skillup recipes off`, `/skillup resale on`, `/skillup exclude dungeon|ahpatterns|special|<spellID>`,
 `/skillup allow <spellID>`, `/skillup cost [profession]`, `/skillup ranks`.
 
 ## Install
@@ -105,10 +105,16 @@ These rules hold for every plan, every replan and every alternative the panel of
    never planned, but shown on the step it would make cheaper or the gap it would fill, with **Use it** and
    **Hide**.
 
+**Ranked by what you pay.** A recipe's cost is its materials plus the effort setting. What the products would sell
+for does not count unless you turn on "Count selling what I craft" (Settings, or `/skillup resale on`); with it off
+a step may still say "about 34s back if you sell 37 (not counted)". Spare reagents you already own count at what
+they would sell for in both modes.
+
 World skills are planned from the place data: for each skill range the best spot (points per position, loop length,
 mob danger for your level, distance from a flight point), and a new spot only when it is clearly better. Mining's
-smelting is planned like a craft at the Mining window; the node route is in the journal and on a card under the
-panel while that window is open.
+smelting is planned like a craft at the Mining window; where no smelting recipe gives points (about 140 to 155 and
+185 to 300 today) the plan shows "Mine nodes" stretches from the node route instead of a gap, at no gold cost. The
+node route is in the journal and on a card under the panel while that window is open.
 
 ## Where the data comes from and how fresh it is
 
@@ -144,6 +150,8 @@ Copy `Data/Custom.example.lua` to `Data/Custom.lua` and edit it. It can change a
 thresholds or reagents, leave a recipe out, add vendor reagents and guide NPCs, and add, correct or leave out spots
 and trainers. Updates never overwrite it. A bad entry is left out and named in chat; the rest applies. Restart the
 game the first time (a new file), `/reload` after later edits. [AGENTS.md](AGENTS.md) lists every key with examples.
+Without the file, BugGrabber shows one load warning for it (not an error); the reason it stays that way is in
+[docs/data-sources.md](docs/data-sources.md).
 
 ## Limits and what is unconfirmed in Forever
 

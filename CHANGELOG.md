@@ -2,6 +2,15 @@
 
 ## 0.3.0
 
+- Recipes are ranked by what you pay: materials plus effort. Selling what you craft no longer makes a dearer recipe
+  look cheap (at Blacksmithing 55 the plan picked Coarse Grinding Stone over Rough because it counted selling all
+  37). Turn on "Count selling what I craft" (Settings and data, or `/skillup resale on`) to count it
+  again; with it off a step says what selling would bring, without counting it.
+- Mining: where no smelting recipe gives points (about 140 to 155 and 185 to 300), the plan shows "Mine nodes"
+  stretches from the node route, at no gold cost, instead of a red gap; on the panel strip, in the Next lines, in
+  the journal and in `/skillup cost mining`.
+- The mailbox panel on an alt turns pages instead of growing past the screen.
+- The price diagnostics count an item with no price as missing, not as a live TSM price.
 - Nothing scrolls. The panel at the profession window shows what to do now, the next three steps and a strip of
   the whole path; its tabs are gone, and shopping, alts and settings are journal pages. The journal's Path page
   shows one stretch of the path at a time (pick it on the timeline or with Previous and Next), Overview is a grid

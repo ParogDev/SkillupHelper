@@ -27,6 +27,10 @@ relative to the addon folder. The game is WoW: Forever: a Mainline 12.1 client w
 | `Data/Npcs.lua` | hand-kept seed NPCs for the guide chip (`ns.Data.npcs`) |
 | `Data/Plan.lua` | optional, local: fallback prices from a price tool (shape in `Data/Plan.example.lua`) |
 | `Data/Custom.lua` | optional, local: the player's own changes (shape in `Data/Custom.example.lua` and below) |
+
+The TOC lists both optional files, so a client without them logs one load warning per missing file (BugGrabber
+shows it as a warning, not an error). That is deliberate: see `docs/data-sources.md`, "Optional local files and
+the load warning", before you move them out of the TOC.
 | `Logic.lua` | data layers (`effectivePlan`), settings (`applySetting`), money text, data status |
 | `Learned.lua` | `SkillupHelperDB.learned`: what the game showed (shareable, anonymous) |
 | `Planner.lua` | the planner (`Planner.costToCap`, the rules in README "How the plan is made") |
@@ -175,7 +179,7 @@ changed (`stylua Journal.lua`), never the whole tree in one go, so a diff stays 
 |---|---|---|
 | `selftest` | yes | diagnostics, rewritten on login and logout (below) |
 | `learned` | yes, and to share | trainers, ranks, vendors, npcs, colors, skillups (`Learned.lua` header) |
-| `luck`, `effort`, `noRecipeBuys`, `noAlts` | yes | planner settings (`/skillup` and the Settings page) |
+| `luck`, `effort`, `noRecipeBuys`, `noAlts`, `resale` | yes | planner settings (`/skillup` and the Settings page); `resale` true = "Count selling what I craft" (off by default) |
 | `exclude` | yes | `dungeon`, `ahPatterns`, `special`, `notNow[spell]`, `allow[spell]`, `swap[spell]` |
 | `skills` | yes | last rank seen per skill line (`Skills.lua`) |
 | `ui` | yes | journal, field card, tracker positions and state; `track[GUID] = { line, spot }` |
@@ -210,7 +214,12 @@ Step by step:
 7. A gap ("Nothing gives skill from X to Y"): the Overview row's tooltip names the reason. Usually a recipe item to
    buy (`/skillup recipes on`) or a special teacher (Settings: "Plan special teachers").
 8. Wrong place for a world skill: add or correct the spot in `Data/Custom.lua` (`spots`).
-9. Still wrong: reproduce it in a busted spec against `Planner.costToCap` (see `tests/planner_spec.lua`,
+9. "Why did it pick the dearer recipe?" With "Count selling what I craft" on (`resale = true`), what a product
+   sells for lowers its recipe's cost; off (the default) the plan ranks by what the player pays and the card only
+   notes "about Xs back if you sell N (not counted)". Leftover reagents are valued at salvage either way.
+10. Mining shows "Mine nodes ... from mining nodes" between smelting recipes: a world step from the Where route
+    (`Where.worldStretches`, `input.world`), no gold, not a gap. A red hole there means no spot covers that skill.
+11. Still wrong: reproduce it in a busted spec against `Planner.costToCap` (see `tests/planner_spec.lua`,
    `tests/coverage_spec.lua`) before changing code.
 
 ## Invariants
@@ -221,4 +230,8 @@ Step by step:
   from `Where.lua` and `View.lua`.
 - Every journal callback runs under `pcall`; a failure is recorded in the selftest, never raised into the panel.
 - Frames are built on first use, never at login. A hidden frame runs no `OnUpdate`.
+- Nothing scrolls: no scroll bar, slider or mouse-wheel handler anywhere. Long content turns pages (`W.list`,
+  `W.pages`; the mailbox panel through `View.mailPages`). `docs/ui.md` has the layouts.
+- A plan step is `craft`, `train`, `trainRank`, `buyRecipe`, `gap` or `world`. Code that switches on `kind` handles
+  `world` (a node stretch, no gold) wherever it handles `gap`.
 - `learned` holds no character, realm, account, guild or faction name.

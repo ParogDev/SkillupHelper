@@ -54,11 +54,18 @@ and Alts that open those journal pages, the guide strip); the action bar; "Next"
 leaves out whole pieces (the third next line first), never part of one, and reports `overflow` in `selftest.ui.fit`.
 Settings live in the journal only. The auction-house list pages five rows.
 
+**Mailbox panel** (`MailUI.lua`, beside the MailFrame on an alt): at most `MailUI.MAX_H` (440) tall. `View.mailPages`
+splits the queue's groups between rows; a group carried to the next page repeats its title with "(continued)", its
+note and Fill / Drop buttons stay with its last row, and Previous / "Page N of M" / Next sit under the page. The page
+resets when the mailbox closes.
+
 **Plan lines.** `Where.lines(steps)` is the one place that turns planner steps into what a person reads, for the
 panel and the journal: "Train X" or "Buy recipe X" directly before "Craft X" is one line, a rank training hangs on
 the line it comes before (`line.rank`) and is shown with the stretch it unlocks, numbers are continuous, and a line
 carries the names of its unpriced items. `Where.stretches(rows, caps, skill, max)` cuts the lines at the rank caps
-and then into parts that fit the list.
+and then into parts that fit the list. A `world` step (Mining between smelting recipes) is a `world` line: "Mine
+nodes: <place>, from mining nodes", bone on the strip and the timeline, never hatched, no cost; its detail opens the
+spot on the Where page.
 
 **Minimap button**, `SkillupHelperMinimapButton` (`FieldUI.lua`, menu and tooltip from `Journal.lua`), a child of
 `Minimap`, made at login. Drag moves it round the edge (`F.minimapOffset`, round and square minimaps through

@@ -54,8 +54,9 @@ Items 27 to 29 come from the data-freshness work (`Learned.lua`); they have not 
 Read from the saved selftest and BugGrabber after that session:
 
 - Item 1: one BugGrabber entry, a warning, not an error: the TOC lists `Data\Custom.lua`, which is optional and was
-  absent. `journalWiring.errors` empty, no `lastWhy`. Open: a TOC cannot list an optional file without this
-  warning; the same holds for `Data\Plan.lua` in a packaged install.
+  absent. `journalWiring.errors` empty, no `lastWhy`. A TOC cannot list an optional file without this warning; the
+  same holds for `Data\Plan.lua` in a packaged install. Decided: keep it (`docs/data-sources.md`, "Optional local
+  files and the load warning").
 - Items 2, 3, 6, 24: pass (`openButton` true, `compartment` true, `skillApi` true, `prices` true).
 - Item 4: `bindingName` true, no key set.
 - Items 10, 11: `mapArtMissing` false, `tileFailures` 0, but no map had been drawn yet (`draws` 0): still open.
