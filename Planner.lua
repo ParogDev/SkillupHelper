@@ -312,6 +312,8 @@ function P.prepare(input)
 		-- true: selling the products counts against a recipe's cost (the "Count selling what I craft" setting, off by
 		-- default). Off: recipes are ranked by what the player pays, with no credit for any sale, AH or vendor.
 		resale = input.resale == true,
+		-- stretches levelled in the world (Mining's nodes): { { from, to, text, spot, why } }, sorted by from
+		world = {},
 		z = P.zOf(input.luck) or P.TRIP_Z,
 		options = {},
 		-- gated options: offered in step.shortcuts and step.others, and planned only where nothing else gives skill
@@ -322,6 +324,14 @@ function P.prepare(input)
 		mismatch = {},
 		makers = {},
 	}
+	for _, w in ipairs(type(input.world) == "table" and input.world or {}) do
+		if type(w) == "table" and type(w.from) == "number" and type(w.to) == "number" and w.to > w.from then
+			ctx.world[#ctx.world + 1] = w
+		end
+	end
+	table.sort(ctx.world, function(a, b)
+		return a.from < b.from
+	end)
 	capModel(ctx, input)
 	local recipes = input.recipes or {}
 	local spells = sortedKeys(recipes)
@@ -1561,6 +1571,26 @@ local function gapReason(ctx, from, to)
 	return reason, GAP_WHY[reason]
 end
 
+-- [from, to) cut by ctx.world (input.world = { { from, to, text, spot, why } }: stretches a world skill levels on its
+-- nodes, from Where's route): pieces { from, to, world = stretch | nil } in order, covering [from, to) edge to edge.
+local function worldSplit(ctx, from, to)
+	local out, at = {}, from
+	for _, w in ipairs(ctx.world) do
+		local a, b = math.max(at, w.from), math.min(to, w.to)
+		if b > a then
+			if a > at then
+				out[#out + 1] = { from = at, to = a }
+			end
+			out[#out + 1] = { from = a, to = b, world = w }
+			at = b
+		end
+	end
+	if at < to then
+		out[#out + 1] = { from = at, to = to }
+	end
+	return out
+end
+
 -- Why a gated option is gated, as one word (step.gated on a craft step the fallback planned).
 local function gateOf(o)
 	if not o.gated then
@@ -1681,8 +1711,23 @@ local function finishCore(ctx, baseline, have, commits, own)
 			break
 		end
 		if seg.gap then
-			local reason, why = gapReason(ctx, seg.from, seg.to)
-			steps[#steps + 1] = { kind = "gap", from = seg.from, to = seg.to, reason = reason, why = why }
+			-- a stretch the world gives skill on (Mining's nodes, input.world) is a world step, never a hole
+			for _, piece in ipairs(worldSplit(ctx, seg.from, seg.to)) do
+				if piece.world then
+					local w = piece.world
+					steps[#steps + 1] = {
+						kind = "world",
+						from = piece.from,
+						to = piece.to,
+						name = w.text or "Gather in the world",
+						spot = w.spot,
+						why = w.why or "from gathering nodes",
+					}
+				else
+					local reason, why = gapReason(ctx, piece.from, piece.to)
+					steps[#steps + 1] = { kind = "gap", from = piece.from, to = piece.to, reason = reason, why = why }
+				end
+			end
 			cur = math.max(cur, seg.to)
 		elseif seg.source == "buy" and math.max(cur, seg.from) >= math.min(seg.to, ctx.cap) - EPS then
 			-- an earlier stock step's expected points already passed this stretch: nothing left to buy for
@@ -2205,7 +2250,7 @@ P.needsAh = needsAh
 local function tripOf(ctx, steps, chance, gold)
 	local first
 	for i, st in ipairs(steps) do
-		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
+		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" or st.kind == "world" then
 			return nil
 		elseif needsAh(ctx, st) then
 			first = i
@@ -2230,7 +2275,7 @@ local function tripOf(ctx, steps, chance, gold)
 	end
 	for i = first, #steps do
 		local st = steps[i]
-		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
+		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" or st.kind == "world" then
 			ends = st.kind
 			break
 		end
@@ -2362,7 +2407,7 @@ function P.shoppingOf(ctx, steps, trip)
 	local stop = trip and trip.toStep or #steps
 	for j = i, stop do
 		local st = steps[j]
-		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
+		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" or st.kind == "world" then
 			break
 		elseif st.kind == "buyRecipe" then
 			if not st.owned and st.where == "vendor" then
@@ -2520,7 +2565,8 @@ end
 --   learned = { [spell] = true } (default: every `auto` recipe, learned with the profession);
 --   ranks (default prof.ranks), cap (the live cap; default: the first rank cap above `from`, and that rank's cost is
 --   counted when from <= 1: a profession not learned yet), level, exclude, trainerSeen, effort, luck;
---   recipeItems = false: plan with trainer and auto recipes only; resale = true: selling products counts.
+--   recipeItems = false: plan with trainer and auto recipes only; resale = true: selling products counts;
+--   world = Planner.prepare's input.world (Mining's node stretches: a world step each, not a gap).
 -- Returns { total, spent, back, trainingCost, steps, gaps = { { from, to, why, reason } }, recipesToBuy = { { spell,
 -- name, item, price } }, unknownPrices (reagents that have no price), unknownItems, unknownRecipeItems (tradeable
 -- recipe items with no price), unpriced (what the plan itself buys at an unknown price: plan.unpriced), reached,
@@ -2613,11 +2659,13 @@ function P.costToCap(prof, from, to, priceFn, opts)
 		luck = opts.luck,
 		noRecipeBuys = opts.recipeItems == false,
 		resale = opts.resale == true,
+		world = opts.world,
 		have = {},
 	})
 	local out = {
 		steps = plan.steps,
 		gaps = {},
+		world = {}, -- stretches levelled on nodes (opts.world): { { from, to, text, why, spot } }, no gold cost
 		recipesToBuy = {},
 		spent = 0,
 		back = 0,
@@ -2638,6 +2686,9 @@ function P.costToCap(prof, from, to, priceFn, opts)
 	for _, st in ipairs(plan.steps) do
 		if st.kind == "gap" then
 			out.gaps[#out.gaps + 1] = { from = st.from, to = st.to, why = st.why, reason = st.reason }
+		elseif st.kind == "world" then
+			-- levelled on nodes: no gold cost, no gap
+			out.world[#out.world + 1] = { from = st.from, to = st.to, text = st.name, why = st.why, spot = st.spot }
 		elseif st.kind == "craft" then
 			out.spent = out.spent + (st.cash and st.cash.out or 0)
 			out.back = out.back + (st.cash and st.cash.back or 0)

@@ -1579,6 +1579,30 @@ function W.whereList(q)
 	return out
 end
 
+-- The stretches of a world skill its nodes level, for the planner (Planner.prepare's input.world): the route's legs
+-- from `from` to `to` as { from, to, text = "Mine nodes: <place>", spot, why = "from mining nodes" }; a stretch no
+-- spot covers is left out (it stays a hole). q as W.query's.
+local GATHER = { [186] = { "Mine nodes", "from mining nodes" }, [182] = { "Gather herbs", "from herb nodes" } }
+function W.worldStretches(q, from, to)
+	q = W.query(q)
+	local out = {}
+	local words = GATHER[q.line] or { "Gather in the world", "from gathering nodes" }
+	local it = W.itinerary(q, from, to)
+	for _, leg in ipairs(it.legs or {}) do
+		if num(leg.from) and num(leg.to) and leg.to > leg.from then
+			local place = leg.title or leg.text
+			out[#out + 1] = {
+				from = leg.from,
+				to = leg.to,
+				text = place and ("%s: %s"):format(words[1], tostring(place)) or words[1],
+				spot = leg.key,
+				why = words[2],
+			}
+		end
+	end
+	return out
+end
+
 -- The journal's Path page of a world skill: "the route to 300". { profession, skill, to, rows = { { from, to,
 -- title, sub, key, state = "done" | "now" | "todo" | "gap", tone } }, holes, complete, text }.
 function W.worldPath(q)
@@ -2321,13 +2345,13 @@ end
 local function stepStart(steps, i, skill)
 	for k = i, #steps do
 		local st = steps[k]
-		if st.kind == "craft" or st.kind == "gap" then
+		if st.kind == "craft" or st.kind == "gap" or st.kind == "world" then
 			return st.from
 		end
 	end
 	for k = i - 1, 1, -1 do
 		local st = steps[k]
-		if st.kind == "craft" or st.kind == "gap" then
+		if st.kind == "craft" or st.kind == "gap" or st.kind == "world" then
 			return st.to
 		end
 	end
@@ -2494,6 +2518,26 @@ function W.lines(steps, ctx)
 				why = st.why or "no recipe in the data gives skill here",
 				unpriced = {},
 				ways = #(st.shortcuts or {}),
+			})
+		elseif st.kind == "world" then
+			-- levelled on nodes (Mining between its smelting recipes): no gold cost, never a hole
+			flush()
+			local from, to = math.floor(st.from), math.floor(st.to)
+			local title = tostring(st.name or "Gather in the world")
+			push({
+				kind = "world",
+				step = i,
+				steps = { i },
+				verb = "Gather",
+				title = title,
+				short = ("%s, %d to %d"):format(title, from, to),
+				from = from,
+				to = to,
+				color = "bone",
+				spot = st.spot,
+				why = st.why or "from gathering nodes",
+				unpriced = {},
+				ways = 0,
 			})
 		end
 	end
@@ -2722,6 +2766,10 @@ local function lineRow(line, st, money, nameOf, skill)
 		row.sub = sentence(line.why)
 		row.subFull = row.sub
 		tip[#tip + 1] = { row.sub, "warn" }
+	elseif line.kind == "world" then
+		row.sub = sentence(("%d to %d, %s, no gold"):format(line.from, line.to, line.why))
+		row.subFull = row.sub
+		tip[#tip + 1] = row.sub
 	else
 		local learn = st or {}
 		row.sub = learn.kind == "buyRecipe"
@@ -2861,6 +2909,16 @@ function W.path(ctx)
 				gap = { reason = st.why or "no recipe gives skill here" },
 				done = false,
 			}
+		elseif st.kind == "world" then
+			p.segments[#p.segments + 1] = {
+				step = i,
+				from = st.from,
+				to = st.to,
+				name = tostring(st.name or "Gather"),
+				bands = { { from = st.from, to = st.to, color = "bone" } },
+				world = true,
+				done = false,
+			}
 		else
 			local m = { step = i, confidence = "confirmed" }
 			if st.kind == "buyRecipe" then
@@ -2926,7 +2984,8 @@ function W.path(ctx)
 	local st = line and steps[line.step] or nil
 	if st then
 		local d = { title = tostring(st.name or "Step"), n = line.n, dothis = {}, materials = {}, actions = {} }
-		d.color = line.kind == "craft" and (st.color or "bone") or (line.kind == "gap" and "warn" or "gold")
+		d.color = (line.kind == "craft" or line.kind == "world") and (st.color or "bone")
+			or (line.kind == "gap" and "warn" or "gold")
 		if #line.unpriced > 0 then
 			d.note = unpricedText(line.unpriced)
 		end
@@ -2988,6 +3047,10 @@ function W.path(ctx)
 				rows[#rows + 1] = shortcutWay(cut, money)
 			end
 			d.ways = { title = ("Other ways from %d to %d"):format(line.from, line.to), rows = rows }
+		elseif line.kind == "world" then
+			d.title = line.title
+			d.dothis[1] =
+				{ text = sentence(("%d to %d %s. No gold cost"):format(line.from, line.to, line.why)), tone = "bone" }
 		elseif line.kind == "gap" then
 			d.title = line.title
 			d.dothis[1] = { text = sentence(line.why), tone = "warn" }
@@ -3008,6 +3071,10 @@ function W.path(ctx)
 		d.actions[1].tip = d.where == nil and "This line needs no trip." or nil
 		if st.spell then
 			d.actions[2] = { id = "showRecipe", label = "Show recipe", enabled = true, spell = st.spell }
+		end
+		if line.kind == "world" and line.spot then
+			-- a node stretch opens its spot on the Where page
+			d.actions[1] = { id = "selectSpot", label = "Open in Where", enabled = true, spot = line.spot }
 		end
 		p.detail = d
 	end

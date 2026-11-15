@@ -817,7 +817,7 @@ local function fillCard(card, c, noNotes)
 		t:SetColorTexture(r, g, b, 0.55)
 	end
 	card.icon:SetTexture(iconOf(c))
-	card.icon:SetShown(c.kind ~= "gap")
+	card.icon:SetShown(c.kind ~= "gap" and c.kind ~= "world")
 	card.title:SetText(c.title or c.name or "")
 	card.title:SetTextColor(r, g, b, 1)
 	card.sub:SetText(c.sub or "")

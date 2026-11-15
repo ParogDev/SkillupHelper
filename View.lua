@@ -509,6 +509,14 @@ local function nextCard(st, env, listed)
 		card.shortcuts = V.shortcutRows(st.shortcuts, env)
 		card.way = V.wayMenu(st, env)
 		return card
+	elseif st.kind == "world" then
+		-- levelled on nodes (Mining between smelting recipes): no gold, never a hole
+		card.color = "bone"
+		card.name = tostring(st.name or "Gather in the world")
+		card.verb = ("%d to %d"):format(math.floor(st.from), math.floor(st.to))
+		card.gain = st.why or "from gathering nodes"
+		card.cost = "no gold"
+		return card
 	elseif st.kind == "train" then
 		card.color = "gold"
 		card.name = st.name
@@ -652,6 +660,10 @@ local function cardFace(card, st, env)
 	elseif st.kind == "gap" then
 		card.title = ("No recipe from %d to %d"):format(math.floor(st.from), math.floor(st.to))
 		card.sub = upper1(st.why or "no recipe in the data gives skill here")
+		return card
+	elseif st.kind == "world" then
+		card.title = ("%s, %d to %d"):format(tostring(st.name or "Gather"), math.floor(st.from), math.floor(st.to))
+		card.sub = upper1(tostring(st.why or "from gathering nodes")) .. ", no gold"
 		return card
 	elseif st.kind == "train" then
 		card.title = "Train " .. tostring(st.name)
@@ -982,7 +994,14 @@ function V.tripBlock(trip, env, saved)
 		commit = trip.commit,
 		saved = saved ~= nil,
 	}
-	local ENDS = { train = "the trainer", gap = "a gap", gold = "your gold", cap = "the cap" }
+	local ENDS = {
+		train = "the trainer",
+		trainRank = "the trainer",
+		gap = "a gap",
+		world = "the nodes",
+		gold = "your gold",
+		cap = "the cap",
+	}
 	b.title = ("One AH trip: %s, covers to %d (up to %s)"):format(
 		env.money(trip.total),
 		math.floor(trip.to or 0),
@@ -1491,6 +1510,14 @@ function V.costLine(name, from, to, r, env, why)
 		end
 		state = "nothing gives skill at " .. table.concat(gaps, ", ")
 	end
+	if #(r.world or {}) > 0 then
+		-- node stretches (Mining): levelled in the world at no gold cost, not a hole
+		local spans = {}
+		for _, w in ipairs(r.world) do
+			spans[#spans + 1] = ("%d-%d"):format(math.floor(w.from), math.floor(w.to))
+		end
+		state = ("%s; %s %s"):format(state, table.concat(spans, ", "), tostring(r.world[1].why or "in the world"))
+	end
 	local missing = r.unknownPrices or 0
 	return ("%s: %s%s; %s; %s"):format(
 		head,
@@ -1921,6 +1948,9 @@ function V.nextLines(lines, p, env, profession)
 					local unpriced, tip = V.unpricedText(line.unpriced)
 					meta[#meta + 1] = unpriced
 					e.tip = tip
+					if line.kind == "world" then
+						meta[#meta + 1] = line.why
+					end
 				end
 				e.meta = table.concat(meta, ", ")
 				e.action = { id = "journal", page = "path", profession = profession, step = line.step, enabled = true }
@@ -1973,6 +2003,8 @@ function V.strip(lines, skill, env)
 			if line.kind == "gap" then
 				s.gaps = s.gaps + 1
 				tip = tip .. "\n" .. upper1(line.why or "no recipe in the data gives skill here")
+			elseif line.kind == "world" then
+				tip = tip .. "\n" .. upper1(tostring(line.why or "from gathering nodes")) .. ", no gold"
 			else
 				local parts = {}
 				if line.cost and line.cost > 0 then

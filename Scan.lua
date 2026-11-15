@@ -302,6 +302,37 @@ function S.target(ranks, prof, cap)
 	return t
 end
 
+-- The stretches of a world skill line (Mining) its nodes level between `from` and `to`, from the shipped spots
+-- (Where.worldStretches): the planner's input.world. nil for a line that is not a world skill, or when the spots or
+-- Where.lua are not loaded; a failure is kept in S.worldWhy (the selftest reads it).
+function S.worldFor(line, from, to, level, faction)
+	local spots = ns.Data and ns.Data.spots
+	if not (line and ns.Where and ns.Where.worldStretches and spots and spots.skills and spots.skills[line]) then
+		return nil
+	end
+	local ok, r = pcall(ns.Where.worldStretches, {
+		data = spots,
+		line = line,
+		skill = from,
+		level = level,
+		faction = faction,
+	}, from, to)
+	if not ok then
+		S.worldWhy = "Where.worldStretches failed: " .. tostring(r)
+		return nil
+	end
+	return r
+end
+
+-- A cache key part for input.world.
+function S.worldKey(world)
+	local parts = {}
+	for _, w in ipairs(world or {}) do
+		parts[#parts + 1] = ("%s-%s"):format(tostring(w.from), tostring(w.to))
+	end
+	return table.concat(parts, ",")
+end
+
 -- Runs the planner for one profession entry of a v2 Data/Plan.lua. learned[spell] = true, difficulty[spell] = the
 -- client's relativeDifficulty. Returns the plan (steps, hold, leftovers, fromStock) plus price diagnostics.
 -- caps (optional) = { target, level, ranks, exclude } for the cap model: target defaults to cap (the live cap).
@@ -383,6 +414,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		S.excludeKey(exclude),
 		S.seenKey(caps.trainerSeen),
 		recipeKey,
+		S.worldKey(caps.world),
 	}, ":")
 	local bc = baseCache[cacheKey]
 	if not bc or bc.key ~= key then
@@ -405,6 +437,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 			effort = effort,
 			noRecipeBuys = noRecipeBuys,
 			resale = resale,
+			world = caps.world,
 			luck = luck,
 		})
 		bc = { key = key, ctx = ctx, baseline = ns.Planner.baseline(ctx) }
@@ -620,6 +653,12 @@ function S.build(plan)
 	local v1 = prof and not ns.Logic.isPlanV2(plan, prof)
 	local merged = not v1 and S.mergeProf(prof, live, info) or nil
 	if merged and target and target > skill then
+		local line
+		for id, p in pairs(plan and plan.professions or {}) do
+			if prof and p.name == prof.name then
+				line = id
+			end
+		end
 		local ok, result =
 			pcall(S.runPlanner, plan, merged, skill, info.maxSkillLevel, learned, difficulties, settings, {
 				target = target,
@@ -628,6 +667,8 @@ function S.build(plan)
 				exclude = settings.exclude,
 				trainerSeen = trainerSeen,
 				faction = S.faction(),
+				-- Mining between its smelting recipes: the node stretches of Where's route, never a hole
+				world = S.worldFor(line, skill, target, level, S.faction()),
 			})
 		if ok then
 			model.planner = result
@@ -921,6 +962,7 @@ function S.costOf(plan, id, prof, own, settings)
 		luck = settings.luck,
 		recipeItems = not settings.noRecipeBuys,
 		resale = settings.resale == true,
+		world = S.worldFor(id, from, to, S.level and S.level() or nil, S.faction()),
 	})
 	if not ok then
 		return nil, from, to, "planner failed: " .. tostring(r)
