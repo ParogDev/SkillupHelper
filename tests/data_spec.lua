@@ -531,11 +531,12 @@ describe("recipe items", function()
 			have = function()
 				return 0
 			end,
-		}).next
+		}).now
 		assert.same(
 			{ "Get the recipe: binds when picked up, source not known", "recipe price unknown" },
 			{ card.verb, card.cost }
 		)
+		assert.equal("Price unknown for the recipe", card.lines[1].text)
 	end)
 
 	it("names the source in the get-the-recipe step, and says the price is unknown in the cost", function()
@@ -761,18 +762,14 @@ describe("where a recipe comes from", function()
 		end
 		assert.equal(250, train.cost)
 		assert.equal(250, r.trainingCost)
-		local d = ns.View.describe({
-			profession = "B",
+		local planned = P.run({
 			skill = 1,
-			maxSkill = 75,
-			planner = P.run({
-				skill = 1,
-				cap = 75,
-				recipes = prof.recipes,
-				learned = { [100] = true },
-				price = { [1] = { buy = 10 } },
-			}),
-		}, {
+			cap = 75,
+			recipes = prof.recipes,
+			learned = { [100] = true },
+			price = { [1] = { buy = 10 } },
+		})
+		local env = {
 			money = L.money,
 			nameOf = function(_, f)
 				return f
@@ -780,13 +777,21 @@ describe("where a recipe comes from", function()
 			have = function()
 				return 0
 			end,
-		})
-		local right
-		for _, row in ipairs(d.later) do
-			right = right or (type(row.text) == "string" and row.text:find("^Train Belt") and row.right)
+		}
+		local d = ns.View.describe({ profession = "B", skill = 1, maxSkill = 75, planner = planned }, env)
+		-- the card of that training step, once it is the step to do
+		local belt
+		for _, st in ipairs(planned.steps) do
+			belt = belt or (st.kind == "train" and tostring(st.name):find("^Belt") and st)
 		end
-		assert.equal("at 45, 2s 50c", right)
-		-- and the Shopping tab totals what trainers are paid, on its own line
+		local card = ns.View.describe({
+			profession = "B",
+			skill = 45,
+			maxSkill = 75,
+			planner = { steps = { belt }, hold = {}, leftovers = {} },
+		}, env).now
+		assert.same({ "Train " .. belt.name, "At the trainer from skill 45, 2s 50c" }, { card.title, card.sub })
+		-- and the Shopping page totals what trainers are paid, on its own line
 		assert.matches("^Training 2s 50c: %d recipes? %(1 price unknown%)$", d.shopping.training)
 	end)
 end)

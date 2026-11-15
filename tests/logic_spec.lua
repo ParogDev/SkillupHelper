@@ -1,6 +1,6 @@
 -- Logic, the panel text and the scan against a fake C_TradeSkillUI. Frames are checked in game.
 local function load(ns)
-	for _, f in ipairs({ "Logic.lua", "Planner.lua", "Scan.lua", "TSM.lua", "View.lua", "UI.lua" }) do
+	for _, f in ipairs({ "Logic.lua", "Planner.lua", "Scan.lua", "TSM.lua", "View.lua", "Where.lua", "UI.lua" }) do
 		assert(loadfile(f))("SkillupHelper", ns)
 	end
 	return ns
@@ -251,7 +251,7 @@ describe("Scan and panel", function()
 		local text = table.concat(panelText(ns, ns.Scan.build(plan)), "\n")
 		assert.matches("Cooking 175 / 225", text)
 		assert.matches("Crispy Lizard Tail", text)
-		assert.matches("Thunder Lizard Tail buy 65", text)
+		assert.matches("Buy 65 Thunder Lizard Tail", text)
 		assert.matches("Crispy Lizard Tail x10, from stock", text)
 		assert.matches("Worth buying: Recipe: Rockscale Cod, 27s 92c, for 180 to 215", text)
 		assert.matches("version 1", text)
@@ -369,12 +369,12 @@ describe("Planner in the scan and the panel", function()
 		local text = table.concat(panelText(ns, m), "\n")
 		assert.matches("Cooking 173 / 225", text, 1, true)
 		assert.matches("17 to grey", text, 1, true)
-		assert.matches("Big Bear Steak\nCraft 1, about +0.4, to 173", text, 1, true)
-		assert.matches("2 7x Hot Lion Chops, from stock", text, 1, true)
-		assert.matches("Rockscale Cod 28s 11c", text, 1, true)
+		assert.matches("Craft 1 Big Bear Steak\n173 to 173, green, 43% a craft", text, 1, true)
+		assert.matches("2. Craft 7 Hot Lion Chops", text, 1, true)
+		assert.matches("3. Buy the recipe and craft 55 Rockscale Cod", text, 1, true)
 		assert.matches("TSM prices are 30 h old", text)
 		assert.matches("prices not from TSM", text)
-		assert.matches("Train Goldthorn Tea", text)
+		assert.matches("4. Learn and craft 13 Goldthorn Tea", text, 1, true)
 	end)
 
 	it("takes live TSM prices first and keeps pass 1 cached across bag updates", function()

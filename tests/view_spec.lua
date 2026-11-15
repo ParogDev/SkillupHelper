@@ -4,7 +4,7 @@ local I = F.ITEM
 
 local function load()
 	local ns = {}
-	for _, f in ipairs({ "Logic.lua", "Planner.lua", "TSM.lua", "View.lua" }) do
+	for _, f in ipairs({ "Logic.lua", "Planner.lua", "TSM.lua", "View.lua", "Where.lua" }) do
 		assert(loadfile(f))("SkillupHelper", ns)
 	end
 	return ns
@@ -69,12 +69,12 @@ describe("Consumed materials", function()
 	end)
 
 	it("names the transition: first, same, advance, replace", function()
-		local a = { profession = "Cooking", skill = 173, next = { key = "a" } }
+		local a = { profession = "Cooking", skill = 173, now = { key = "a" } }
 		assert.equal("first", V.transition(nil, a))
-		assert.equal("same", V.transition(a, { profession = "Cooking", skill = 173, next = { key = "a" } }))
-		assert.equal("advance", V.transition(a, { profession = "Cooking", skill = 174, next = { key = "b" } }))
-		assert.equal("replace", V.transition(a, { profession = "Cooking", skill = 173, next = { key = "b" } }))
-		assert.equal("first", V.transition(a, { profession = "Leatherworking", skill = 174, next = { key = "b" } }))
+		assert.equal("same", V.transition(a, { profession = "Cooking", skill = 173, now = { key = "a" } }))
+		assert.equal("advance", V.transition(a, { profession = "Cooking", skill = 174, now = { key = "b" } }))
+		assert.equal("replace", V.transition(a, { profession = "Cooking", skill = 173, now = { key = "b" } }))
+		assert.equal("first", V.transition(a, { profession = "Leatherworking", skill = 174, now = { key = "b" } }))
 	end)
 end)
 
@@ -98,7 +98,7 @@ describe("View description", function()
 		local d, p = cooking(have)
 		assert.equal("plan", d.state)
 		assert.same({ title = "Cooking", skill = "173 / 225" }, d.header)
-		local nx = d.next
+		local nx = d.now
 		assert.equal("Big Bear Steak", nx.name)
 		assert.equal("green", nx.color)
 		assert.equal("Craft 1", nx.verb)
@@ -122,20 +122,117 @@ describe("View description", function()
 		assert.is_nil(d.header.stale)
 	end)
 
-	it("lists every later step as a numbered row, with no cap", function()
-		local d, p = cooking({ [I.LION] = 7, [I.BEAR] = 1 })
-		assert.same(
-			{ 2, "orange", "7x Hot Lion Chops, from stock" },
-			{ d.later[1].n, d.later[1].color, d.later[1].text }
-		)
-		assert.equal("173 to 180", d.later[1].right)
-		assert.equal(#p.steps - 1, #d.later)
-		for i, r in ipairs(d.later) do
-			assert.equal(i + 1, r.n)
+	it("says what to do now as a title, a line under it and whole sentences", function()
+		local d = cooking({ [I.LION] = 7, [I.BEAR] = 1 })
+		local nx = d.now
+		assert.equal("Craft 1 Big Bear Steak", nx.title)
+		assert.equal("173 to 173, green, 43% a craft", nx.sub)
+		assert.equal("You have 0 of 1 item 2692; buy 1 at a vendor: 40c", nx.lines[1].text)
+		assert.matches("^40c for this step, .* a point$", nx.lines[2].text)
+		for _, l in ipairs(nx.lines) do
+			assert.is_nil(l.text:find("…", 1, true))
+			assert.is_nil(l.text:find("...", 1, true))
 		end
+	end)
+
+	it("lists the next three lines, numbered on from the card, and counts the rest for the journal", function()
+		local d, p = cooking({ [I.LION] = 7, [I.BEAR] = 1 })
+		local lines = ns.Where.lines(p.steps, {})
+		local e = d.next.entries
+		assert.equal(3, #e)
+		-- the card is line 1; "Buy recipe" and "Train" are folded into the line they unlock
+		assert.same(
+			{ 2, "orange", "Craft 7 Hot Lion Chops", "173 to 180, 2s 80c" },
+			{ e[1].n, e[1].color, e[1].title, e[1].meta }
+		)
+		assert.same({ 3, "Buy the recipe and craft 55 Rockscale Cod" }, { e[2].n, e[2].title })
+		assert.matches("^180 to 215, ", e[2].meta)
+		assert.same({ 4, "Learn and craft 13 Goldthorn Tea" }, { e[3].n, e[3].title })
+		assert.same({ #lines, #lines - 4 }, { d.next.total, d.next.more })
+		for i, r in ipairs(e) do
+			assert.equal(i + 1, r.n)
+			assert.is_nil((r.title .. r.meta):find("…", 1, true))
+			assert.is_nil((r.title .. r.meta):find("shortcut", 1, true))
+			-- a click opens that step in the journal
+			assert.same({ "journal", "path", lines[r.n].step }, { r.action.id, r.action.page, r.action.step })
+		end
+		assert.equal("Open the journal", d.journal.label)
+		assert.same({ "journal", "path", 1 }, { d.journal.id, d.journal.page, d.journal.step })
 		local text = table.concat(ns.View.text(d), "\n")
-		assert.matches("Buy Recipe: Rockscale Cod", text, 1, true)
-		assert.matches("Train Goldthorn Tea", text, 1, true)
+		assert.matches("3. Buy the recipe and craft 55 Rockscale Cod", text, 1, true)
+		assert.matches("[Open the journal]", text, 1, true)
+	end)
+
+	it("draws the whole path as one strip: segments edge to edge from 1 to 300, the now-marker inside", function()
+		local d = cooking({ [I.LION] = 7, [I.BEAR] = 1 })
+		local s = d.strip
+		assert.same({ 1, 300 }, { s.lo, s.hi })
+		assert.same({ 1, 0 }, { s.segments[1].from, s.segments[1].x0 })
+		assert.same({ 300, 1 }, { s.segments[#s.segments].to, s.segments[#s.segments].x1 })
+		for i = 2, #s.segments do
+			assert.equal(s.segments[i - 1].to, s.segments[i].from)
+			assert.equal(s.segments[i - 1].x1, s.segments[i].x0)
+			assert.is_true(s.segments[i].x1 > s.segments[i].x0)
+		end
+		-- what is behind the skill is one dimmed segment; the plan ends at the cap, the rest is not planned
+		assert.same({ true, "Done: 1 to 173" }, { s.segments[1].done, s.segments[1].tip })
+		assert.same({ true, "No plan from 225 to 300" }, { s.segments[#s.segments].none, s.segments[#s.segments].tip })
+		assert.equal(173, s.now.skill)
+		assert.near((173 - 1) / 299, s.now.x, 1e-9)
+		assert.is_true(s.now.x > 0 and s.now.x < 1)
+		assert.same({ 75, 150, 225 }, { s.caps[1].at, s.caps[2].at, s.caps[3].at })
+		assert.near((150 - 1) / 299, s.caps[2].x, 1e-9)
+		assert.equal("4 steps to 300", s.caption)
+		-- hover: the line under the cursor
+		local seg = ns.View.stripAt(s, (200 - 1) / 299)
+		assert.matches("^3%. Buy the recipe and craft 55 Rockscale Cod, 180 to 215\n", seg.tip)
+		assert.equal(s.segments[1], ns.View.stripAt(s, 0))
+		assert.equal(s.segments[#s.segments], ns.View.stripAt(s, 1))
+		assert.is_nil(ns.View.stripAt(s, 1.2))
+	end)
+
+	it("a hole is a gap segment with its reason, and the caption counts it", function()
+		local lines = {
+			{
+				n = 1,
+				kind = "craft",
+				from = 10,
+				to = 20,
+				color = "orange",
+				short = "Craft 3 A, 10 to 20",
+				unpriced = {},
+			},
+			{
+				n = 2,
+				kind = "gap",
+				from = 20,
+				to = 40,
+				color = "warn",
+				short = "No recipe from 20 to 40",
+				why = "x is off",
+			},
+			{
+				n = 3,
+				kind = "craft",
+				from = 40,
+				to = 300,
+				color = "yellow",
+				short = "Craft 9 B, 40 to 300",
+				unpriced = { "Ore", "Coal" },
+			},
+		}
+		local s = ns.View.strip(lines, 10, envOf(ns, {}))
+		assert.same(
+			{ true, "warn", "2. No recipe from 20 to 40\nX is off" },
+			{ s.segments[3].gap, s.segments[3].color, s.segments[3].tip }
+		)
+		assert.equal("3. Craft 9 B, 40 to 300\nPrice unknown for 2 items", s.segments[4].tip)
+		assert.equal("3 steps to 300, 1 gap", s.caption)
+		assert.same(
+			{ "price unknown for 2 items", "Price unknown: Ore, Coal" },
+			{ ns.View.unpricedText({ "Ore", "Coal" }) }
+		)
+		assert.equal("price unknown for 1 item", (ns.View.unpricedText({ "Ore" })))
 	end)
 
 	it("says when prices are stale or came from the export", function()
@@ -166,7 +263,7 @@ describe("View description", function()
 			alt = alt or (st.alt and st.kind == "craft" and st)
 		end
 		if p.steps[1].alt then
-			assert.matches("^Or use stock: %d+x ", d.next.alt)
+			assert.matches("^Or use stock: %d+x ", d.now.alt)
 		end
 		local text = table.concat(d.shopping.stock, "\n")
 		for _, h in ipairs(p.hold) do
@@ -186,23 +283,49 @@ describe("View description", function()
 			return ns.View.describe({ profession = "X", skill = 140, maxSkill = 150, planner = p }, env)
 		end
 		local gap = first({ kind = "gap", from = 140, to = 150, why = "no known or buyable recipe gives skill here" })
-		assert.same({ "warn", "Nothing gives skill from 140 to 150" }, { gap.next.color, gap.next.name })
+		assert.same(
+			{ "warn", "No recipe from 140 to 150", "No known or buyable recipe gives skill here" },
+			{ gap.now.color, gap.now.title, gap.now.sub }
+		)
 		assert.is_nil(gap.runway)
+		-- the strip shows the hole even when it is the step to do now
+		assert.same(
+			{ true, 140, 150 },
+			{ gap.strip.segments[2].gap, gap.strip.segments[2].from, gap.strip.segments[2].to }
+		)
 		local train = first({ kind = "train", name = "Goldthorn Tea", at = 215 })
-		assert.same({ "gold", "Train it at the trainer, from 215" }, { train.next.color, train.next.verb })
+		assert.same(
+			{ "gold", "Train Goldthorn Tea", "At the trainer from skill 215" },
+			{ train.now.color, train.now.title, train.now.sub }
+		)
 		local buy = first({ kind = "buyRecipe", name = "Rockscale Cod", item = 6369, price = 2811, learn = 175 })
-		assert.same({ "Recipe: Rockscale Cod", "Buy it on the AH for 28s 11c", "learn at 175" }, {
-			buy.next.name,
-			buy.next.verb,
-			buy.next.gain,
+		assert.same(
+			{ "Buy Recipe: Rockscale Cod", "On the AH for 28s 11c, learn at 175" },
+			{ buy.now.title, buy.now.sub }
+		)
+		local vendor = first({
+			kind = "buyRecipe",
+			name = "Rockscale Cod",
+			item = 6369,
+			price = 2811,
+			learn = 175,
+			where = "vendor",
+			vendor = { name = "Kelsey Yance", place = "Booty Bay" },
 		})
+		assert.equal("From Kelsey Yance in Booty Bay for 28s 11c, learn at 175", vendor.now.sub)
+		local owned = first({ kind = "buyRecipe", name = "Rockscale Cod", item = 6369, owned = true, learn = 175 })
+		assert.same(
+			{ "Learn Recipe: Rockscale Cod", "It is in your bags, learn at 175" },
+			{ owned.now.title, owned.now.sub }
+		)
 		local none = ns.View.describe({
 			profession = "X",
 			skill = 1,
 			maxSkill = 2,
 			planner = { steps = {}, hold = {}, leftovers = {}, fromStock = {}, ageHours = 1, prices = {} },
 		}, env)
-		assert.is_nil(none.next)
+		assert.is_nil(none.now)
+		assert.same({}, none.next.entries)
 		assert.matches("grey", none.empty)
 	end)
 
@@ -223,7 +346,7 @@ describe("View description", function()
 			return can, why
 		end
 		local d = ns.View.describe({ profession = "Cooking", skill = 173, maxSkill = 225, planner = p }, env)
-		return d.next, env, d
+		return d.now, env, d
 	end
 
 	it("gives a learned craft step a Craft button for what the bags allow, capped at the step", function()
@@ -406,18 +529,45 @@ describe("View description", function()
 		assert.same({ nil, "env.craftable missing" }, { acts, why })
 	end)
 
-	it("sizes the panel to its content and scrolls only past the dock's height", function()
+	it("sizes the panel to what fits under the dock's height: a piece is left out whole, nothing scrolls", function()
 		local V = ns.View
-		assert.same({ height = 260, scroll = false }, V.fit(200, 60, 500))
-		assert.same({ height = 500, scroll = false }, V.fit(440, 60, 500))
-		assert.same({ height = 500, scroll = true }, V.fit(441, 60, 500))
+		local pieces = {
+			{ key = "next1", h = 60 },
+			{ key = "next2", h = 40 },
+			{ key = "note", h = 20 },
+			{ key = "next3", h = 40 },
+		}
+		local all = V.fit(300, pieces, 500)
+		assert.same({ 460, 460, false, 0 }, { all.height, all.content, all.overflow, #all.dropped })
+		assert.is_true(all.shown.next3)
+		assert.is_nil(all.scroll)
+		-- the last pieces go first, in order of importance, until the rest fits
+		local tight = V.fit(300, pieces, 430)
+		assert.same({ 420, 460, false }, { tight.height, tight.content, tight.overflow })
+		assert.same({ "next3" }, tight.dropped)
+		assert.same({ true, true, true }, { tight.shown.next1, tight.shown.next2, tight.shown.note })
+		local tighter = V.fit(300, pieces, 370)
+		assert.same({ "next2", "note", "next3" }, tighter.dropped)
+		assert.equal(360, tighter.height)
+		-- only a fixed part taller than the window is an overflow, and the layout must never get there
+		assert.is_true(V.fit(520, pieces, 500).overflow)
 		-- a one-line message still leaves a panel to read and grab
-		assert.same({ height = V.MIN_HEIGHT, scroll = false }, V.fit(10, 40, 500))
+		assert.equal(V.MIN_HEIGHT, V.fit(40, {}, 500).height)
+	end)
+
+	it("pages a list that is longer than its box", function()
+		local V = ns.View
+		assert.same({ 1, 5, "1 to 5 of 21" }, { V.page(21, 5, 1).from, V.page(21, 5, 1).to, V.page(21, 5, 1).text })
+		assert.same({ 21, 21, "21 to 21 of 21" }, { V.page(21, 5, 5).from, V.page(21, 5, 5).to, V.page(21, 5, 5).text })
+		-- a page past the end is the last one; a list that fits has no pager text
+		assert.equal(5, V.page(21, 5, 9).page)
+		assert.is_nil(V.page(5, 5, 1).text)
+		assert.same({ 1, 0 }, { V.page(0, 5, 1).from, V.page(0, 5, 1).to })
 	end)
 
 	it("describes a message without a skill as one line", function()
 		local d = ns.View.describe({ why = "not your own profession window: NPC crafting", state = "not now" }, {})
-		assert.is_nil(d.next)
+		assert.is_nil(d.now)
 		assert.same({ "message", "ash" }, { d.state, d.tone })
 		assert.same({ "not your own profession window: NPC crafting" }, ns.View.text(d))
 	end)
@@ -434,7 +584,7 @@ describe("AH trip on the Next card", function()
 		plan.profKey = "Leatherworking"
 		local env = envOf(ns, {})
 		local d = ns.View.describe(model(109, plan), env)
-		local trip = d.next.trip
+		local trip = d.now.trip
 		assert.is_truthy(trip.title:find("^One AH trip: "))
 		assert.equal("Leatherworking", trip.prof)
 		local light
@@ -470,12 +620,12 @@ describe("AH trip on the Next card", function()
 		local d = ns.View.describe(model(112, plan), envOf(ns, { [I.MEDIUM] = 96 }))
 		local st = plan.steps[1]
 		assert.equal("Light Leather Pants", st.name)
-		assert.is_nil(d.next.alt)
+		assert.is_nil(d.now.alt)
 		assert.equal(
 			("Bought for a bad-luck run: usually %d crafts, up to %d"):format(math.ceil(st.expected - 1e-6), st.crafts),
-			noteWith(d.next, "Bought for a bad-luck run")
+			noteWith(d.now, "Bought for a bad-luck run")
 		)
-		assert.is_nil(noteWith(d.next, "On your AH list"))
+		assert.is_nil(noteWith(d.now, "On your AH list"))
 	end)
 
 	it("a committed step says the recipe holds until its target", function()
@@ -486,9 +636,9 @@ describe("AH trip on the Next card", function()
 		local d = ns.View.describe(model(111, plan), envOf(ns, {}))
 		assert.equal(
 			("On your AH list: this recipe holds until %d"):format(math.floor(plan.steps[1].to)),
-			noteWith(d.next, "On your AH list")
+			noteWith(d.now, "On your AH list")
 		)
-		assert.is_nil(d.next.alt)
+		assert.is_nil(d.now.alt)
 	end)
 end)
 
@@ -561,13 +711,24 @@ describe("Cap model on the panel", function()
 		for _, text in ipairs({ ns.View.rankLine(journeyman, env), ns.View.rankLine({ name = "Artisan" }, env) }) do
 			assert.is_nil(text:find("level unknown", 1, true))
 		end
-		local d = show(plan({ craft(1), st, { kind = "trainRank", name = "Artisan", cap = 300 } }))
-		assert.same({ "Train Expert (225)", "at 125, 5g 0s 0c" }, { d.later[1].text, d.later[1].right })
-		assert.same({ "Train Artisan (300)", "price not known yet" }, { d.later[2].text, d.later[2].right })
-		local card = show(plan({ st }))
+		-- among the next things a rank is its own line, before the line it unlocks, and takes no number
+		local d = show(plan({ craft(1), st, craft(2), { kind = "trainRank", name = "Artisan", cap = 300 } }))
+		local e = d.next.entries
+		assert.same({ "rank", "Train Expert (to 225) at 125, 5g 0s 0c", "gold" }, { e[1].kind, e[1].title, e[1].color })
+		assert.is_nil(e[1].n)
+		assert.same({ "line", 2, "Craft 3 Recipe 2" }, { e[2].kind, e[2].n, e[2].title })
+		-- a rank with no line after it unlocks nothing the plan crafts: it is not listed
+		assert.equal(2, #e)
+		local card = show(plan({ st, craft(1) }))
 		assert.same(
-			{ "gold", "Train Expert (225)", "needs skill 125" },
-			{ card.next.color, card.next.name, card.next.gain }
+			{ "gold", "Train Expert (to 225)", "At 125, 5g 0s 0c" },
+			{ card.now.color, card.now.title, card.now.sub }
+		)
+		assert.equal("Train it between 125 and 150", card.now.lines[1].text)
+		-- the rank is on the card: the line it unlocks is the first next thing, with no rank line above it
+		assert.same(
+			{ "line", 1, "Craft 3 Recipe 1" },
+			{ card.next.entries[1].kind, card.next.entries[1].n, card.next.entries[1].title }
 		)
 	end)
 
@@ -581,11 +742,10 @@ describe("Cap model on the panel", function()
 		assert.equal("Artisan needs level 35, you are 30", d.capBlock)
 		assert.matches("^Artisan needs level 35, you are 30", d.notice)
 		assert.equal("The recipe data covers to 140", d.more.data[1])
-		-- coverage up to the cap says nothing: no data lines, but the tab holds the settings and is never dimmed
+		-- coverage up to the cap says nothing: no data lines
 		local full = show(plan({ craft(1) }, { coverage = { to = 150 } }))
 		assert.same({}, full.more.data)
 		assert.is_string(full.more.empty)
-		assert.is_false(full.tabs[4].empty)
 		assert.equal("Artisan needs level unknown, you are unknown", ns.View.capBlockLine({ name = "Artisan" }))
 	end)
 
@@ -619,8 +779,9 @@ describe("Cap model on the panel", function()
 			"Other way: Pie, +50c (special NPC / dungeon)",
 			"Other way: Bread, +1s 20c (trainer)",
 			"Other way: Tea, +9s 0c (special NPC / dungeon: a dungeon NPC)",
-		}, d.next.others)
-		assert.matches("Other way: Pie", all, 1, true)
+		}, d.now.others)
+		-- the ways are the journal's: the panel's card says nothing about them
+		assert.is_nil(all:find("Other way", 1, true))
 	end)
 
 	it("gives each other way a Use this button, except a gated one and the and-more line", function()
@@ -631,7 +792,7 @@ describe("Cap model on the panel", function()
 			{ spell = 5, name = "Soup", extra = 400, src = "known" },
 		}
 		local d = show(plan({ craft(1, { others = others }) }))
-		local rows = d.next.otherRows
+		local rows = d.now.otherRows
 		assert.equal(4, #rows)
 		assert.equal("Other way: Pie, +50c (special NPC / dungeon)", rows[1].text)
 		assert.is_nil(rows[1].use)
@@ -645,55 +806,122 @@ describe("Cap model on the panel", function()
 		assert.same({ "swap", 4 }, { rows[3].use.id, rows[3].use.spell })
 		assert.equal("and 1 more ways", rows[4].text)
 		assert.is_nil(rows[4].use)
-		assert.is_nil(d.next.swapBack)
+		assert.is_nil(d.now.swapBack)
 	end)
 
 	it("a swapped step offers Back to the recipe it replaced, and its Use this replaces that one", function()
 		local others = { { spell = 3, name = "Tea", extra = 10, src = "known" } }
 		local d = show(plan({ craft(2, { others = others, swapFrom = 1, swapFromName = "Bread" }) }))
-		local back = d.next.swapBack
+		local back = d.now.swapBack
 		assert.equal("Your choice, instead of Bread", back.text)
 		assert.same({ "unswap", 1, "Back to Bread" }, { back.use.id, back.use.spell, back.use.label })
-		local use = d.next.otherRows[1].use
+		local use = d.now.otherRows[1].use
 		assert.same({ "swap", 3, 1 }, { use.id, use.spell, use.from })
 	end)
 
 	it("a committed step's other ways have no Use this", function()
 		local others = { { spell = 3, name = "Tea", extra = 10, src = "known" } }
 		local d = show(plan({ craft(2, { others = others, committed = true }) }))
-		assert.is_nil(d.next.otherRows[1].use)
+		assert.is_nil(d.now.otherRows[1].use)
 	end)
 
-	it("shows a step's shortcuts with Use it and Hide, marks the later row, and says why under More", function()
+	it("keeps a step's shortcuts for the journal and says nothing about them on the panel", function()
 		local cuts =
 			{ { spell = 6, name = "Pie", saves = 150, src = "trainer", needs = "no trainer you opened teaches it" } }
-		local d = show(plan({ craft(1, { shortcuts = cuts }), craft(2, { shortcuts = cuts }) }, { shortcuts = 1 }))
-		local row = d.next.shortcuts[1]
+		local d, all = show(plan({ craft(1, { shortcuts = cuts }), craft(2, { shortcuts = cuts }) }, { shortcuts = 1 }))
+		local row = d.now.shortcuts[1]
 		assert.equal("Shortcut: Pie saves 1s 50c (needs: no trainer you opened teaches it)", row.text)
 		assert.same({ "useShortcut", 6, true }, { row.use.id, row.use.spell, row.use.enabled })
 		assert.same({ "hideShortcut", 6 }, { row.hide.id, row.hide.spell })
-		assert.matches("· shortcut$", d.later[1].text)
+		-- a planned step is not tagged: a shortcut only means a gated recipe would be cheaper
+		assert.equal("Craft 3 Recipe 2", d.next.entries[1].title)
+		for _, l in ipairs(d.now.lines) do
+			assert.is_nil(l.text:lower():find("shortcut", 1, true))
+		end
+		assert.is_nil(all:match("^(.-)%-%- Shopping"):lower():find("shortcut", 1, true))
 		local data = d.more.data
 		assert.matches("1 shortcut %(quest, dungeon or unchecked trainer%) marked on its step", data[#data])
 		local gap =
 			show(plan({ { kind = "gap", from = 10, to = 20, why = "x", shortcuts = { { spell = 7, name = "Tea" } } } }))
-		assert.equal("Fills this gap: Tea", gap.next.shortcuts[1].text)
+		assert.equal("Fills this gap: Tea", gap.now.shortcuts[1].text)
 		local fresh = show(plan({ craft(1) }, { unconfirmed = 3 }))
 		data = fresh.more.data
 		assert.equal("Visit your trainer once: 3 trainer recipes not confirmed yet", data[#data])
-		-- something to act on: the More tab wears a pip
-		assert.same({ "more", true }, { fresh.tabs[4].id, fresh.tabs[4].warn })
-		assert.is_nil(d.tabs[4].warn)
+		assert.is_true(fresh.more.warn)
+		assert.is_nil(d.more.warn)
+	end)
+
+	it("a true hole reads No recipe from A to B with its reason, on the card and among the next things", function()
+		local hole = {
+			kind = "gap",
+			from = 185,
+			to = 215,
+			why = "only a recipe to buy gives skill here, and that is turned off",
+		}
+		local card = show(plan({ hole }))
+		assert.same(
+			{ "warn", "No recipe from 185 to 215", "Only a recipe to buy gives skill here, and that is turned off" },
+			{ card.now.color, card.now.title, card.now.sub }
+		)
+		local d = show(plan({ craft(1), hole }))
+		local e = d.next.entries[1]
+		assert.same({
+			"gap",
+			2,
+			"No recipe from 185 to 215",
+			"Only a recipe to buy gives skill here, and that is turned off",
+			"warn",
+		}, { e.kind, e.n, e.title, e.meta, e.tone })
+	end)
+
+	it("says price unknown for N items, with the names for the tooltip", function()
+		local unpriced = { { item = 1, name = "Ore", count = 2 }, { item = 2, name = "Coal", count = 1 } }
+		local st = craft(1, { unpriced = unpriced, buy = { { item = 1, count = 2, where = "ah", unpriced = true } } })
+		local card = show(plan({ st, craft(2, { unpriced = unpriced }) }))
+		assert.equal("You have 0 of 2 item 1; buy 2 on the AH, price unknown", card.now.lines[1].text)
+		assert.same(
+			{ "Price unknown for 2 items", "warn", "Price unknown: Ore, Coal" },
+			{ card.now.lines[2].text, card.now.lines[2].color, card.now.lines[2].tip }
+		)
+		local e = card.next.entries[1]
+		assert.matches("price unknown for 2 items$", e.meta)
+		assert.equal("Price unknown: Ore, Coal", e.tip)
+	end)
+
+	it("folds a long shopping need into two lines and keeps the rest for the tooltip", function()
+		local buy = {}
+		for i = 1, 5 do
+			buy[i] = { item = i, count = i, each = 10, where = "vendor" }
+		end
+		local card = show(plan({ craft(1, { buy = buy, pre = { { item = 9, count = 3 } } }) })).now
+		assert.equal("You have 0 of 1 item 1; buy 1 at a vendor: 10c", card.lines[1].text)
+		assert.equal("Also buy 2 item 2, 3 item 3, 4 item 4, 5 item 5", card.lines[2].text)
+		assert.matches("You have 0 of 5 item 5; buy 5 at a vendor: 50c$", card.lines[2].tip)
+		assert.equal("1s 50c for this step", card.lines[3].text)
+		-- what must be crafted first is never a droppable note
+		assert.same({ "First craft 3 item 9" }, { card.lines[4].text, card.lines[4].note })
+		assert.equal(4, #card.lines)
 	end)
 
 	it("marks a trainer recipe not checked at a trainer", function()
 		local st = { kind = "train", name = "Goldthorn Tea", at = 215, unchecked = true }
-		local d = show(plan({ craft(1), st }))
-		assert.equal("Train Goldthorn Tea, not checked at a trainer", d.later[1].text)
 		local card = show(plan({ st }))
-		assert.equal("not checked at a trainer", card.next.cost)
-		local checked = show(plan({ { kind = "train", name = "Bread", at = 50 } }))
-		assert.is_nil(checked.next.cost)
+		assert.same(
+			{ "Train Goldthorn Tea", "At the trainer from skill 215", "Not checked at a trainer" },
+			{ card.now.title, card.now.sub, card.now.lines[1].text }
+		)
+		local checked = show(plan({ { kind = "train", name = "Bread", at = 50, cost = 100 } }))
+		assert.same({ "At the trainer from skill 50, 1s 0c", 0 }, { checked.now.sub, #checked.now.lines })
+	end)
+
+	it("the card of an unlock leaves the crafting it unlocks as the first next thing", function()
+		local st = { kind = "train", spell = 2, name = "Recipe 2", at = 100, cost = 100 }
+		local d = show(plan({ st, craft(2), craft(3) }))
+		assert.equal("Train Recipe 2", d.now.title)
+		local e = d.next.entries
+		-- the line reads "Learn and craft" in the journal; here the learning is the card, and its price is not counted twice
+		assert.same({ 1, "Craft 3 Recipe 2", "100 to 103, 1s 20c" }, { e[1].n, e[1].title, e[1].meta })
+		assert.same({ 2, "Craft 3 Recipe 3" }, { e[2].n, e[2].title })
 	end)
 
 	it("shows plan.shopping once per place in travel order, and the AH block is the list it keeps", function()
@@ -715,20 +943,20 @@ describe("Cap model on the panel", function()
 		assert.same({ "Trainer: 0c + 1 unknown", "Vendor: 40c", "Auction House: 51s 20c" }, titles)
 		assert.equal("Thread (Supplies)", blocks[2].rows[1].name)
 		assert.equal("at 125, cost unknown", blocks[1].rows[1].right)
-		-- the blocks live on the Shopping tab only; the card links there
-		assert.is_nil(d.next.blocks)
+		-- the blocks live on the journal's Shopping page only; the card links there with one line
+		assert.is_nil(d.now.blocks)
 		assert.equal("Total 51s 60c, 3 stops, 1 price unknown", d.shopping.title)
+		local link = d.now.links[1]
 		assert.same(
-			{ "shopping", "Shopping: 51s 60c, 3 stops, 1 price unknown", "tab" },
-			{ d.next.links[1].tab, d.next.links[1].text, d.next.links[1].action.id }
+			{ "shopping", "Shopping: 51s 60c, 3 stops, 1 price unknown", "journal", "shopping" },
+			{ link.page, link.text, link.action.id, link.action.page }
 		)
-		assert.same({ "shopping", 3 }, { d.tabs[2].id, d.tabs[2].count })
 		-- the step's own buy row points to the list instead of naming a place and a price
-		assert.equal("0/6, on the list", d.next.mats[1].right)
+		assert.equal("0/6, on the list", d.now.mats[1].right)
 		assert.is_nil(all:find("buy 6, AH", 1, true))
 		-- without plan.trip the AH block feeds "Add to AH list"
 		assert.equal("trip", d.shopping.trip.id)
-		local kept = d.next.trip
+		local kept = d.now.trip
 		assert.same({ 2, true, 5120 }, { #kept.rows, kept.rows[2].recipe, kept.total })
 		assert.equal("Leatherworking", kept.prof)
 		-- with a trip that starts now, the list it keeps is plan.trip, its commit included
@@ -742,29 +970,38 @@ describe("Cap model on the panel", function()
 			rows = { { item = 2318, count = 6, buffer = 0, total = 6, each = 20, cost = 120 } },
 		}
 		local withTrip = show(plan({ craft(1) }, { shopping = shopping, trip = trip, profKey = "Leatherworking" }))
-		assert.same(trip.commit, withTrip.next.trip.commit)
+		assert.same(trip.commit, withTrip.now.trip.commit)
 		assert.equal(3, #withTrip.shopping.blocks)
-		-- without plan.shopping: today's rendering, an empty Shopping tab and no link row
+		-- without plan.shopping: an empty Shopping page and no link line
 		local old = show(plan({ craft(1) }))
 		assert.is_nil(old.shopping.blocks)
 		assert.is_string(old.shopping.empty)
-		assert.same({}, old.next.links)
-		assert.same({ "shopping", true }, { old.tabs[2].id, old.tabs[2].empty })
-		assert.equal("buy 6, AH 1s 20c", old.next.mats[1].right)
+		assert.same({}, old.now.links)
+		assert.equal("buy 6, AH 1s 20c", old.now.mats[1].right)
 	end)
 
-	it("describes four tabs in strip order, and Plan when the saved one is unknown", function()
+	it("has no tabs: the journal's pages are reached by link lines and one button", function()
 		local d = show(plan({ craft(1), craft(2) }))
-		local ids = {}
-		for _, t in ipairs(d.tabs) do
-			ids[#ids + 1] = t.id .. ":" .. t.label
-		end
-		assert.same({ "plan:Plan", "shopping:Shopping", "alts:Alts", "more:More" }, ids)
-		assert.is_false(d.tabs[1].empty)
-		assert.same({ "plan", "alts", "plan" }, { ns.View.tabOf(nil), ns.View.tabOf("alts"), ns.View.tabOf("x") })
-		-- a message (no profession) has no tabs
+		assert.is_nil(d.tabs)
+		assert.is_nil(d.later)
+		assert.is_nil(ns.View.tabOf)
+		assert.equal("journal", d.journal.id)
+		-- a message (no profession) still leads to the journal
 		local msg = ns.View.describe({ why = "Open a profession" }, envOf(ns, {}))
-		assert.is_nil(msg.tabs)
+		assert.same(
+			{ "journal", "overview", "Open the journal" },
+			{ msg.journal.id, msg.journal.page, msg.journal.label }
+		)
+		-- more steps than the panel lists: the button says how many
+		local steps = {}
+		for i = 1, 6 do
+			steps[i] = craft(i)
+		end
+		local long = show(plan(steps))
+		assert.same(
+			{ 3, 2, "Open the journal: 2 more steps" },
+			{ #long.next.entries, long.next.more, long.journal.label }
+		)
 	end)
 
 	it("lists the alts' reagents per character with Queue, Queue all and the queued state", function()
@@ -800,43 +1037,17 @@ describe("Cap model on the panel", function()
 		)
 		assert.equal(2, a.open)
 		assert.same({ "Mail queue: Alta sends 3 item 2320" }, a.incoming)
-		assert.same({ "alts", 3, true }, { d.tabs[3].id, d.tabs[3].count, d.tabs[3].warn })
-		-- the card links to the Alts tab, after Shopping (none here)
+		-- the card links to the journal's Alts and mail page with one line, and names no character
+		local link = d.now.links[1]
 		assert.same(
-			{ "alts", "Alts: 19 reagents on 2 characters, not queued" },
-			{ d.next.links[1].tab, d.next.links[1].text }
+			{ "alts", "19 reagents on your other characters, not queued", "gold", "journal", "alts" },
+			{ link.page, link.text, link.tone, link.action.id, link.action.page }
 		)
 		assert.matches("Queue all from Alta", all, 1, true)
-		-- nothing from alts: an empty tab that says why
+		-- nothing from alts: an empty page that says why, and no link line
 		local none = show(plan({ craft(1) }))
-		assert.same({ 0, true }, { #none.alts.groups, none.tabs[3].empty })
+		assert.same({ 0, 0 }, { #none.alts.groups, #none.now.links })
 		assert.is_string(none.alts.empty)
-	end)
-
-	it("offers Show recipe on learned craft rows beside Blizzard's window only", function()
-		local learned = { [1] = true, [2] = true }
-		local env = envOf(ns, {})
-		env.dock = "blizzard"
-		env.craftable = function(spell)
-			if learned[spell] then
-				return 0
-			end
-			return nil, "recipe not learned"
-		end
-		local V = ns.View
-		local a = V.rowOpen(craft(2), env)
-		assert.same({ "open", 2, true }, { a.id, a.spell, a.enabled })
-		assert.is_nil(V.rowOpen(craft(3), env)) -- not learned
-		assert.is_nil(V.rowOpen({ kind = "train", name = "x", at = 1 }, env))
-		assert.is_nil(V.rowOpen({ kind = "trainRank", name = "Expert", cap = 225 }, env))
-		assert.is_nil(V.rowOpen({ kind = "buyRecipe", item = 9, name = "x", price = 1 }, env))
-		local d = show(plan({ craft(1), craft(2), craft(3), { kind = "train", name = "x", at = 1 } }), env)
-		assert.same({ 2, false, false }, { d.later[1].open.spell, d.later[2].open ~= nil, d.later[3].open ~= nil })
-		env.dock = "tsm"
-		assert.is_nil(V.rowOpen(craft(2), env))
-		env.dock = "blizzard"
-		env.craftable = nil
-		assert.is_nil(V.rowOpen(craft(2), env))
 	end)
 end)
 
