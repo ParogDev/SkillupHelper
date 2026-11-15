@@ -593,7 +593,7 @@ local function nextCard(st, env, listed)
 		local name = env.nameOf(p.item)
 		card.pre[#card.pre + 1] =
 			{ count = p.count, make = p.make, name = name, item = p.item, spell = p.spell, n = p.n }
-		card.notes[#card.notes + 1] = ("Craft %d %s first"):format(p.count, name)
+		card.notes[#card.notes + 1] = ("Craft %d %s first"):format(p.make or p.count, name)
 		if type(p.spell) ~= "number" then
 			-- the planner names no recipe for it: the button cannot craft it, and the card says why
 			card.notes[#card.notes + 1] = ("No learned recipe makes %s: craft it by hand"):format(name)
