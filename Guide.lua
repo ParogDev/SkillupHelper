@@ -119,18 +119,61 @@ end
 -- unconfirmed for Forever: a trainer without a rank in the data is taken to teach everything.
 G.RANK_CAP = { apprentice = 75, journeyman = 150, expert = 225, artisan = 300, master = 300, ["grand master"] = 300 }
 
+-- The ladder in order, for naming the rank a need asks for. The top cap (Artisan's, and the Master and Grand Master
+-- titles, which train no higher here) teaches every recipe.
+G.RANKS = { "apprentice", "journeyman", "expert", "artisan" }
+G.TOP_CAP = 300
+
 -- Whether a trainer's rank reaches a trainer need: a rank-up to need.cap, or a recipe learned at skill need.at.
--- True when either side is not known.
+-- A trainer teaches the recipes learned below the next rank's training skill (cap - 25): a Journeyman (cap 150)
+-- teaches recipes learned up to 124, and one learned at 125 or more needs an Expert. True when either side is not
+-- known.
 function G.rankReaches(npc, need)
 	local cap = type(npc.rank) == "string" and G.RANK_CAP[npc.rank] or nil
-	local want = type(need.cap) == "number" and need.cap or (type(need.at) == "number" and need.at or nil)
-	return cap == nil or want == nil or cap >= want
+	if cap == nil then
+		return true
+	elseif type(need.cap) == "number" then
+		return cap >= need.cap
+	end
+	local at = tonumber(need.at)
+	return at == nil or cap >= G.TOP_CAP or at < cap - 25
+end
+
+-- The lowest rank that reaches a trainer need, capitalized ("Expert"), or nil when the need names no skill. A recipe
+-- learned past the last rank's training skill still needs the top rank, never one past it.
+function G.needRank(need)
+	if type(need) ~= "table" or need.kind ~= "trainer" or not (tonumber(need.cap) or tonumber(need.at)) then
+		return nil
+	end
+	for _, r in ipairs(G.RANKS) do
+		if G.rankReaches({ rank = r }, need) then
+			return G.rankTitle(r)
+		end
+	end
+	return G.rankTitle(G.RANKS[#G.RANKS])
+end
+
+-- "an Expert", "a Journeyman": a rank name with its article.
+function G.aRank(name)
+	name = tostring(name)
+	return (name:find("^[AEIOUaeiou]") and "an " or "a ") .. name
+end
+
+-- A trainer's rank as its title words ("Expert"), or nil.
+function G.rankTitle(rank)
+	if type(rank) ~= "string" or rank == "" then
+		return nil
+	end
+	return (rank:gsub("(%a)(%a*)", function(a, b)
+		return a:upper() .. b
+	end))
 end
 
 -- How well an NPC serves a need: the number of the need's items it sells (vendor); 1 for an auctioneer; for a trainer
 -- of the profession 2 when its learned service list has the need's name (certain), 1 when that is not known (a seed,
 -- a trainer never opened, a list read in part, or a need without a name), 0 when its full list lacks the name or,
--- for a trainer never opened, when its rank is below the need (second value "rank").
+-- for a trainer never opened or read in part, when its rank is below the need (second value "rank": a Journeyman for
+-- an Expert recipe). A whole list that has the name wins over the rank: it was read on this client.
 function G.serves(npc, need)
 	if need.kind == "vendor" then
 		local n = 0
@@ -145,21 +188,20 @@ function G.serves(npc, need)
 			return 0
 		end
 		local name = G.norm(need.name)
-		if type(npc.teaches) ~= "table" then
-			-- never opened: only its title's rank says what it teaches
-			if not G.rankReaches(npc, need) then
-				return 0, "rank"
+		if name and type(npc.teaches) == "table" then
+			-- a rank-up may be listed as the profession with the rank before it ("Expert Cooking")
+			local prof = G.norm(npc.trains)
+			if npc.teaches[name] or (prof and npc.teaches[name .. " " .. prof]) then
+				return 2
+			elseif not npc.teachesPartial then
+				return 0
 			end
-			return 1
-		elseif not name then
-			return 1
 		end
-		-- a rank-up may be listed as the profession with the rank before it ("Expert Cooking")
-		local prof = G.norm(npc.trains)
-		if npc.teaches[name] or (prof and npc.teaches[name .. " " .. prof]) then
-			return 2
+		-- never opened, read in part, or a need without a name: its title's rank says what it teaches
+		if not G.rankReaches(npc, need) then
+			return 0, "rank"
 		end
-		return npc.teachesPartial and 1 or 0
+		return 1
 	elseif need.kind == "auction" then
 		return npc.auction and 1 or 0
 	end
@@ -484,9 +526,17 @@ function G.needLabel(need, nameOf)
 end
 
 -- The honest line when no NPC is known for a need. excluded: trainers of the profession whose full list lacks the
--- need's name (Guide.nearest's third value).
-function G.unknownText(need, nameOf, excluded)
-	if need.kind == "trainer" and need.name and (excluded or 0) > 0 then
+-- need's name (Guide.nearest's third value); belowRank: trainers left out because their rank is below the need's
+-- (its fourth value's belowRank).
+function G.unknownText(need, nameOf, excluded, belowRank)
+	local rank = need.kind == "trainer" and (belowRank or 0) > 0 and G.needRank(need)
+	if rank then
+		return ("%s needs %s %s trainer or better; the trainers I know are below that."):format(
+			need.name or "This",
+			G.aRank(rank),
+			need.profession or "profession"
+		)
+	elseif need.kind == "trainer" and need.name and (excluded or 0) > 0 then
 		return ("No trainer you've opened teaches %s. It may come from a special NPC or a recipe item."):format(
 			need.name
 		)
@@ -552,13 +602,17 @@ end
 -- One read of a trainer's service list during a visit. The server fills the list after TRAINER_SHOW and sends
 -- TRAINER_UPDATE as it does, so: a read with no service is "not yet" (nothing saved), and a read with fewer names
 -- than one already taken in the same visit (a list still loading, a filter changed) never replaces the fuller one.
--- visit = { id, best } of the visit so far, or nil at a new one. Returns teaches, partial to save (nil, nil: keep
--- what is saved), the visit, and why a read was held back.
+-- visit = { id, best, reads, whole } of the visit so far, or nil at a new one. Returns teaches, partial to save
+-- (nil, nil: keep what is saved), the visit, and why a read was held back.
 function G.trainerRead(visit, id, names, partial, services)
 	if type(visit) ~= "table" or visit.id ~= id then
-		visit = { id = id, best = 0 }
+		visit = { id = id, best = 0, reads = 0 }
 	end
+	visit.reads = (visit.reads or 0) + 1
 	names = type(names) == "table" and names or {}
+	if not partial and #names > 0 and #names >= visit.best then
+		visit.whole = true
+	end
 	if (tonumber(services) or 0) < 1 or #names == 0 then
 		return nil, nil, visit, "not yet: the trainer listed no services (the list fills after the window opens)"
 	end
@@ -567,6 +621,23 @@ function G.trainerRead(visit, id, names, partial, services)
 	end
 	visit.best = #names
 	return names, partial and true or nil, visit, nil
+end
+
+-- At most this many reads of one trainer visit: each read switches the type filters, and every switch raises
+-- another TRAINER_UPDATE, so reading on every update would never stop while the window is open.
+G.TRAINER_READS = 6
+
+-- Whether a TRAINER_UPDATE should read the list again in this visit: not after a whole list was read, and not past
+-- G.TRAINER_READS reads. Returns the answer and why not.
+function G.trainerWants(visit)
+	if type(visit) ~= "table" then
+		return true
+	elseif visit.whole then
+		return false, "the whole list was read this visit"
+	elseif (visit.reads or 0) >= G.TRAINER_READS then
+		return false, ("read %d times this visit, the list stayed in part"):format(visit.reads)
+	end
+	return true
 end
 
 -- Merges what a window just showed into the learned records. rec = { id, name, map, x, y, sells (list of item ids),
@@ -701,7 +772,9 @@ end
 local function role(s)
 	local need = s.need or {}
 	if need.kind == "trainer" then
-		return ("%s trainer"):format(s.profession or need.profession or "Profession")
+		local prof = s.profession or need.profession or "Profession"
+		local rank = G.rankTitle(s.rank)
+		return rank and ("%s %s trainer"):format(rank, prof) or ("%s trainer"):format(prof)
 	elseif need.kind == "auction" then
 		return "Auctioneer"
 	end
@@ -714,7 +787,8 @@ end
 
 -- The chip's copy for a guide state. s = { phase, need, name, distance, place, thing (first item's name),
 -- profession, compass (a word, when the facing is unknown and the arrow is hidden), marked (solo: the star goes on),
--- color (the step's), why, certain (false: a trainer that may not teach need.name), excluded (Guide.nearest's) }.
+-- color (the step's), why, certain (false: a trainer that may not teach need.name), excluded (Guide.nearest's),
+-- belowRank (its stats'), rank (the picked trainer's, Data/Trainers.lua) }.
 -- Phases: Guide.phase's, plus "done", "unknown" (no NPC known) and "notnow" (no position).
 -- Returns { l1, r1, l2, action, style ("quiet" | "primary"), icon ("arrow" | "star" | "dot"), tint, why }.
 function G.describe(s)
@@ -783,8 +857,11 @@ function G.describe(s)
 			d.l1 = "No trainer found"
 			d.l2 = ("None you've opened teaches %s"):format(need.name)
 		elseif need.kind == "trainer" and (s.belowRank or 0) > 0 then
-			d.l1 = "No trainer of that rank known"
-			d.l2 = ("Ask a city guard for a higher %s trainer"):format(s.profession or need.profession or "profession")
+			local rank = G.needRank(need)
+			local prof = s.profession or need.profession or "profession"
+			d.l1 = rank and ("No %s trainer known"):format(rank) or "No trainer of that rank known"
+			d.l2 = rank and ("%s needs %s %s trainer or better"):format(need.name or "This", G.aRank(rank), prof)
+				or ("Ask a city guard for a higher %s trainer"):format(prof)
 		elseif need.kind == "trainer" then
 			d.l1 = "No known trainer yet"
 			d.l2 = ("Ask a city guard for the %s trainer"):format(s.profession or need.profession or "profession")
@@ -842,8 +919,11 @@ function G.strip(s)
 		out.a, out.ar = "You are here", ""
 	elseif p == "unknown" then
 		out.ar = ""
+		local rank = need.kind == "trainer" and (s.belowRank or 0) > 0 and G.needRank(need)
 		if need.kind == "trainer" and need.name and (s.excluded or 0) > 0 then
 			out.a = ("No trainer you've opened teaches %s"):format(need.name)
+		elseif rank then
+			out.a = ("No %s %s trainer known"):format(rank, s.profession or need.profession or "profession")
 		elseif need.kind == "trainer" then
 			out.a = ("No known %s trainer yet"):format(s.profession or need.profession or "profession")
 		elseif need.kind == "auction" then
@@ -853,7 +933,7 @@ function G.strip(s)
 		end
 		out.tip = G.unknownText(need, function()
 			return s.thing or "these materials"
-		end, s.excluded)
+		end, s.excluded, s.belowRank)
 	elseif p == "notnow" then
 		out.a, out.ar = s.instance and "No directions inside an instance" or "No directions right now", ""
 		out.tip = s.why and ("Not now: %s"):format(s.why) or nil

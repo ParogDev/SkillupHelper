@@ -444,12 +444,13 @@ describe("Trainer window", function()
 		assert.same({ ["spiced wolf meat"] = true, ["herb baked egg"] = true }, npcs["name:Tester"].teaches)
 		local burstReads = reads
 		assert.is_nil(npcs["name:Tester"].teachesPartial)
-		-- a later update of the same visit that reads less keeps the fuller list; one update costs what the burst did
+		-- once the whole list is in, a later update of the same visit is not read again by the guide (each read
+		-- switches the filters, which raises another update): it costs less than the burst, and the list stays
 		n = 2
 		reads = 0
 		assert.same({}, a.fire("TRAINER_UPDATE"))
 		flush()
-		assert.equal(burstReads, reads)
+		assert.is_true(reads < burstReads)
 		assert.same({ ["spiced wolf meat"] = true, ["herb baked egg"] = true }, npcs["name:Tester"].teaches)
 		assert.same({}, a.fire("TRAINER_CLOSED"))
 	end)

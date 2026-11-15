@@ -565,10 +565,12 @@ describe("Guide over the shipped Data/Trainers.lua", function()
 		assert.equal(1, (G.serves({ trains = "Blacksmithing", rank = "expert" }, expert)))
 		assert.equal(1, (G.serves({ trains = "Blacksmithing", rank = "master" }, expert)))
 		assert.equal(1, (G.serves({ trains = "Blacksmithing" }, expert)))
-		-- a recipe learned at skill 200 needs an Expert trainer; one at 150 a Journeyman can teach
+		-- a recipe learned at skill 200 needs an Artisan trainer, one at 125 an Expert; one at 124 a Journeyman teaches
 		local recipe = { kind = "trainer", profession = "Blacksmithing", name = "Golden Scale Coif", at = 200 }
 		assert.equal(0, (G.serves(dwukk, recipe)))
-		recipe.at = 150
+		recipe.at = 125
+		assert.equal(0, (G.serves(dwukk, recipe)))
+		recipe.at = 124
 		assert.equal(1, (G.serves(dwukk, recipe)))
 		assert.equal(0, (G.serves({ trains = "Blacksmithing", rank = "apprentice" }, expert)))
 		-- an opened trainer's own list wins over its title
@@ -582,6 +584,124 @@ describe("Guide over the shipped Data/Trainers.lua", function()
 		assert.equal(0, excluded)
 		assert.is_true(stats.belowRank >= 5)
 		assert.is_nil(G.needsOf({ kind = "train", name = "X", at = 10, cap = 75 }, "Cooking")[1].cap)
+	end)
+
+	describe("trainer tiers", function()
+		local LW = "Leatherworking"
+		local hillman = { kind = "trainer", profession = LW, name = "Hillman's Shoulders", at = 130 }
+		local function undercity(learned)
+			local list = {}
+			for _, npc in ipairs(knownFor("Horde", learned)) do
+				if npc.id == 223 or npc.id == 4588 then
+					list[#list + 1] = npc
+				end
+			end
+			return list
+		end
+
+		it("names the rank a recipe or rank-up needs, never one past the top", function()
+			local function rankAt(n)
+				return G.needRank({ kind = "trainer", at = n })
+			end
+			assert.same(
+				{ "Apprentice", "Journeyman", "Journeyman", "Expert", "Expert", "Artisan", "Artisan", "Artisan" },
+				{
+					rankAt(0),
+					rankAt(50),
+					rankAt(124),
+					rankAt(125),
+					rankAt(199),
+					rankAt(200),
+					rankAt(274),
+					rankAt(290),
+				}
+			)
+			assert.equal("Expert", G.needRank({ kind = "trainer", name = "Expert", cap = 225 }))
+			assert.is_nil(G.needRank({ kind = "trainer" }))
+			-- a recipe learned at 290 is still taught by an Artisan (or Master) trainer
+			assert.is_true(G.rankReaches({ rank = "artisan" }, { at = 290 }))
+			assert.is_true(G.rankReaches({ rank = "master" }, { at = 290 }))
+			assert.is_false(G.rankReaches({ rank = "expert" }, { at = 200 }))
+		end)
+
+		it("sends Hillman's Shoulders (learned at 130) to Arthur Moore, not Dan Golthas", function()
+			local list = undercity()
+			assert.equal(2, #list)
+			local dan, arthur
+			for _, npc in ipairs(list) do
+				if npc.id == 223 then
+					dan = npc
+				else
+					arthur = npc
+				end
+			end
+			assert.same({ "journeyman", "expert" }, { dan.rank, arthur.rank })
+			assert.same({ 0, "rank" }, { G.serves(dan, hillman) })
+			assert.equal(1, (G.serves(arthur, hillman)))
+			-- standing next to Dan Golthas
+			local pick, servers, excluded, stats = G.nearest(list, hillman, at(1458, dan.x, dan.y), realWorld)
+			assert.equal("Arthur Moore", pick.name)
+			assert.same({ 1, 0, 1 }, { servers, excluded, stats.belowRank })
+		end)
+
+		it("applies the rank to a list read in part, and a whole list with the name wins over it", function()
+			local partial = { trains = LW, rank = "journeyman", teaches = G.teachesSet({ "X" }), teachesPartial = true }
+			assert.same({ 0, "rank" }, { G.serves(partial, hillman) })
+			local whole = { trains = LW, rank = "journeyman", teaches = G.teachesSet({ "Hillman's Shoulders" }) }
+			assert.equal(2, (G.serves(whole, hillman)))
+			local lacks = { trains = LW, rank = "expert", teaches = G.teachesSet({ "Other" }) }
+			assert.equal(0, (G.serves(lacks, hillman)))
+		end)
+
+		it("says which rank is missing when every known trainer is below it", function()
+			local dan = {}
+			for _, npc in ipairs(undercity()) do
+				if npc.id == 223 then
+					dan = { npc }
+				end
+			end
+			local pick, _, excluded, stats = G.nearest(dan, hillman, nil, realWorld)
+			assert.is_nil(pick)
+			assert.same({ 0, 1 }, { excluded, stats.belowRank })
+			local s = { phase = "unknown", need = hillman, profession = LW, excluded = 0, belowRank = 1 }
+			local d = G.describe(s)
+			assert.same(
+				{ "No Expert trainer known", "Hillman's Shoulders needs an Expert Leatherworking trainer or better" },
+				{ d.l1, d.l2 }
+			)
+			assert.equal("No Expert Leatherworking trainer known", G.strip(s).a)
+			assert.matches("needs an Expert Leatherworking trainer or better", G.unknownText(hillman, nil, 0, 1))
+		end)
+
+		it("names the trainer's rank in its role line", function()
+			local s = { phase = "far", need = hillman, name = "Arthur Moore", distance = 300, profession = LW }
+			s.rank = "expert"
+			assert.equal("Expert Leatherworking trainer", G.describe(s).l2)
+			s.rank = "grand master"
+			assert.equal("Grand Master Leatherworking trainer", G.describe(s).l2)
+			s.rank = nil
+			assert.equal("Leatherworking trainer", G.describe(s).l2)
+		end)
+
+		it("stops re-reading a visit after a whole list, or after the read cap", function()
+			local _, _, visit = G.trainerRead(nil, 223, {}, true, 0)
+			assert.is_true((G.trainerWants(visit)))
+			_, _, visit = G.trainerRead(visit, 223, { "A", "B" }, false, 2)
+			local wants, why = G.trainerWants(visit)
+			assert.is_false(wants)
+			assert.matches("whole list", why)
+			-- a list that stays in part stops at the cap
+			visit = nil
+			for _ = 1, G.TRAINER_READS do
+				_, _, visit = G.trainerRead(visit, 4588, { "A" }, true, 1)
+			end
+			wants, why = G.trainerWants(visit)
+			assert.is_false(wants)
+			assert.matches("in part", why)
+			-- a new trainer is a new visit
+			_, _, visit = G.trainerRead(visit, 5811, { "A" }, true, 1)
+			assert.is_true((G.trainerWants(visit)))
+		end)
 	end)
 
 	it("gives a row without a position its zone only: no distance, no bearing, last in the list", function()
@@ -769,7 +889,10 @@ describe("Guide over the shipped Data/Trainers.lua", function()
 			"Data/Trainers.lua has 1 Blacksmithing trainer(s) for Horde, none of a rank that teaches Artisan (skill 300)",
 			G.whyNone(up, { stats = st, faction = "H" })
 		)
-		assert.equal("No trainer of that rank known", G.describe({ phase = "unknown", need = up, belowRank = 1 }).l1)
+		assert.equal("No Artisan trainer known", G.describe({ phase = "unknown", need = up, belowRank = 1 }).l1)
+		-- a need that names no skill keeps the generic line
+		local bare = { kind = "trainer", profession = "Blacksmithing", name = "X" }
+		assert.equal("No trainer of that rank known", G.describe({ phase = "unknown", need = bare, belowRank = 1 }).l1)
 		-- opened trainers whose lists lack the name
 		assert.equal(
 			"2 Cooking trainer(s) opened, none lists Goldthorn Tea",
