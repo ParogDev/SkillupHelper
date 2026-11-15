@@ -17,8 +17,10 @@ All pictures below are **design previews with placeholder data**, drawn from the
 screenshots will replace them (the list is in [docs/screenshots.md](docs/screenshots.md)).
 
 **The panel at the profession window.** It docks beside TradeSkillMaster's crafting window or Blizzard's own and
-follows you when you switch. The Plan tab shows the step to do now; Shopping, Alts and More hold the rest. The
-button with three lines at the top right opens the journal.
+follows you when you switch. It shows one thing: what to do now (what to craft, how many, why, where to go and
+what it costs), the next three steps, and a strip of the whole path with a mark where you are. Everything else is
+in the journal: the button at the bottom of the panel opens it. Nothing in the addon scrolls; long lists turn
+pages.
 
 ![Docked panel, design preview with placeholder data](docs/img/preview-docked-card.png)
 
@@ -48,6 +50,7 @@ keeps what still works.
 | How | Opens |
 |---|---|
 | The three-line button on the docked panel | the journal at the profession you have open |
+| The minimap button (drag it round the edge; right-click for a menu; `/skillup minimap` hides or shows it) | the journal, or closes it |
 | The addon menu by the minimap (the addon compartment) | the journal, or closes it |
 | A key: Key Bindings > AddOns > "Open the SkillupHelper journal", or Settings and data > Key | the journal |
 | `/skillup journal` (`/skillup journal where` opens that page) | the journal |

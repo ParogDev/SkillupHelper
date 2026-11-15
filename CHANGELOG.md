@@ -2,6 +2,20 @@
 
 ## 0.3.0
 
+- Nothing scrolls. The panel at the profession window shows what to do now, the next three steps and a strip of
+  the whole path; its tabs are gone, and shopping, alts and settings are journal pages. The journal's Path page
+  shows one stretch of the path at a time (pick it on the timeline or with Previous and Next), Overview is a grid
+  of cards, and long lists turn pages.
+- "Learn X" followed by "Craft X" is one step ("Learn and craft 43 Copper Dagger"). Rank training is shown with the
+  stretch it unlocks, with its skill and cost. Steps are numbered without breaks.
+- A minimap button: left-click opens the journal, right-click a menu, drag moves it. `/skillup minimap` or
+  Settings and data hides it. Bar addons that use LibDataBroker get a "SkillupHelper" launcher.
+- Windows stay sharp wherever you drag them: every window sits on whole screen pixels.
+- A trainer window read at a low skill no longer hides the trainer's later recipes; that left a false "nothing
+  from 185 to 215" for Blacksmithing. An item without a price never makes a gap: the step is planned and says
+  "price unknown for N items".
+- The guide knows every shipped trainer and recipe vendor for your faction, nearest first, and no longer says
+  "No known trainer yet" when one is in the data.
 - A journal window with six pages. Overview lists every profession with your skill, the cost to 300 in materials,
   recipes and training, and each skill range the addon cannot plan, with the reason. Path lays one profession out
   from 1 to 300 on a timeline with its steps. Where ranks the places to level Mining, Herbalism, Skinning, Fishing

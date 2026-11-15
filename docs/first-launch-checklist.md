@@ -40,7 +40,33 @@ Start: restart the game (new files), log in, `/reload` once, log out or `/reload
 | 29 | Recipe colour recording | open a profession window | `learned.colors` grows |
 | 30 | Settings page: every control changes the plan as its slash command does | flip each, watch the panel | |
 
+| 31 | No surface scrolls and no text is cut | panel, every journal page, a long Shopping list | `journal.overflow.count` 0; `ui.fit.overflow` false |
+| 32 | Windows stay sharp wherever they are dragged | drag the journal, tracker, card and chip; compare text and rules | `pixels.snaps` rises; `pixels.lastWhy` nil |
+| 33 | The minimap button: at the lower left of the minimap, drag follows the edge, the angle survives `/reload` | drag it, `/reload` | `minimap.created` true; `minimap.why` nil |
+| 34 | Minimap button clicks: left toggles the journal, right opens the menu; "Hide this button", then `/skillup minimap` brings it back | | `minimap.clicks` |
+| 35 | The guide names a real trainer for the open profession, nearest first | a step that needs training | `guide.serversBy.shipped` above 0; `guide.why` nil |
+| 36 | The close button of the journal is the client's X | | |
+
 Items 27 to 29 come from the data-freshness work (`Learned.lua`); they have not run in game either.
+
+## First launch, 2026-11-14 (the owner's first look, before the redesign)
+
+Read from the saved selftest and BugGrabber after that session:
+
+- Item 1: one BugGrabber entry, a warning, not an error: the TOC lists `Data\Custom.lua`, which is optional and was
+  absent. `journalWiring.errors` empty, no `lastWhy`. Open: a TOC cannot list an optional file without this
+  warning; the same holds for `Data\Plan.lua` in a packaged install.
+- Items 2, 3, 6, 24: pass (`openButton` true, `compartment` true, `skillApi` true, `prices` true).
+- Item 4: `bindingName` true, no key set.
+- Items 10, 11: `mapArtMissing` false, `tileFailures` 0, but no map had been drawn yet (`draws` 0): still open.
+- Item 7: opened once, from the panel button; the other three entry points not tried.
+- Item 26: slowest costing run 224 ms (10 runs, 1057 ms in all).
+- Items 19 to 23, 27, 28: not exercised (nothing tracked, no vendor opened, no craft counted). Item 29: 22 colours
+  recorded.
+- Failed, fixed since: the guide found no trainer (`guide.servers` 0, "no known NPC serves this trainer need");
+  the panel scrolled (`ui.fit.scroll` true); the journal's saved point was a fraction of a pixel; Blacksmithing
+  showed a false gap from 185 to 215.
+- Only the Path page was drawn; every other page is unseen in game.
 
 Report what fails with the selftest block and the BugGrabber text. Each failure names its broken link: an api that
 answered nothing, a secret value, a texture refused.

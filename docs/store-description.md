@@ -20,7 +20,8 @@ timeline, step by step.
 places that still give points at your skill, with the route, mob levels and the nearest flight point. Track a spot
 and a small tracker walks you round the loop.
 
-Opens from a button on the panel, the addon menu by the minimap, a key binding, or `/skillup journal`.
+Opens from the minimap button, a button on the panel, the addon menu by the minimap, a key binding, or
+`/skillup journal`.
 
 ### Beta, and what is not confirmed
 

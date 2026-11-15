@@ -5,7 +5,7 @@ no plan and write no sentence: text comes from `Where.lua` and `View.lua`.
 
 | File | Module | Holds |
 |---|---|---|
-| `Widgets.lua` | `ns.Widgets` | palette, text, buttons, pools, chips, band bars, yields, legs, stops, list, scroll, controls |
+| `Widgets.lua` | `ns.Widgets` | palette, text, buttons, pools, chips, band bars, yields, legs, stops, paged lists and areas, pixel snapping, controls |
 | `MapCanvas.lua` | `ns.MapCanvas` | the map view at any size |
 | `FieldUI.lua` | `ns.FieldUI` (`ns.Field`) | the where-card, `SkillupHelperField`, `SkillupHelperTracker` |
 | `JournalUI.lua` | `ns.JournalUI` (`ns.Journal`) | `SkillupHelperJournal`, six pages, the provider, the globals |
@@ -16,10 +16,19 @@ Nothing is created at login. The journal, each page, the field card and the trac
 ## Surfaces
 
 **Journal**, 960 x 640, strata HIGH, toplevel, clamped, moved by its 40-px title band, closed by Escape
-(`UISpecialFrames`) and, unless `journal.closeInCombat` is false, by `PLAYER_REGEN_DISABLED`. Under 680 px of
-UIParent height it scales down to no less than 0.8. Title band: name, the profession dropdown, the breadcrumb
-(`> step`), close. Then the page strip (six tabs, count suffix, warn pip), the 936 x 512 body, a status line and the
-key hint.
+(`UISpecialFrames`) and, unless `journal.closeInCombat` is false, by `PLAYER_REGEN_DISABLED`. It has no scale of its
+own (a fractional scale breaks font hinting) and sits on whole physical pixels: `W.snap` after the saved point is
+restored, on every show and after a drag (`W.dragStop`). Title band: name, the profession dropdown, the breadcrumb
+(the selected line on Path, the spot on Where, nothing when it would repeat the profession), the client's
+`UIPanelCloseButton` (a drawn X when the template is refused). Then the page strip (six tabs; a count only with its
+noun in the tab's tooltip and never on Overview; warn pip), the 936 x 512 body, a status line and the key hint (a
+click target that opens Settings and data).
+
+**Nothing scrolls.** No scroll bar, no slider that moves content, no mouse-wheel handler, no clipped row that cannot
+be reached. Content longer than its box is split into pages at item boundaries with a pager ("Previous / 1 to 8 of 21
+lines / Next"): `W.list` for rows, `W.items` and `W.flow` on a `W.pages` area for laid-out pieces. A hand-laid page
+calls `:SetContentHeight(total)`; a total over the box increments `W.overflow.count` (in `J.diag().overflow`), which
+the tests hold at zero for every fixture and for a worst case.
 
 The brief asked for a left rail. The design spec and its mockup use a top strip and lay every page out on a 936-px
 body (the timeline is 3 px per skill point). I kept the strip. Navigation is built in one place (`tab`, `paintTabs`,
@@ -27,12 +36,45 @@ body (the timeline is 3 px per skill point). I kept the strip. Navigation is bui
 
 | Page | Draws | Notes |
 |---|---|---|
-| Overview | `overview` | filter (Mine, All, Crafting, Gathering) and sort (Name, Skill, Cost) are the frame's own, saved in `journal.filter` / `journal.sort`. 37-px rows in a virtual list. Rank bar with cap ticks, cost columns right-aligned, coverage strip with hatched gaps, the gap reasons in the row's tooltip. Click opens Path. |
-| Path | `path` | timeline (caps, gates, markers, band segments, hatched gaps, now-line, legend, hover and click by cursor position, no per-segment frames), virtual step list (46 px, fold rows 26), detail (lines, learn, reagents, ways as radio rows, 330 x 92 map, buttons). |
-| Where | `whereList` | spot list with the selected spot as a card with its yields, optional `itinerary = { title, rows = { { range, title, sub, key, tone } } }`, the 628 x 430 map, the caption strip with the live line and up to three buttons. |
-| Shopping | `shopping` | `items` or `blocks` as `V.shoppingItems` rows; raw `V.shoppingBlocks` blocks are passed through `V.shoppingItems`. Side: total, errand map, Open in Where, stock. |
-| Alts and mail | `alts` | `items`, or `groups` through `V.altsItems`, or `characters`. Side: `queue` (`V.mailPanel`), `howto`, `countAlts = { text, on, action }`. |
-| Settings and data | `settings` | three columns. Planner kinds: `dropdown`, `slider` (`min`, `max`, `step`, `format`), `stepper`, `check`, `list`, `link`, `key`. Data rows with a state pip and each error on its own line. Learned lists with Show and a Reset that asks once in place. `explain = { lines }` replaces the built-in "How the plan is made" text. |
+| Overview | `overview` | filter (Mine, All, Crafting, Gathering) and sort (Name, Skill, Cost) are the frame's own, saved in `journal.filter` / `journal.sort`. A grid of cards, 3 columns by 6 rows (306 x 75, 18 professions on one page): icon, name, skill, rank bar with cap ticks, `costText`, `coverText`; gap reasons, unpriced items and the cost breakdown in the tooltip. Click opens Path. |
+| Path | `path` | timeline card (128: caps, gates, markers, band segments, hatched gaps, now-line, the shaded stretch, a legend row of the real marker shapes; every edge snapped with `W.px`; a click selects that line), the stretch bar (34: Previous, one button per stretch, Next), then the lines of one stretch (568 wide: a header of 22 + up to two 16-px rank lines, at most `Where.PATH_MAX` = 6 rows of 46 px in a 338-px box) beside the detail (356 wide: Do this, Get the recipe, one paged list of Materials and Other ways, the 330 x 72 map when it fits, buttons). No "N ways" button in a row. |
+| Where | `whereList` | left column: the selected spot as a card with its yields, then one paged list: the other spots (62 px, "1 to 3 of 24 spots") or, by a two-segment control, the route `itinerary = { title, rows = { { range, title, sub, key, tone } } }` in its place. The 628 x 430 map (no wheel: its own two-segment control switches the view), the caption strip with the live line and up to three buttons. |
+| Shopping | `shopping` | `items` or `blocks` as `V.shoppingItems` rows on a paged area. Side (a flow that pages): total, errand map, Open in Where, stock. |
+| Alts and mail | `alts` | `items`, or `groups` through `V.altsItems`, or `characters`, paged. Side: `queue` (`V.mailPanel`), `howto`, `countAlts = { text, on, action }`. |
+| Settings and data | `settings` | three columns that page on their own. Planner kinds: `dropdown`, `slider` (`min`, `max`, `step`, `format`), `stepper`, `check`, `list`, `link`, `key`. Data rows with a state pip and each error on its own line. Learned lists with Show (every row, paged in the column) and a Reset that asks once in place. `explain = { lines }` replaces the built-in "How the plan is made" text. |
+
+**Docked panel**, `SkillupHelperPanel` (`UI.lua`, text from `View.describe`), 316 wide beside the profession window:
+the at-a-glance surface. It has no tabs and never scrolls. Top to bottom: header (36); the path strip (34: one 8-px
+bar of the whole path from 1 to 300, a segment per plan line, the done part dimmed, a hole in the warn colour with
+an edge, cap ticks, the now-marker; hover names the line, a click opens it in the journal); the card of what to do
+now (`d.now`: action and count, skill range and colour, why, where to go, what it costs, link lines for Shopping
+and Alts that open those journal pages, the guide strip); the action bar; "Next" with up to three lines
+(`d.next.entries`, from `Where.lines`: "Learn and craft 43 Copper Dagger, 84 to 96", wrapped, never cut); and
+"Open the journal: N more steps". Its height follows its content up to the profession window's height: `V.fit`
+leaves out whole pieces (the third next line first), never part of one, and reports `overflow` in `selftest.ui.fit`.
+Settings live in the journal only. The auction-house list pages five rows.
+
+**Plan lines.** `Where.lines(steps)` is the one place that turns planner steps into what a person reads, for the
+panel and the journal: "Train X" or "Buy recipe X" directly before "Craft X" is one line, a rank training hangs on
+the line it comes before (`line.rank`) and is shown with the stretch it unlocks, numbers are continuous, and a line
+carries the names of its unpriced items. `Where.stretches(rows, caps, skill, max)` cuts the lines at the rank caps
+and then into parts that fit the list.
+
+**Minimap button**, `SkillupHelperMinimapButton` (`FieldUI.lua`, menu and tooltip from `Journal.lua`), a child of
+`Minimap`, made at login. Drag moves it round the edge (`F.minimapOffset`, round and square minimaps through
+`GetMinimapShape`); the angle is saved in `ui.minimap = { angle, hide }`. Left click toggles the journal; right
+click opens a menu (open the journal, show or hide the panel, track or stop tracking, settings, hide this button);
+the tooltip shows the tracked step. "Show the minimap button" on Settings and data and `/skillup minimap` bring it
+back. No library is bundled; when LibDataBroker-1.1 is loaded by another addon a launcher object "SkillupHelper" is
+published for bar addons. The addon-compartment entry stays.
+
+**Whole pixels.** A window on a fraction of a screen pixel draws text and 1-px rules differently at every position.
+Every window (journal, panel, field card, tracker, guide chip, minimap button) is put on whole physical pixels by
+`W.snap` (size, then the top-left corner, by shifting the offsets of its one anchor) after a drag (`W.dragStop`),
+on show, after a saved point is restored, and on `UI_SCALE_CHANGED` / `DISPLAY_SIZE_CHANGED`; saved points are the
+snapped ones. Frames and regions round their own layout (`SetRoundLayoutToNearestPixel`; `W.roundAll` for trees
+made elsewhere), and computed positions (timeline edges, strip segments, bars) go through `W.px`.
+`selftest.pixels` counts snaps and names the last refusal.
 
 **Field card**, `SkillupHelperField`, 316 wide: title, skill, fold button, runway, the where-card, up to three
 action buttons. It sits under the tracker when the tracker is shown (above it when there is no room), else at its
@@ -68,7 +110,7 @@ Each map view has one `OnUpdate`, throttled to 10 Hz. A tick is one `C_Map.GetPl
 The marks are rebuilt only when the signature changes (model, mode, floor, next stop, visited set). The tracker eases
 its arrow every frame (one setter) and calls `provider.trackerLive` at 10 Hz. `OnUpdate` does not run on a hidden
 frame, so a closed journal, a folded card and a hidden tracker do no work. Hover scans on the map and the timeline
-run only while the mouse is over them; slider and scroll drags only while the button is down.
+run only while the mouse is over them; a settings slider's drag only while the button is down.
 
 Worst case for a 60-point loop in the journal: 60 lines, 64 discs (each a texture and a mask), 61 font strings.
 A second draw of the same loop creates nothing. The test asserts both.
@@ -154,9 +196,8 @@ Paths under `vendor/wow-ui-source/Interface/AddOns` and `vendor/BlizzardInterfac
 | Binding XML shape | `Blizzard_Commentator/Bindings.xml:3` |
 | Every atlas used exists | `AtlasInfo.lua:17815` (`MiniMap-QuestArrow`), `17849-17851` (`TaxiNode_*`), `17720-17727`, `17847`, `18102`, `17743`, `25827` |
 
-Long lists use the addon's own virtual list (`W.list`) and not ScrollBox: it needs no template, and the tests can
-drive it. `CreateScrollBoxListLinearView` exists (`Blizzard_SharedXML/Shared/Scroll/ScrollBoxLinearView.lua:246`)
-if that choice is revisited.
+Long lists are paged by the addon's own `W.list`, never scrolled: ScrollBox is not used anywhere. The close button
+is `UIPanelCloseButton` (`Blizzard_SharedXML/Mainline/SharedUIPanelTemplates.xml:148`).
 
 ## Tests
 
