@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0
+
+- The addon now ships the recipes of every profession (`Data/Recipes.lua`): thresholds, reagents, the skill needed
+  to learn each recipe and what the trainer charges. It plans any profession out of the box; no file from a PC tool
+  is needed. Prices still come from TradeSkillMaster in game.
+- A trainer recipe is planned from the skill where you can learn it, through its orange range, with a Train step
+  that shows the price. Open your trainer once and the addon keeps the skill each recipe asks for.
+- Until a trainer is read, the plan assumes the usual ranks (75, 150, 225, 300) and runs past your current cap.
+- Recipe items: one you can buy is planned from TSM's price, or from its vendor when the data names one and that is
+  cheaper. One with no auction price today, one that binds when picked up, and a recipe not confirmed obtainable
+  are shown as shortcuts that say why, with Use it and Hide.
+- `/skillup cost` prints what levelling each profession to 300 costs at today's prices, the skill ranges nothing
+  covers, and how many prices TSM lacks. `/skillup cost tailoring` prints one.
+- `Data/Custom.lua` holds your own changes: a recipe's learn skill, source or reagents, a recipe to leave out,
+  vendor reagents, guide NPCs. `Data/Custom.example.lua` shows the shape. A bad entry is named in chat and left
+  out; the rest applies.
+- The "TSM data age unknown" line is gone: the age is only shown when it is known.
+- For maintainers: `tools/gen_recipes.py` rebuilds the data from the wago.tools export of the client
+  (`--check` lists uncovered skill ranges), with `tools/data/overlay.json` on top.
+
 ## 0.2.16
 
 - The More tab has controls for the planner's options: "Buy for bad luck" (50% to 99%), "Effort per craft" with - and

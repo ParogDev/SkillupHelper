@@ -1,8 +1,9 @@
 -- Shape of Data/Plan.lua (version 2), the file a price tool on your PC writes (tools/tsm/skillup_lua.py in the
--- scaffolding; gitignored here, listed in the TOC, so a /reload picks up a new one). The planner prices from TSM live
--- and uses this file for what the client cannot tell it: thresholds, reagents of unlearned recipes, how a recipe is
--- learned, and fallback prices when TSM_API returns none. Without the file the panel still lists what you can craft
--- from stock, colours from the client. This example is not loaded.
+-- scaffolding; gitignored here, listed in the TOC, so a /reload picks up a new one). The file is optional: the
+-- recipes of every profession ship in Data/Recipes.lua and the planner prices from TSM live. What this file adds, for
+-- the professions and items it has, goes on top of the shipped data: fallback prices when TSM_API returns none
+-- (items[].mv), sale values (recipes[].sell / takes), the price age (pricesAt) and the offline rows. This example is
+-- not loaded.
 local _, ns = ...
 ns.Data = ns.Data or {}
 ns.Data.plan = {
