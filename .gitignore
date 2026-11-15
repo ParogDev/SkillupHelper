@@ -4,6 +4,9 @@
 # Written on this PC by tools/tsm/skillup_lua.py (scaffolding repo): prices from your own auction house.
 Data/Plan.lua
 Data/Plan.lua.tmp
+# No longer read since 0.3.2 (SkillupHelper_Custom replaces it); kept ignored so a leftover personal file is never
+# committed to this public repo.
+Data/Custom.lua
 # tools/gen_recipes.py: downloaded client tables and the half-written output.
 tools/.cache/
 Data/Recipes.lua.tmp

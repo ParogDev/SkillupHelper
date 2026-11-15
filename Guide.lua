@@ -257,7 +257,7 @@ function G.known(seeds, learned, shipped, foreign)
 end
 
 -- Where a record comes from: "learned" (a window the player opened; it wins over the other two), "seed"
--- (Data/Npcs.lua, Data/Custom.lua) or "shipped" (Data/Trainers.lua).
+-- (Data/Npcs.lua, SkillupHelper_Custom) or "shipped" (Data/Trainers.lua).
 function G.sourceOf(npc)
 	return npc.shipped and "shipped" or npc.seed and "seed" or "learned"
 end
@@ -704,7 +704,7 @@ function G.placeNear(map, x, y, seeds, mapName)
 end
 
 -- Turns Data/Npcs.lua's rows ({ ..., role, sells = { ids } }) into NPC records. confirmed: a set of ids whose
--- position is the player's own (Data/Custom.lua rows); the others are Classic positions (G.confidenceOf).
+-- position is the player's own (SkillupHelper_Custom rows); the others are Classic positions (G.confidenceOf).
 local ROLE_TRAINS = { lwtrainer = "Leatherworking", cooktrainer = "Cooking" }
 function G.seedRecords(rows, confirmed)
 	local out = {}
@@ -724,7 +724,7 @@ function G.seedRecords(rows, confirmed)
 			y = r.y,
 			place = r.place,
 			sells = sells,
-			-- role "trainer" (Data/Custom.lua) names its profession itself
+			-- role "trainer" (SkillupHelper_Custom) names its profession itself
 			trains = ROLE_TRAINS[r.role] or (r.role == "trainer" and r.trains or nil),
 			auction = r.role == "auction" or nil,
 			seed = true,

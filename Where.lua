@@ -3215,7 +3215,12 @@ function W.dataRows(ctx)
 			#errs > 0 and errs or nil
 		)
 	else
-		add("custom", "Your Custom file", "absent", "not present: no SkillupHelper_Custom addon loaded")
+		add(
+			"custom",
+			"Your Custom file",
+			"absent",
+			"not present: no SkillupHelper_Custom addon loaded (Data/Custom.lua is no longer read)"
+		)
 	end
 	return rows
 end

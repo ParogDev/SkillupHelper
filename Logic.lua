@@ -934,7 +934,7 @@ function L.dataStatus(shipped, version, buildNumber)
 	return ("%s Your game is build %s."):format(line, game), false
 end
 
--- Seed NPCs for the guide: Data/Npcs.lua's rows, then Data/Custom.lua's (a custom row with a shipped row's id
+-- Seed NPCs for the guide: Data/Npcs.lua's rows, then SkillupHelper_Custom's (a custom row with a shipped row's id
 -- replaces it).
 function L.npcRows(shipped, custom)
 	local out, at = {}, {}

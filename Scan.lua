@@ -404,7 +404,7 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 	for spell, r in pairs(prof.recipes or {}) do
 		recipeKey[#recipeKey + 1] = r.live and (spell .. "~" .. tostring(r.y) .. "-" .. tostring(r.g))
 			or tostring(spell)
-		-- how and when an unlearned recipe is learned (a trainer visit or Data/Custom.lua changes it): replans
+		-- how and when an unlearned recipe is learned (a trainer visit or SkillupHelper_Custom changes it): replans
 		if not learned[spell] and (r.learn or r.src) then
 			learnKey[#learnKey + 1] = spell .. "@" .. tostring(r.learn) .. tostring(r.src)
 		end
