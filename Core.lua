@@ -66,25 +66,33 @@ end
 -- The cap model's SavedVariables, made on first use (ns.capTables): ranks[skillLineID][cap] learned at the trainer;
 -- exclude = { dungeon, ahPatterns, special, notNow[spellID], allow[spellID] (gated recipes to use), swap[spellID] = spellID };
 -- trainerSeen[skillLineID][spellID or lowercased name] = true for the recipes an ordinary trainer lists.
+-- What the game taught (trainer ranks and learn ranks, recipe colours, vendors, NPC positions, skill-up counts) lives
+-- in saved.learned (Learned.lua), the one table that is safe to share: ns.capTables moves the pre-0.3.0 fields
+-- (ranks, colorSeen, trainerReq, guide.npcs) into it.
+local learned
 function ns.capTables(saved)
-	saved.ranks = type(saved.ranks) == "table" and saved.ranks or {}
+	local locale = GetLocale and GetLocale() or nil
+	learned = ns.Learned.attach(saved, ns.Learned.build(), locale)
 	saved.exclude = type(saved.exclude) == "table" and saved.exclude or {}
 	saved.exclude.notNow = type(saved.exclude.notNow) == "table" and saved.exclude.notNow or {}
 	saved.exclude.allow = type(saved.exclude.allow) == "table" and saved.exclude.allow or {}
 	-- swap[Y] = X: "use X instead of Y" (the Other way rows of a step)
 	saved.exclude.swap = type(saved.exclude.swap) == "table" and saved.exclude.swap or {}
 	saved.trainerSeen = type(saved.trainerSeen) == "table" and saved.trainerSeen or {}
-	-- colorSeen[spellID] = { o = highest skill seen orange, y = lowest seen yellow or green }, for learned recipes the
-	-- export does not list: it narrows their estimated yellow threshold (Scan.yellowOf)
-	saved.colorSeen = type(saved.colorSeen) == "table" and saved.colorSeen or {}
-	-- trainerReq[skillLineID][spellID or lowercased name] = { skill, cost }: what a trainer asks for each recipe it
-	-- lists, read in game (Scan.readTrainer). It wins over the data's learn ranks (Logic.withTrainerReq).
-	saved.trainerReq = type(saved.trainerReq) == "table" and saved.trainerReq or {}
+	-- learned.colors[spellID] = { o = highest skill seen orange, y = lowest seen yellow or green, ... }: for learned
+	-- recipes the export does not list it narrows their estimated yellow threshold (Scan.yellowOf).
+	-- learned.trainers[skillLineID][spellID or lowercased name] = { skill, cost }: what a trainer asks for each recipe
+	-- it lists, read in game (Scan.readTrainer). It wins over the data's learn ranks (Logic.withTrainerReq).
 	return saved
 end
 
 function ns.savedColorSeen()
-	return db and db.colorSeen or nil
+	return learned and learned.colors or nil
+end
+
+-- SkillupHelperDB.learned, or nil before the SavedVariables load.
+function ns.learned()
+	return learned
 end
 
 -- What Data/Plan.lua holds, for the selftest; nil when the file is absent.
@@ -133,6 +141,9 @@ local function refreshSelftest()
 	st.trips = db.trips
 	-- cap model: rank entries saved at trainers, and the last trainer read's broken link (nil when it read fine)
 	st.ranksSeen = ns.ranksSeen()
+	-- what the game taught, as counts (the table itself is SkillupHelperDB.learned), and the last craft counted
+	st.learned = ns.Learned.status(learned)
+	st.skillups = ns.skillupStatus
 	st.lastTrainerRead = ns.lastTrainerRead
 	st.tsm = ns.TSM.status()
 	st.craftedEvent = ns.craftedEvent
@@ -201,6 +212,47 @@ function ns.guard(where, fn, ...)
 	return ok
 end
 
+-- Skill-ups per craft, for learned.skillups: a craft cast of a recipe of the open profession is kept until a scan
+-- at least SETTLE seconds later shows the skill, and the points gained since are its skill-ups (Learned.settle).
+-- Counted, never planned from: the numbers are for whoever checks the skill-up chance formula against the game.
+local SETTLE = 1.5
+local crafting = nil -- { line, skill, cap, recipes } of the last scan
+local crafts, craftsAt = {}, 0
+ns.skillupStatus = { casts = 0, counted = 0 }
+
+local function noteCraftCast(spellID)
+	if not learned or not ns.tradeSkillOpen or not crafting or type(spellID) ~= "number" then
+		return
+	end
+	if (issecretvalue and issecretvalue(spellID)) or type(crafting.recipes) ~= "table" then
+		return
+	end
+	if not crafting.recipes[spellID] or type(crafting.skill) ~= "number" then
+		return
+	end
+	local c = crafts[spellID] or { n = 0, skill = crafting.skill }
+	c.n = c.n + 1
+	crafts[spellID] = c
+	craftsAt = GetTime()
+	ns.skillupStatus.casts = ns.skillupStatus.casts + 1
+end
+
+local function settleCrafts(model)
+	local line = model and model.professionID
+	if next(crafts) and crafting and line == crafting.line and GetTime() - craftsAt >= SETTLE then
+		local n = ns.Learned.settle(learned, line, crafts, model.skill, crafting.cap)
+		ns.skillupStatus.counted = ns.skillupStatus.counted + n
+		ns.skillupStatus.last = { line = line, skill = model.skill, crafts = n }
+		crafts = {}
+	elseif next(crafts) and crafting and line ~= crafting.line then
+		crafts = {} -- another profession's window: the pending crafts cannot be settled against it
+	end
+	if not next(crafts) and line and type(model.skill) == "number" then
+		crafting =
+			{ line = line, skill = model.skill, cap = model.maxSkill, recipes = model.plan and model.plan.recipes }
+	end
+end
+
 local pending = false
 function ns.refresh()
 	if pending or not ns.UI.frame or not ns.UI.frame:IsShown() then
@@ -215,6 +267,7 @@ function ns.refresh()
 			model = { why = "scan failed: " .. tostring(model) }
 		end
 		ns.guard("draw", ns.UI.show, model)
+		ns.guard("skillups", settleCrafts, model)
 		ns.lastScan = ns.scanSummary(model)
 		ns.lastScan.dock = ns.dockKind
 		ns.lastScan.tsm = ns.TSM.status()
@@ -298,16 +351,16 @@ function ns.savedTrainerSeen(skillLineID)
 end
 
 function ns.savedTrainerReq(skillLineID)
-	return db and skillLineID and db.trainerReq and db.trainerReq[skillLineID] or nil
+	return learned and skillLineID and learned.trainers[skillLineID] or nil
 end
 
 function ns.savedRanks(skillLineID)
-	return db and skillLineID and db.ranks and db.ranks[skillLineID] or nil
+	return learned and skillLineID and learned.ranks[skillLineID] or nil
 end
 
 function ns.ranksSeen()
 	local n = 0
-	for _, byCap in pairs(db and db.ranks or {}) do
+	for _, byCap in pairs(learned and learned.ranks or {}) do
 		for _ in pairs(byCap) do
 			n = n + 1
 		end
@@ -318,7 +371,7 @@ end
 -- TRAINER_SHOW / TRAINER_UPDATE: save the rank services of a profession trainer. Not a profession trainer is "not
 -- now" and leaves the last diagnostic alone.
 function ns.onTrainer()
-	if not db then
+	if not db or not learned then
 		return
 	end
 	local ok, parsed, why, state = pcall(ns.Scan.readTrainer)
@@ -331,7 +384,8 @@ function ns.onTrainer()
 	end
 	if parsed and parsed.skillLine and #parsed.ranks > 0 then
 		-- the planner's cache key carries the ranks: the next scan replans on its own
-		ns.Scan.saveRanks(db.ranks, parsed.skillLine, parsed.ranks, time())
+		ns.Scan.saveRanks(learned.ranks, parsed.skillLine, parsed.ranks, time())
+		ns.Learned.stampRanks(learned, parsed.skillLine, parsed.ranks, ns.Learned.build())
 	end
 	if parsed and parsed.skillLine and next(parsed.seen or {}) then
 		local first = db.trainerSeen[parsed.skillLine] == nil
@@ -349,11 +403,7 @@ function ns.onTrainer()
 	end
 	if parsed and parsed.skillLine and next(parsed.req or {}) then
 		-- the planner's cache key carries each recipe's learn rank: the next scan replans
-		local req = db.trainerReq[parsed.skillLine] or {}
-		for key, e in pairs(parsed.req) do
-			req[key] = e
-		end
-		db.trainerReq[parsed.skillLine] = req
+		ns.Learned.noteTrainer(learned, parsed.skillLine, parsed.req, ns.Learned.build())
 	end
 	ns.lastTrainerRead = why
 end
@@ -502,6 +552,8 @@ end
 
 local function close()
 	ns.tradeSkillOpen = false
+	-- crafts not settled by a scan are dropped: without the window the skill they ended at is not known
+	crafts, crafting = {}, nil
 	stopTicker()
 	ns.UI.setShown(false, false)
 end
@@ -530,6 +582,9 @@ end
 local okCrafted, errCrafted = pcall(f.RegisterEvent, f, "TRADE_SKILL_ITEM_CRAFTED_RESULT")
 ns.craftedEvent = okCrafted and "registered"
 	or ("TRADE_SKILL_ITEM_CRAFTED_RESULT not registered: " .. tostring(errCrafted))
+-- The player's own casts: a craft of the open profession is a try at a skill-up (noteCraftCast).
+ns.skillupStatus.event = pcall(f.RegisterUnitEvent, f, "UNIT_SPELLCAST_SUCCEEDED", "player") and "registered"
+	or "UNIT_SPELLCAST_SUCCEEDED not registered: crafts are not counted"
 -- A vendor opening or closing turns the Next card's Buy button on or off (the same events under TSM's vendoring
 -- window, which replaces MerchantFrame but not the merchant).
 for _, e in ipairs({ "MERCHANT_SHOW", "MERCHANT_CLOSED", "MERCHANT_UPDATE" }) do
@@ -566,7 +621,13 @@ for _, e in ipairs(AH_EVENTS) do
 		ns.UI.stats.ah.unregistered[e] = tostring(err)
 	end
 end
-f:SetScript("OnEvent", function(_, event, arg1, arg2)
+f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
+	if event == "UNIT_SPELLCAST_SUCCEEDED" then
+		if arg1 == "player" then
+			ns.guard("skillups", noteCraftCast, arg3)
+		end
+		return
+	end
 	if isAhEvent[event] then
 		ns.guard("ah", ns.UI.ahEvent, event, arg1, arg2)
 		return
@@ -652,7 +713,8 @@ function ns.capCommand(cmd, arg)
 	end
 	if cmd == "ranks" then
 		local ids = {}
-		for id in pairs(db.ranks) do
+		local saved = learned and learned.ranks or {}
+		for id in pairs(saved) do
 			ids[#ids + 1] = id
 		end
 		table.sort(ids)
@@ -663,7 +725,7 @@ function ns.capCommand(cmd, arg)
 		for _, id in ipairs(ids) do
 			local p = plan and plan.professions and plan.professions[id]
 			print(("SkillupHelper: %s (%s)"):format(p and p.name or "skill line", tostring(id)))
-			for _, r in ipairs(ns.Scan.ranksArray(db.ranks[id])) do
+			for _, r in ipairs(ns.Scan.ranksArray(saved[id])) do
 				print(
 					("  %s to %s: skill %s, level %s, cost %s, at %s"):format(
 						unknown(r.name),

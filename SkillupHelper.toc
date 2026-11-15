@@ -20,6 +20,7 @@ Data\Npcs.lua
 Data\Spots.lua
 Data\Trainers.lua
 Logic.lua
+Learned.lua
 Guide.lua
 Planner.lua
 Scan.lua

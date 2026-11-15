@@ -33,11 +33,12 @@ local status = {
 	worldMisses = 0,
 }
 local gdb -- SkillupHelperDB.guide
+local npcs = {} -- SkillupHelperDB.learned.npcs: the NPCs whose window was opened (guide.npcs before 0.3.0)
 local seeds = {}
 local cur -- the step to do now: { key, step, profession, color, base = { [item] = count at plan time }, hadNeeds }
 local open -- the window open now: { kind, npc } (npc nil when it could not be recorded)
 local worldCache = {}
-local knownList -- Guide.known(seeds, gdb.npcs), rebuilt only after a learn
+local knownList -- Guide.known(seeds, npcs), rebuilt only after a learn
 local ghost -- a fade-out finished in combat: the chip is shown at alpha 0 until it can be hidden
 local view = { phase = "none" } -- the last evaluation: phase, need, pick, d (Guide.describe), since
 local want = { visible = false, row = false, name = nil, star = false }
@@ -182,6 +183,35 @@ local function merchantItems()
 	return out
 end
 
+-- What the open vendor asks: { { item, price, stock }, ... } with price in copper for one item (nil when it costs
+-- something other than money) and stock nil when unlimited. C_MerchantFrame.GetItemInfo gives a MerchantItemInfo
+-- (price for a stack of stackCount, numAvailable -1 = unlimited). The price is the one this character is shown: a
+-- reputation discount is in it.
+local function merchantStock()
+	local out = {}
+	local okN, n = pcall(GetMerchantNumItems)
+	if not okN or type(n) ~= "number" or secret(n) or not (C_MerchantFrame and C_MerchantFrame.GetItemInfo) then
+		return out
+	end
+	for i = 1, n do
+		local okId, item = pcall(GetMerchantItemID, i)
+		local okInfo, info = pcall(C_MerchantFrame.GetItemInfo, i)
+		if okId and type(item) == "number" and not secret(item) and okInfo and type(info) == "table" then
+			local price, stack, left = info.price, info.stackCount, info.numAvailable
+			local sold = { item = item }
+			if type(price) == "number" and not secret(price) and not info.hasExtendedCost and price > 0 then
+				local per = (type(stack) == "number" and not secret(stack) and stack > 0) and stack or 1
+				sold.price = math.floor(price / per * 100 + 0.5) / 100
+			end
+			if type(left) == "number" and not secret(left) and left >= 0 then
+				sold.stock = left
+			end
+			out[#out + 1] = sold
+		end
+	end
+	return out
+end
+
 local function trainerLine()
 	local okN, n = pcall(GetNumTrainerServices)
 	if not okN or type(n) ~= "number" or secret(n) then
@@ -271,7 +301,7 @@ end
 
 local function countLearned()
 	local n, t = 0, 0
-	for _, npc in pairs(gdb and gdb.npcs or {}) do
+	for _, npc in pairs(gdb and npcs or {}) do
 		n = n + 1
 		if type(npc.teaches) == "table" then
 			t = t + 1
@@ -312,7 +342,15 @@ local function learn(kind)
 	local okInfo, info = pcall(C_Map.GetMapInfo, rec.map)
 	local mapName = okInfo and type(info) == "table" and not secret(info.name) and info.name or nil
 	rec.place = G.placeNear(rec.map, rec.x, rec.y, seeds, mapName)
-	local npc = gdb and G.learn(gdb.npcs, rec, time())
+	local npc = gdb and G.learn(npcs, rec, time())
+	if npc and kind == "vendor" and type(rec.id) == "number" then
+		-- what it sells and for how much, into the shared table (learned.vendors)
+		ns.guard("vendor stock", function()
+			local learned = ns.Learned.attach(SkillupHelperDB)
+			local v = ns.Learned.noteVendor(learned, rec, merchantStock(), ns.Learned.build())
+			status.lastVendor = v and { id = rec.id, map = rec.map } or "no item read from the vendor window"
+		end)
+	end
 	if npc then
 		knownList = nil
 		open.npc = npc
@@ -650,7 +688,7 @@ function evaluate()
 			cur.hadNeeds, cur.lastNeed = true, need
 			local h, hwhy = here()
 			local servers
-			knownList = knownList or G.known(seeds, gdb.npcs)
+			knownList = knownList or G.known(seeds, npcs)
 			pick, servers, excluded = G.nearest(knownList, need, h, world)
 			status.servers, status.excluded = servers, excluded
 			certain = pick and pick.certain
@@ -1110,7 +1148,8 @@ local function init()
 		g = {}
 		SkillupHelperDB.guide = g
 	end
-	g.npcs = type(g.npcs) == "table" and g.npcs or {}
+	-- the learned NPCs live in the shared table (Learned.attach moves guide.npcs there once)
+	npcs = ns.Learned.attach(SkillupHelperDB, ns.Learned.build()).npcs
 	g.stopped = type(g.stopped) == "table" and g.stopped or {}
 	local p = g.pin
 	if type(p) == "table" and type(p.map) == "number" and type(p.x) == "number" and type(p.y) == "number" then
@@ -1126,7 +1165,7 @@ local function init()
 	status.seeds = #seeds
 	-- records learned before 0.2.8 have no town: give them one (a seed's nearby, else the map's name)
 	ns.guard("guide towns", function()
-		for _, npc in pairs(g.npcs) do
+		for _, npc in pairs(npcs) do
 			if type(npc) == "table" and npc.place == nil and npc.map then
 				local okInfo, info = pcall(C_Map.GetMapInfo, npc.map)
 				local mapName = okInfo and type(info) == "table" and not secret(info.name) and info.name or nil
@@ -1231,7 +1270,7 @@ function GUI.where(place, r)
 	if not gdb or type(r) ~= "table" or not NEED_KIND[place] then
 		return nil
 	end
-	knownList = knownList or G.known(seeds, gdb.npcs)
+	knownList = knownList or G.known(seeds, npcs)
 	-- one answer per row a second (a card build asks for every row, and the strip can trigger redraws), and only
 	-- NPCs with a town count: the nearest one without a town would hide a farther one that names it
 	local now = GetTime()

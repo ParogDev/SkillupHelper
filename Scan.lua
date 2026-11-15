@@ -535,6 +535,11 @@ function S.build(plan)
 				end
 				-- secret in an instance: no colour, the recipe still plans from its thresholds
 				local difficulty = clean(r.relativeDifficulty)
+				if difficulty ~= nil and colorSeen and ns.Learned then
+					-- every learned recipe's colour at this skill, as the client shows it (learned.colors): how a
+					-- hotfixed threshold is noticed
+					ns.Learned.noteColor(colorSeen, id, skill, difficulty, ns.Learned.build())
+				end
 				if clean(r.canSkillUp) == false then
 					difficulty = 3
 				end
