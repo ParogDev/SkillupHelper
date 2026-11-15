@@ -2,6 +2,27 @@
 
 ## 0.3.0
 
+- A journal window with six pages. Overview lists every profession with your skill, the cost to 300 in materials,
+  recipes and training, and each skill range the addon cannot plan, with the reason. Path lays one profession out
+  from 1 to 300 on a timeline with its steps. Where ranks the places to level Mining, Herbalism, Skinning, Fishing
+  and Lockpicking at your skill, with the route, mob levels, flight point and map. Shopping, Alts and mail, and
+  Settings and data hold the rest.
+- Open it with the new button on the panel (it pulses once after an install or update), the addon menu by the
+  minimap, a key binding (Key Bindings > AddOns), or `/skillup journal`. `/skillup` with no profession window open
+  opens it too; with one open it still shows or hides the panel.
+- "Track this spot" on the Where page puts a small tracker on screen: next stop, distance, an arrow, the stops
+  done. A click opens a card with the map. The spot is kept per character. While it shows, the guide chip steps
+  aside, so only one of them is ever up.
+- The Mining window gets a card under the panel with the best node spot for your skill.
+- Every slash-command setting is a control on the Settings page and writes the same setting.
+- Without TradeSkillMaster auction data the journal says what to do; costs then count vendor items only.
+- Where to level world skills (`Data/Spots.lua`) and every trainer and recipe vendor (`Data/Trainers.lua`) ship with
+  the addon. Positions come from Classic data and are marked so until checked in Forever.
+- Gathering and picking locks near a mapped spot is counted (tries and skill-ups, in `learned.skillups`), so shared
+  files can correct the unconfirmed colour bands.
+- `Data/Custom.lua` can add, correct or leave out spots and trainers (`spots`, `trainers`).
+- `AGENTS.md` explains the folder, the data and how to change a plan, for AI assistants;
+  `docs/first-launch-checklist.md` lists what the game still has to confirm.
 - The addon now ships the recipes of every profession (`Data/Recipes.lua`): thresholds, reagents, the skill needed
   to learn each recipe and what the trainer charges. It plans any profession out of the box; no file from a PC tool
   is needed. Prices still come from TradeSkillMaster in game.
