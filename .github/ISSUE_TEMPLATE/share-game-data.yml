@@ -1,0 +1,47 @@
+name: Share what my game learned
+description: Attach your SkillupHelper SavedVariables file so trainer costs, learn ranks, vendors and NPC positions the addon saw in your game can go into the shipped data.
+title: "Game data: "
+labels: ["game data"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. The addon writes down what it sees while you play: what a trainer asks for a recipe or a rank, what a vendor sells and for how much, where the trainers and vendors you opened stand, the skill at which a recipe changed colour, and how often a craft gave a skill point. One table of your SavedVariables file holds all of it, `learned`, and that table is what gets merged.
+
+        **Where the file is**
+
+        `World of Warcraft\_forever_\WTF\Account\<your account>\SavedVariables\SkillupHelper.lua`
+
+        The game writes it when you log out or `/reload`, so do one of those first. You need SkillupHelper 0.3.0 or newer.
+
+        **What it contains**
+
+        - `learned`: game facts only. Spell, item and NPC ids, NPC names, map positions, skill numbers, prices in copper, and the client build they were seen on. No character, realm, account or guild name is ever written there.
+        - The rest of the file is your own settings and lists. Some of it does name your characters and realm (the mail queue, for one). The import tool reads only `learned` and never prints or keeps anything else, but the attachment on this issue is public. If you would rather not post the rest, open the file in a text editor and delete everything except the `["learned"] = { ... },` block inside `SkillupHelperDB = { ... }`.
+
+        The full list of what the addon saves, and which fields are private, is in [docs/data-sources.md](https://github.com/ParogDev/SkillupHelper/blob/main/docs/data-sources.md).
+  - type: textarea
+    id: file
+    attributes:
+      label: The file
+      description: Drag SkillupHelper.lua here. GitHub does not take .lua attachments, so rename it to SkillupHelper.lua.txt or zip it first.
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Game build
+      description: Optional. It is in the file as well (`learned.build`).
+      placeholder: 1.60.1.70938
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything the data got wrong
+      description: Optional. A recipe that turned yellow earlier than the addon said, a trainer that is not where the map shows, a vendor that does not sell what the addon claims.
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Before you submit
+      options:
+        - label: I know the attachment is public, and I either removed everything outside the `learned` table or do not mind it being there.
+          required: true
