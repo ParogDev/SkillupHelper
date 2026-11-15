@@ -8,6 +8,7 @@
 - The cure count covers the step. "First craft" and the craft button ask for every cured hide the step needs beyond
   the ones already in your bags, in one go, instead of a step-sized sliver of it.
 - A cured hide already in your bags counts toward the step, also when the step cures the rest.
+- A step you saved an AH list for still cures the spare hides in your bags before it asks you to buy cured ones.
 - When the step on the card needs nothing bought, its shopping line reads "Shopping for later steps", so it no
   longer looks like it contradicts "You have every reagent".
 
