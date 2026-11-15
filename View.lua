@@ -591,7 +591,7 @@ local function nextCard(st, env, listed)
 	card.pre = {}
 	for _, p in ipairs(st.pre or {}) do
 		local name = env.nameOf(p.item)
-		card.pre[#card.pre + 1] = { count = p.count, name = name }
+		card.pre[#card.pre + 1] = { count = p.count, name = name, item = p.item, spell = p.spell }
 		card.notes[#card.notes + 1] = ("Craft %d %s first"):format(p.count, name)
 	end
 	if st.alt then
@@ -1691,7 +1691,12 @@ function V.actions(card, env)
 	local want = math.max(1, math.floor(card.crafts or 1))
 	local n = math.max(0, math.min(want, math.floor(can)))
 	local craft = { id = "craft", spell = card.spell, count = n, enabled = n > 0 }
-	if n > 0 then
+	-- a reagent the step crafts first (curing owned hides): while the bags hold fewer than the step needs and the
+	-- client can make some, Craft makes that reagent, and Show recipe points at its recipe
+	local pre = V.preAction(card, env)
+	if pre then
+		craft = pre
+	elseif n > 0 then
 		craft.label = ("Craft %d"):format(n)
 		if n < want then
 			craft.tip = ("Materials for %d of the %d crafts"):format(n, want)
@@ -1707,9 +1712,35 @@ function V.actions(card, env)
 	end
 	out[#out + 1] = craft
 	if env.dock == "blizzard" then
-		out[#out + 1] = { id = "open", spell = card.spell, enabled = true, label = "Show recipe" }
+		out[#out + 1] = { id = "open", spell = craft.spell, enabled = true, label = "Show recipe" }
 	end
 	return out
+end
+
+-- The Craft button for the first pre-craft of a card still short in the bags ({ count, item, spell } from the
+-- planner's step.pre; count is the step's whole need, so the bags' units of that reagent count against it), when
+-- the client can make at least one now. nil when every pre-craft is covered, not learned or not craftable yet (the
+-- step's own button then says what is missing).
+function V.preAction(card, env)
+	for _, p in ipairs(card.pre or {}) do
+		if type(p.spell) == "number" and type(p.count) == "number" then
+			local held = type(env.have) == "function" and p.item and env.have(p.item) or 0
+			local short = math.ceil(p.count - (type(held) == "number" and held or 0))
+			if short > 0 then
+				local can = env.craftable(p.spell)
+				local n = type(can) == "number" and math.min(short, math.floor(can)) or 0
+				if n > 0 then
+					local a = { id = "craft", spell = p.spell, count = n, enabled = true, pre = true }
+					a.label = ("Craft %d %s first"):format(n, p.name)
+					if n < short then
+						a.tip = ("Materials for %d of the %d %s"):format(n, short, p.name)
+					end
+					return a
+				end
+			end
+		end
+	end
+	return nil
 end
 
 -- The panel's height: `fixed` (what always shows) plus the optional pieces that fit under `limit` (the docked
