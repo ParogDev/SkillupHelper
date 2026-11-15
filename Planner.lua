@@ -514,6 +514,8 @@ function P.prepare(input)
 				noResale = not ctx.resale or nil,
 			}
 			local plain = pairsOf(r.mats)
+			-- base.plain: the recipe's own reagents, what a step built from any variant supplies (bags, crafts, buys)
+			base.plain = plain
 			local list = { newOption(ctx, base, plain, nil, 1) }
 			-- intermediates through learned recipes: one variant with every reagent at its cheaper route
 			local mats, pre, ok, differs = {}, {}, true, false
@@ -1265,12 +1267,25 @@ local function labelParts(ctx, parts, have)
 	return out
 end
 
+local function preKinds(o)
+	local n = 0
+	for _ in pairs(o.pre or {}) do
+		n = n + 1
+	end
+	return n
+end
+
 local function segmentsOf(parts)
 	local segs = {}
 	for _, part in ipairs(parts) do
 		local last = segs[#segs]
-		-- one recipe over one contiguous range is one step: stock against buy is a materials line, not a boundary
-		if last and ((part.gap and last.gap) or (not part.gap and last.o == part.o)) then
+		-- one recipe over one contiguous range is one step: stock against buy is a materials line, not a boundary, and
+		-- so is the variant (cure the owned hides, then buy cured ones): the step's supply pass decides per reagent
+		if last and ((part.gap and last.gap) or (not part.gap and not last.gap and last.o.spell == part.o.spell)) then
+			-- the variant that crafts the most intermediates speaks for the step: it crafts what the bags allow
+			if part.o ~= last.o and preKinds(part.o) > preKinds(last.o) then
+				last.o = part.o
+			end
 			if part.source == "buy" or last.source == "buy" then
 				last.source = "buy"
 			elseif part.source ~= last.source then
@@ -1294,6 +1309,75 @@ local function segmentsOf(parts)
 		end
 	end
 	return segs
+end
+
+-- What `crafts` crafts of o take, reagent by reagent: the bags first (pool, drawn down), then for an intermediate the
+-- variant crafts (o.pre) the craft, then the auction house or vendor. A stock-only variant crafts only as many as its
+-- owned non-vendor raws allow (15 Medium Hide: 15 cures, Salt bought) and buys the rest of the intermediate ready-
+-- made, as at buy prices that is the cheaper route. A variant that buys the intermediate cures from spare raws too
+-- (spare: the stock pass's rem, drawn down here). Returns uses, buys and made: item -> units.
+local function supplyOf(ctx, o, crafts, pool, spare)
+	local uses, buys, made = {}, {}, {}
+	local function supply(i, need, depth)
+		local use = math.min(math.max(pool[i] or 0, 0), need)
+		if use > 0 then
+			pool[i] = pool[i] - use
+			uses[i] = (uses[i] or 0) + use
+		end
+		local short = need - use
+		if short <= EPS then
+			return
+		end
+		local mk = ctx.makers[i]
+		-- a variant that buys the intermediate still cures from owned raws first (a committed step keeps the plain
+		-- variant, and its "buy 7 Cured Medium Hide" must not stand while 10 Medium Hide sit in the bags)
+		-- Only true spares (spare: what no step of the plan counts on, rule 2) feed this.
+		local ownedRaw = false
+		if mk and not o.pre[i] and depth == 0 and spare then
+			for r in pairs(mk.mats) do
+				local own = math.min(pool[r] or 0, spare[r] or 0)
+				ownedRaw = ownedRaw or (not isVendor(ctx, r) and own >= mk.mats[r] - EPS)
+			end
+		end
+		if mk and (o.pre[i] or ownedRaw) and depth < 3 then
+			local c = short
+			if o.stockOnly or not o.pre[i] then
+				for _, r in ipairs(sortedKeys(mk.mats)) do
+					if not isVendor(ctx, r) then
+						local own = math.max(pool[r] or 0, 0)
+						if not o.pre[i] then
+							own = math.min(own, spare[r] or 0)
+						end
+						c = math.min(c, math.floor(own / mk.mats[r] + EPS) * mk.n)
+					end
+				end
+			end
+			if c > EPS and not o.pre[i] then
+				local casts = math.ceil(c / mk.n - EPS)
+				for r, q in pairs(mk.mats) do
+					if spare[r] then
+						spare[r] = math.max(0, spare[r] - casts * q)
+					end
+				end
+			end
+			if c > EPS then
+				made[i] = (made[i] or 0) + c
+				local casts = math.ceil(c / mk.n - EPS)
+				for _, r in ipairs(sortedKeys(mk.mats)) do
+					supply(r, casts * mk.mats[r], depth + 1)
+				end
+				short = math.max(0, short - c)
+			end
+		end
+		if short > EPS then
+			buys[i] = (buys[i] or 0) + short
+		end
+	end
+	local plain = o.plain or o.mats
+	for _, i in ipairs(sortedKeys(plain)) do
+		supply(i, plain[i] * crafts, 0)
+	end
+	return uses, buys, made
 end
 
 -- Expected skill points of `crafts` crafts of o from skill `s` (fractional), the chance falling as skill rises.
@@ -1763,6 +1847,11 @@ local function finishCore(ctx, baseline, have, commits, own)
 		pool[i] = q
 	end
 	local sold = {}
+	-- raws no step counts on (the stock pass's rem): a step that buys an intermediate cures from these first
+	local spareRaw = {}
+	for i, q in pairs(st.rem) do
+		spareRaw[i] = q
+	end
 	local cur = ctx.skill
 	local steps = plan.steps
 	for idx, seg in ipairs(segs) do
@@ -1917,14 +2006,12 @@ local function finishCore(ctx, baseline, have, commits, own)
 			for i, q in pairs(pool) do
 				poolBefore[i] = q
 			end
-			for _, i in ipairs(sortedKeys(o.mats)) do
-				local need = o.mats[i] * crafts
-				local use = math.min(pool[i] or 0, need)
-				if use > 0 then
-					pool[i] = (pool[i] or 0) - use
-					step.used[#step.used + 1] = { item = i, count = math.floor(use + EPS) }
-				end
-				local count = math.ceil(need - use - EPS)
+			local uses, buys, made = supplyOf(ctx, o, crafts, pool, spareRaw)
+			for _, i in ipairs(sortedKeys(uses)) do
+				step.used[#step.used + 1] = { item = i, count = math.floor(uses[i] + EPS) }
+			end
+			for _, i in ipairs(sortedKeys(buys)) do
+				local count = math.ceil(buys[i] - EPS)
 				if count > 0 then
 					local pr = ctx.price[i] or {}
 					-- TSM.prices leaves buy = false (not nil) for an item TradeSkillMaster has no price for
@@ -1943,13 +2030,19 @@ local function finishCore(ctx, baseline, have, commits, own)
 					end
 				end
 			end
-			for _, i in ipairs(sortedKeys(o.pre)) do
-				step.pre[#step.pre + 1] = {
-					item = i,
-					count = math.ceil(o.pre[i] * crafts - EPS),
-					spell = ctx.makers[i] and ctx.makers[i].spell,
-					n = ctx.makers[i] and ctx.makers[i].n,
-				}
+			for _, i in ipairs(sortedKeys(made)) do
+				local make = math.ceil(made[i] - EPS)
+				if make > 0 then
+					step.pre[#step.pre + 1] = {
+						item = i,
+						-- count: what the step takes of it from the bags, the units crafted now included (the card's
+						-- button crafts count minus the bags); make: the units crafted, at plan time
+						count = math.floor((uses[i] or 0) + EPS) + make,
+						make = make,
+						spell = ctx.makers[i] and ctx.makers[i].spell,
+						n = ctx.makers[i] and ctx.makers[i].n,
+					}
+				end
 			end
 			local soldHere = 0
 			if sells(o) then

@@ -507,7 +507,7 @@ describe("Worked examples", function()
 		assert.equal("Heavy Leather Ammo Pouch buy", seq[5])
 		assert.equal(5, #seq)
 		local llp = plan.steps[1]
-		assert.same({ { item = I.CURED, count = llp.crafts, spell = 3816, n = 1 } }, llp.pre)
+		assert.same({ { item = I.CURED, count = llp.crafts, make = llp.crafts, spell = 3816, n = 1 } }, llp.pre)
 		-- rule 2: the 92 Medium Leather belong to the Shoulders step, so Dark Leather Pants is no alternative here
 		assert.is_nil(llp.alt)
 		assert.same({ 115, 145 }, { plan.steps[3].from, plan.steps[3].to })
@@ -563,7 +563,7 @@ describe("Owned raw reagents of an intermediate", function()
 		local plan = P.run(input)
 		local st = plan.steps[1]
 		assert.equal("Light Leather Pants", st.name)
-		assert.same({ { item = I.CURED, count = st.crafts, spell = 3816, n = 1 } }, st.pre)
+		assert.same({ { item = I.CURED, count = st.crafts, make = st.crafts, spell = 3816, n = 1 } }, st.pre)
 		local bought = {}
 		for _, b in ipairs(st.buy) do
 			bought[b.item] = b.count
@@ -616,6 +616,139 @@ describe("Owned raw reagents of an intermediate", function()
 		assert.is_nil(bought[I.HIDE])
 		assert.equal(1, #st.pre)
 		assert.equal(I.CURED, st.pre[1].item)
+	end)
+end)
+
+-- Leatherworking 132-150 with the shipped recipes (Data/Recipes.lua): Hillman's Shoulders (3768) takes a Cured Medium
+-- Hide (4233), cured by 3817 from Medium Hide (4232) and Salt (4289). Prices as TSM had them in game: cured 478,
+-- hide 343, Salt 50 (vendor), so at buy prices the plan buys cured hides (curing saves under 20%).
+describe("Hillman's Shoulders from owned hides", function()
+	local P, LW
+	before_each(function()
+		P = load().Planner
+		local data = {}
+		assert(loadfile("Data/Recipes.lua"))("SkillupHelper", data)
+		LW = data.Data.recipes.professions[165].recipes
+	end)
+
+	local function input(skill, have, leather)
+		local recipes, learned = {}, {}
+		for _, spell in ipairs({ 3768, 3817, 3764, 7135, 2168, 3766, 9074 }) do
+			recipes[spell], learned[spell] = LW[spell], true
+		end
+		local price, items = F.prices()
+		price[4233] = { buy = 478, where = "ah", salvage = 239 }
+		price[4232] = { buy = 343, where = "ah", salvage = 171 }
+		price[4289] = { buy = 50, where = "vendor", salvage = 10 }
+		price[2319] = { buy = leather, where = "ah", salvage = leather / 2 }
+		price[2321] = { buy = 100, where = "vendor", salvage = 25 }
+		return {
+			skill = skill,
+			cap = 150,
+			recipes = recipes,
+			learned = learned,
+			price = price,
+			items = items,
+			have = have,
+			effort = 20,
+		}
+	end
+
+	local function bags()
+		return { [4232] = 15, [4289] = 15, [4233] = 1, [2319] = 100, [2321] = 8 }
+	end
+
+	local function shoulders(plan)
+		local out = {}
+		for _, st in ipairs(plan.steps) do
+			if st.kind == "craft" and st.spell == 3768 then
+				out[#out + 1] = st
+			end
+		end
+		return out
+	end
+
+	local function bought(st, item)
+		for _, b in ipairs(st.buy) do
+			if b.item == item then
+				return b.count
+			end
+		end
+		return 0
+	end
+
+	-- The cure variant ran out of hides partway and the plain recipe took the rest: two steps of one recipe back to
+	-- back ("Craft 15 133-143", then "Craft 4 143-144").
+	it("plans one recipe over a contiguous range as one step", function()
+		local list = shoulders(P.run(input(133, bags(), 250)))
+		assert.equal(1, #list)
+		assert.equal(133, list[1].from)
+	end)
+
+	-- Every cured hide the step needs beyond the bags is cured from the owned hides in one go; only what the hides
+	-- cannot cover is bought ready-made, and the cured hide in the bags counts.
+	it("cures the whole shortfall the owned hides cover, counting the cured hide in the bags", function()
+		local st = shoulders(P.run(input(133, bags(), 250)))[1]
+		assert.equal(1, #st.pre)
+		local pre = st.pre[1]
+		assert.equal(4233, pre.item)
+		assert.equal(3817, pre.spell)
+		assert.equal(math.min(15, st.crafts - 1), pre.make)
+		assert.equal(pre.make + 1, pre.count)
+		assert.equal(math.max(0, st.crafts - 1 - 15), bought(st, 4233))
+		assert.equal(0, bought(st, 4232))
+	end)
+
+	-- In game: 15 hides, 15 Salt, one cured hide, and the card said "You have 0 of 7 Cured Medium Hide; buy 7".
+	it("never buys cured hides while owned hides cover the step", function()
+		for _, leather in ipairs({ 30, 99, 150 }) do
+			local plan = P.run(input(133, bags(), leather))
+			local list = shoulders(plan)
+			assert.equal(1, #list)
+			local st = list[1]
+			if st.crafts <= 16 then
+				assert.equal(0, bought(st, 4233))
+			end
+			assert.equal(math.min(15, st.crafts - 1), st.pre[1].make)
+		end
+	end)
+
+	-- Not only cures: any intermediate a learned recipe makes. Heavy Armor Kit (3780) takes 5 Heavy Leather (4234),
+	-- made by 20649 from 5 Medium Leather (2319). At buy prices Heavy Leather (296) beats 5 Medium Leather (495); with
+	-- 200 Medium Leather in the bags the step makes its whole shortfall from them in one batch, the 3 owned first.
+	it("batches any intermediate from owned raws, not just cured hides", function()
+		local recipes = { [3780] = LW[3780], [20649] = LW[20649] }
+		local inp = input(146, { [2319] = 200, [4234] = 3 }, 99)
+		inp.recipes, inp.learned = recipes, { [3780] = true, [20649] = true }
+		inp.price[4234] = { buy = 296, where = "ah", salvage = 148 }
+		local plan = P.run(inp)
+		local list = {}
+		for _, st in ipairs(plan.steps) do
+			if st.kind == "craft" and st.spell == 3780 then
+				list[#list + 1] = st
+			end
+		end
+		assert.equal(1, #list)
+		local st = list[1]
+		assert.equal(1, #st.pre)
+		assert.same(
+			{ 4234, 20649, 5 * st.crafts - 3, 5 * st.crafts },
+			{ st.pre[1].item, st.pre[1].spell, st.pre[1].make, st.pre[1].count }
+		)
+		assert.equal(0, bought(st, 4234))
+		assert.equal(0, bought(st, 2319))
+	end)
+
+	-- A saved AH trip commits the step to the plain recipe (rule 3), which buys cured hides. Bought or not, the hides
+	-- in the bags are cured first: only the shortfall past them is bought.
+	it("a committed step cures owned hides before buying cured ones", function()
+		local inp = input(133, bags(), 99)
+		inp.commit = { { spell = 3768, to = 142 } }
+		local st = shoulders(P.run(inp))[1]
+		assert.equal(133, st.from)
+		assert.equal(1, #st.pre)
+		assert.equal(math.min(15, st.crafts - 1), st.pre[1].make)
+		assert.equal(math.max(0, st.crafts - 16), bought(st, 4233))
 	end)
 end)
 
