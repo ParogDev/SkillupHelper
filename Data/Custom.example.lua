@@ -79,4 +79,27 @@ ns.Data.custom = {
 		{ id = 3355, name = "Saru Steelfury", map = 1454, x = 76.6, y = 34.6, role = "trainer", trains = "Blacksmithing", place = "Orgrimmar" },
 		{ id = 3356, name = "Sumi", map = 1454, x = 75, y = 34.2, role = "trade", place = "Orgrimmar", sells = { 2880, 3466 } },
 	},
+
+	-- Places to level a world skill: [skill line] = { [spot id] = spot, or false }. 633 Lockpicking, 186 Mining,
+	-- 182 Herbalism, 393 Skinning (Fishing has zones and is not customisable yet). A new id adds a spot, a shipped id
+	-- (see Data/Spots.lua) replaces it, false leaves a shipped one out. A spot needs map (uiMap id), x and y (map
+	-- percent) and gets: what is there, by the target keys of Data/Spots.lua's skills[line].targets. pts (route
+	-- points, x, y pairs in map percent), zone, area and note are optional.
+	spots = {
+		-- [633] = {
+		-- 	["lock:custom:my-loop"] = {
+		-- 		map = 1418, zone = "Badlands", x = 41.5, y = 28.7,
+		-- 		gets = { { t = "<a target key>", n = 4 } },
+		-- 		pts = { 41.0, 28.0, 42.0, 29.5 },
+		-- 		note = "Up the west ramp",
+		-- 	},
+		-- 	["<a shipped spot id>"] = false,
+		-- },
+	},
+
+	-- Trainers and recipe vendors in the shape of Data/Trainers.lua: id, name, map, x, y, role ("trainer" with
+	-- trains = the profession's name, or "recipes"), faction ("A", "H" or "B"). A row with a shipped id replaces it.
+	trainers = {
+		-- { id = 999001, name = "My Trainer", map = 1454, x = 40, y = 60, role = "trainer", trains = "Mining", faction = "H" },
+	},
 }

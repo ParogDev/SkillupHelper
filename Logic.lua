@@ -567,8 +567,11 @@ function L.validateCustom(custom)
 		return clean, { "ns.Data.custom: must be a table" }
 	end
 	for _, k in ipairs(sortedKeysOf(custom)) do
-		if clean[k] == nil and k ~= "version" then
-			errors[#errors + 1] = ("%s: unknown section (recipes, vendor, items, npcs)"):format(tostring(k))
+		-- spots and trainers are checked and applied by Journal.lua (P.applyCustom)
+		if clean[k] == nil and k ~= "version" and k ~= "spots" and k ~= "trainers" then
+			errors[#errors + 1] = ("%s: unknown section (recipes, vendor, items, npcs, spots, trainers)"):format(
+				tostring(k)
+			)
 		end
 	end
 	local function section(name)

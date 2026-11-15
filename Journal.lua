@@ -13,9 +13,9 @@ local LOCKPICKING = 633
 local PRICE_PROBES = { 2589, 2770, 2447 }
 
 P.TEXT = {
-	noPrices = "TradeSkillMaster has no auction prices yet, so costs use the estimates shipped with the addon. "
-		.. "For live prices, let the TSM desktop app sync or scan the auction house once in TSM, then reopen this window.",
-	noTSM = "TradeSkillMaster is not loaded: costs use the estimates shipped with the addon.",
+	noPrices = "TradeSkillMaster has no auction prices yet: costs count vendor items only and list the rest as "
+		.. "missing prices. Let the TSM desktop app sync, or scan the auction house once in TSM, then reopen this window.",
+	noTSM = "TradeSkillMaster is not loaded: costs count vendor items only and list the rest as missing prices.",
 	costing = "working out the cost (a moment)",
 	firstRun = "SkillupHelper %s: the journal shows every profession, what levelling it costs and where to go. "
 		.. "Open it with the button on the profession panel, the addon menu by the minimap, or /skillup journal.",

@@ -411,7 +411,9 @@ describe("Provider: a view-model for every page", function()
 			end
 		end
 		assert.equal(a.P.TEXT.noPrices, tsm.detail)
-		assert.is_truthy(row(p.overview, 197).cost.total, "costed from the shipped estimates")
+		local t = row(p.overview, 197)
+		assert.is_truthy(t.cost.total, "costed from vendor prices")
+		assert.is_true(t.tsmMissing > 0, "the auction items are counted as missing prices")
 	end)
 end)
 

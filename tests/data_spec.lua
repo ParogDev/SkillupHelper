@@ -173,7 +173,7 @@ describe("effectivePlan", function()
 		assert.same({
 			"npcs[1]: map must be a uiMap id",
 			"npcs[2]: must be a table { id, name, map, x, y, role }",
-			"prices: unknown section (recipes, vendor, items, npcs)",
+			"prices: unknown section (recipes, vendor, items, npcs, spots, trainers)",
 			"recipes[164][101].learn: must be a number >= 0",
 			"recipes[164][102].colour: unknown field",
 			"recipes[164][104]: not in the data, and a new recipe needs y, g and mats",
