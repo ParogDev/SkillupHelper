@@ -119,6 +119,11 @@ local function refreshSelftest()
 	-- the data layers: the shipped build and recipe counts per profession, the local plan, the custom file
 	ns.plan()
 	st.data = ns.Data.layers
+	if type(st.data) == "table" then
+		-- the data's age: where and when the overlay was read, and whether the running game is a newer build
+		st.data.overlayRetrieved = ns.Data.recipes and ns.Data.recipes.source or nil
+		st.data.status, st.data.gameIsNewer = ns.Logic.dataStatus(ns.Data.recipes, build, buildNumber)
+	end
 	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent (optional: the shipped data plans alone)"
 	st.lastScan = ns.lastScan
 	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
@@ -609,6 +614,14 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 		local notice = ns.customNotice()
 		if notice then
 			print(notice)
+		end
+		-- a game build newer than the shipped data: said once at login, in plain words, not as an error
+		local okStatus, status, newer = pcall(function()
+			local version, buildNumber = GetBuildInfo()
+			return ns.Logic.dataStatus(ns.Data.recipes, version, buildNumber)
+		end)
+		if okStatus and newer then
+			print("SkillupHelper: " .. status)
 		end
 	elseif event == "PLAYER_LOGOUT" then
 		refreshSelftest()

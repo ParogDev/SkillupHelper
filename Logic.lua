@@ -865,6 +865,36 @@ function L.effectivePlan(shipped, plan, custom)
 	return out, report
 end
 
+-- How old the shipped data is, in plain words: "Recipe data: build 1.60.1.70938, learn ranks from Wowhead, Forever
+-- section, 2026-11-14. Your game is build 1.60.1.71000: newer than the data, so a recipe changed since may be off
+-- until the addon is updated." shipped = ns.Data.recipes (or nil); version, buildNumber = GetBuildInfo()'s first two.
+-- Returns the line and whether the game is newer than the data (false when either build is unknown): a note, never
+-- an error.
+function L.dataStatus(shipped, version, buildNumber)
+	if type(shipped) ~= "table" then
+		return "Recipe data: not loaded (Data/Recipes.lua is missing from this copy of the addon).", false
+	end
+	local line = ("Recipe data: build %s"):format(tostring(shipped.build or "unknown"))
+	if shipped.source then
+		line = line .. ", learn ranks and sources from " .. tostring(shipped.source)
+	end
+	line = line .. "."
+	local dataBuild = tonumber(tostring(shipped.build or ""):match("(%d+)$"))
+	local gameBuild = tonumber(buildNumber)
+	if not gameBuild then
+		return line, false
+	end
+	local game = ("%s.%s"):format(tostring(version or "?"), tostring(buildNumber))
+	if dataBuild and gameBuild > dataBuild then
+		return ("%s Your game is build %s: newer than the data, so a recipe changed since may be off until the addon is updated."):format(
+			line,
+			game
+		),
+			true
+	end
+	return ("%s Your game is build %s."):format(line, game), false
+end
+
 -- Seed NPCs for the guide: Data/Npcs.lua's rows, then Data/Custom.lua's (a custom row with a shipped row's id
 -- replaces it).
 function L.npcRows(shipped, custom)

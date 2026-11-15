@@ -282,6 +282,26 @@ describe("what is built at login", function()
 	end)
 end)
 
+describe("dataStatus", function()
+	it("says how old the data is, and that the game is newer only when it is", function()
+		local data = { build = "1.60.1.70938", source = "Wowhead, Forever section, 2026-11-14" }
+		local line, newer = L.dataStatus(data, "1.60.1", "70938")
+		assert.equal(
+			"Recipe data: build 1.60.1.70938, learn ranks and sources from Wowhead, Forever section, 2026-11-14."
+				.. " Your game is build 1.60.1.70938.",
+			line
+		)
+		assert.is_false(newer)
+		line, newer = L.dataStatus(data, "1.60.2", 71000)
+		assert.is_true(newer)
+		assert.matches("Your game is build 1.60.2.71000: newer than the data", line, 1, true)
+		-- an older game, or a build the client does not give: no claim
+		assert.is_false(select(2, L.dataStatus(data, "1.60.1", "70000")))
+		assert.is_false(select(2, L.dataStatus(data, nil, nil)))
+		assert.matches("not loaded", (L.dataStatus(nil, "1.60.1", "70938")))
+	end)
+end)
+
 describe("npcRows", function()
 	it("adds custom NPCs and lets one replace a shipped NPC with the same id", function()
 		local rows = L.npcRows(
