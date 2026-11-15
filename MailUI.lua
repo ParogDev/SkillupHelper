@@ -8,7 +8,10 @@ local M = {}
 ns.MailUI = M
 
 local stats = { open = false, shows = 0, fills = 0, sent = 0, failed = 0, selfSkipped = 0 }
-local state = {} -- pending = recipient being filled, attached = { [item] = units }, note = { to, text, tone }
+-- pending = recipient being filled, attached = { [item] = units }, note = { to, text, tone }, page = page shown
+local state = {}
+M.MAX_H = 440 -- the panel never grows past this (about the mailbox frame's height); longer queues page
+M.PAGER_H = 30
 
 local function secret(v)
 	return issecretvalue ~= nil and issecretvalue(v) or false
@@ -218,12 +221,25 @@ function M.draw()
 		fs:SetPoint("TOPLEFT", K.PAD, -y)
 		y = y + fs:GetStringHeight() + 6
 	end
-	for _, g in ipairs(d.groups) do
-		local t = line(g.title, "GameFontHighlightSmall", 11, "gold")
+	-- nothing scrolls (docs/ui.md): the groups are paged at row boundaries to a fixed height, with a pager row
+	local room = M.MAX_H - y - M.PAGER_H - K.PAD
+	local pages = ns.View.mailPages(d.groups, room, {
+		title = 18,
+		row = 16,
+		tail = function(g)
+			return 36 + (g.note and 32 or 0)
+		end,
+	})
+	state.page = math.max(1, math.min(state.page or 1, #pages))
+	stats.pages, stats.page = #pages, state.page
+	for _, c in ipairs(pages[state.page]) do
+		local g = c.g
+		local t = line(c.cont and (g.title .. " (continued)") or g.title, "GameFontHighlightSmall", 11, "gold")
 		t:ClearAllPoints()
 		t:SetPoint("TOPLEFT", K.PAD, -y)
-		y = y + t:GetStringHeight() + 4
-		for _, r in ipairs(g.rows) do
+		y = y + 18
+		for i = c.from, c.to do
+			local r = g.rows[i]
 			local n = line(r.name, "GameFontHighlight", 12, r.color)
 			n:ClearAllPoints()
 			n:SetPoint("TOPLEFT", K.PAD, -y)
@@ -234,21 +250,41 @@ function M.draw()
 			rt:SetJustifyH("RIGHT")
 			y = y + 16
 		end
-		if g.note then
-			local nt = line(g.note.text, "GameFontHighlightSmall", 11, g.note.tone)
-			nt:ClearAllPoints()
-			nt:SetPoint("TOPLEFT", K.PAD, -y)
-			y = y + nt:GetStringHeight() + 4
+		if c.tail then
+			if g.note then
+				local nt = line(g.note.text, "GameFontHighlightSmall", 11, g.note.tone)
+				nt:ClearAllPoints()
+				nt:SetPoint("TOPLEFT", K.PAD, -y)
+				y = y + nt:GetStringHeight() + 4
+			end
+			local fb = button(g.fill, ns.View.RGB.gold)
+			fb:ClearAllPoints()
+			fb:SetPoint("TOPLEFT", K.PAD, -(y + 2))
+			fb:SetWidth(K.WIDTH - 2 * K.PAD - 56)
+			local db2 = button(g.drop, ns.View.RGB.ash)
+			db2:ClearAllPoints()
+			db2:SetPoint("TOPRIGHT", -K.PAD, -(y + 2))
+			db2:SetWidth(50)
+			y = y + 2 + 24 + 10
 		end
-		local fb = button(g.fill, ns.View.RGB.gold)
-		fb:ClearAllPoints()
-		fb:SetPoint("TOPLEFT", K.PAD, -(y + 2))
-		fb:SetWidth(K.WIDTH - 2 * K.PAD - 56)
-		local db2 = button(g.drop, ns.View.RGB.ash)
-		db2:ClearAllPoints()
-		db2:SetPoint("TOPRIGHT", -K.PAD, -(y + 2))
-		db2:SetWidth(50)
-		y = y + 2 + 24 + 10
+	end
+	if #pages > 1 then
+		local prev =
+			button({ id = "mailPage", delta = -1, label = "Previous", enabled = state.page > 1 }, ns.View.RGB.ash)
+		prev:ClearAllPoints()
+		prev:SetPoint("TOPLEFT", K.PAD, -(y + 2))
+		prev:SetWidth(76)
+		local nxt =
+			button({ id = "mailPage", delta = 1, label = "Next", enabled = state.page < #pages }, ns.View.RGB.ash)
+		nxt:ClearAllPoints()
+		nxt:SetPoint("TOPRIGHT", -K.PAD, -(y + 2))
+		nxt:SetWidth(76)
+		local pl = line(("Page %d of %d"):format(state.page, #pages), "GameFontHighlightSmall", 11, "ash")
+		pl:ClearAllPoints()
+		pl:SetPoint("TOP", f, "TOP", 0, -(y + 7))
+		pl:SetWidth(K.WIDTH - 2 * K.PAD - 170)
+		pl:SetJustifyH("CENTER")
+		y = y + M.PAGER_H
 	end
 	for k = nfs + 1, #f.pool.fs do
 		f.pool.fs[k]:Hide()
@@ -412,6 +448,12 @@ function M.act(a)
 		end
 		M.draw()
 		return true
+	elseif a.id == "mailPage" then
+		if a.enabled then
+			state.page = (state.page or 1) + (a.delta or 0)
+			M.draw()
+		end
+		return a.enabled == true
 	elseif a.id == "mailFill" then
 		return a.enabled and fillMail(a) or false
 	elseif a.id == "mailSplit" then
@@ -446,6 +488,7 @@ ev:SetScript("OnEvent", function(_, event)
 		ns.guard("mail draw", M.draw)
 	elseif event == "MAIL_CLOSED" then
 		stats.open, state.pending, state.attached, state.note, state.done = false, nil, nil, nil, nil
+		state.page = nil
 		if M.frame then
 			M.frame:Hide()
 		end

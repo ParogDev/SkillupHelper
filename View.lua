@@ -1208,6 +1208,50 @@ function V.mailPanel(groups, live, state, env, pick, max)
 	return out
 end
 
+-- The mailbox panel's groups split into pages that fit `room` px (nothing scrolls): a page break falls between
+-- rows, a group carried over repeats its title (cont = true), and its note and buttons (h.tail) stay with its last
+-- row. h = { title, row, tail = function(g) -> px }. Returns pages = { { { g, from, to, cont, tail } } }, every row
+-- on exactly one page; a group's first chunk always holds at least one row (or its tail when it has none).
+function V.mailPages(groups, room, h)
+	local pages, page, y = {}, {}, 0
+	local function turn()
+		pages[#pages + 1] = page
+		page, y = {}, 0
+	end
+	for _, g in ipairs(groups or {}) do
+		local n, i, first = #(g.rows or {}), 1, true
+		local tail = h.tail(g)
+		while true do
+			if y > 0 and y + h.title + (i <= n and h.row or tail) > room then
+				turn()
+			end
+			y = y + h.title
+			local from = i
+			while i <= n and y + h.row + (i == n and tail or 0) <= room do
+				y, i = y + h.row, i + 1
+			end
+			if i == from and i <= n then
+				-- a page too short for one row and its buttons: the row goes anyway (never lost)
+				y, i = y + h.row, i + 1
+			end
+			local done = i > n
+			if done then
+				y = y + tail
+			end
+			page[#page + 1] = { g = g, from = from, to = i - 1, cont = not first, tail = done }
+			first = false
+			if done then
+				break
+			end
+			turn()
+		end
+	end
+	if #page > 0 or #pages == 0 then
+		pages[#pages + 1] = page
+	end
+	return pages
+end
+
 local PLACE = { trainer = "Trainer", vendor = "Vendor", ah = "Auction House" }
 
 -- A row's cost: its own total when the planner gives one, else unit price times count; nil when unknown.
