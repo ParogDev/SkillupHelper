@@ -38,7 +38,9 @@ local seeds = {}
 local cur -- the step to do now: { key, step, profession, color, base = { [item] = count at plan time }, hadNeeds }
 local open -- the window open now: { kind, npc } (npc nil when it could not be recorded)
 local worldCache = {}
-local knownList -- Guide.known(seeds, npcs), rebuilt only after a learn
+local shipped, foreign = {}, nil -- Data/Trainers.lua's trainers and recipe vendors of the player's faction
+local shippedFor -- the faction `shipped` was built for ("Horde" | "Alliance"), nil while it is not known
+local knownList -- Guide.known(seeds, npcs, shipped, foreign), rebuilt only after a learn
 local ghost -- a fade-out finished in combat: the chip is shown at alpha 0 until it can be hidden
 local view = { phase = "none" } -- the last evaluation: phase, need, pick, d (Guide.describe), since
 local want = { visible = false, row = false, name = nil, star = false }
@@ -297,6 +299,33 @@ local function trainerServices()
 	end
 	status.lastTeaches = { services = n, names = #names, partial = partial, filtersOpened = #turnedOn }
 	return names, partial
+end
+
+-- The shipped trainers and recipe vendors (Data/Trainers.lua) for the player's faction. Built at login and again
+-- once the faction is known, when UnitFactionGroup gave none at login (every side is kept until then).
+local function loadShipped()
+	local rows = ns.Data.trainers
+	local faction = ns.Scan and ns.Scan.faction and ns.Scan.faction() or nil
+	if rows == nil then
+		status.shippedError = "Data/Trainers.lua not loaded: no shipped trainers or recipe vendors"
+	elseif faction == nil then
+		status.shippedError = "UnitFactionGroup(player) gave no faction: shipped NPCs of both sides are kept"
+	else
+		status.shippedError = nil
+	end
+	shipped, foreign = G.shippedRecords(rows, faction)
+	shippedFor = faction
+	knownList = nil
+	status.shipped, status.faction = #shipped, faction
+end
+
+-- Every NPC the guide knows: learned over seeds over shipped.
+local function known()
+	if not shippedFor and ns.Data.trainers and ns.Scan and ns.Scan.faction and ns.Scan.faction() then
+		loadShipped()
+	end
+	knownList = knownList or G.known(seeds, npcs, shipped, foreign)
+	return knownList
 end
 
 local function countLearned()
@@ -647,6 +676,12 @@ local function togglePin()
 	if not npc then
 		return
 	end
+	if view.pick.nopos then
+		-- "not now" is not the word: the data has no position for this NPC, only its zone
+		fail(("no position for %s in the data: no pin"):format(tostring(npc.name)))
+		flash("Position not known: no pin", 3)
+		return
+	end
 	local okCan, can = pcall(C_Map.CanSetUserWaypointOnMap, npc.map)
 	if not okCan or not can then
 		fail(("C_Map.CanSetUserWaypointOnMap(%s) refused: no pin on this map"):format(tostring(npc.map)))
@@ -674,7 +709,7 @@ function evaluate()
 		return
 	end
 	local now = GetTime()
-	local phase, need, pick, why, excluded, certain
+	local phase, need, pick, why, excluded, certain, stats
 	if not gdb or not cur then
 		phase, why = "none", "no plan step yet (open a profession once)"
 	elseif gdb.stopped[cur.key] then
@@ -688,9 +723,10 @@ function evaluate()
 			cur.hadNeeds, cur.lastNeed = true, need
 			local h, hwhy = here()
 			local servers
-			knownList = knownList or G.known(seeds, npcs)
-			pick, servers, excluded = G.nearest(knownList, need, h, world)
+			pick, servers, excluded, stats = G.nearest(known(), need, h, world)
 			status.servers, status.excluded = servers, excluded
+			-- how many serve the need by where the record comes from, and how many a rank left out
+			status.serversBy, status.belowRank = stats.bySource, stats.belowRank
 			certain = pick and pick.certain
 			-- the open window counts when its NPC serves the need: a trainer only when its list has the name (or
 			-- was read in part); an NPC that could not be recorded, or a vendor without a position, is given the
@@ -706,9 +742,13 @@ function evaluate()
 				phase, why = "notnow", hwhy
 			elseif not pick then
 				phase = "unknown"
-				why = (#seeds == 0 and status.learned == 0) and "no seed and nothing learned"
-					or (excluded or 0) > 0 and G.unknownText(need, itemName, excluded)
-					or ("no known NPC serves this %s need"):format(need.kind)
+				-- the link that gave nothing: the shipped data for this faction, the seeds and what was learned
+				why = G.whyNone(need, {
+					stats = stats,
+					faction = shippedFor,
+					shipped = ns.Data.trainers ~= nil,
+					thing = need.items and need.items[1] and itemName(need.items[1].item) or nil,
+				})
 			else
 				local name = targetName()
 				phase = G.phase(pick, false, name ~= nil and name == pick.npc.name, view.phase)
@@ -727,6 +767,8 @@ function evaluate()
 	status.npc = pick and pick.npc.name
 	status.distance = pick and pick.distance and math.floor(pick.distance + 0.5)
 	status.certain = certain and true or false
+	status.source = pick and pick.source
+	status.confidence = pick and pick.confidence
 	local f = facing()
 	local thing = need and need.items and need.items[1] and itemName(need.items[1].item)
 	view.d = G.describe({
@@ -735,6 +777,9 @@ function evaluate()
 		name = pick and pick.npc.name,
 		distance = pick and pick.distance,
 		place = pick and pick.npc.place,
+		confidence = pick and pick.confidence,
+		unsure = pick and pick.unsure,
+		belowRank = stats and stats.belowRank,
 		thing = thing,
 		profession = cur and cur.profession,
 		compass = (not f and pick and pick.bearing) and G.compass(pick.bearing) or nil,
@@ -757,6 +802,9 @@ function evaluate()
 				name = pick and pick.npc.name,
 				distance = pick and pick.distance,
 				place = pick and pick.npc.place,
+				confidence = pick and pick.confidence,
+				unsure = pick and pick.unsure,
+				belowRank = stats and stats.belowRank,
 				thing = thing,
 				profession = cur and cur.profession,
 				marked = not IsInGroup(),
@@ -1098,8 +1146,11 @@ local function create()
 	end)
 	body:SetScript("OnEnter", function(self)
 		local lines = { "Click: pin on the map. Right-click: more." }
+		if view.d and view.d.note then
+			lines[#lines + 1] = view.d.note .. "."
+		end
 		if view.why then
-			lines[2] = view.why
+			lines[#lines + 1] = view.why
 		end
 		tip(self, lines)
 	end)
@@ -1160,9 +1211,16 @@ local function init()
 	gdb = g
 	-- the shipped seeds, then the player's own (Data/Custom.lua npcs, checked by Logic.validateCustom)
 	local data = ns.plan and ns.plan()
-	seeds = G.seedRecords(ns.Logic.npcRows(ns.Data.npcs, data and data.npcs))
+	-- a Custom.lua row is the player's own position; the shipped seeds are Classic ones
+	local own = {}
+	for _, r in ipairs(data and data.npcs or {}) do
+		own[r.id] = true
+	end
+	seeds = G.seedRecords(ns.Logic.npcRows(ns.Data.npcs, data and data.npcs), own)
 	knownList = nil
 	status.seeds = #seeds
+	-- the shipped trainers and recipe vendors of every profession, for the player's faction
+	loadShipped()
 	-- records learned before 0.2.8 have no town: give them one (a seed's nearby, else the map's name)
 	ns.guard("guide towns", function()
 		for _, npc in pairs(npcs) do
@@ -1270,7 +1328,7 @@ function GUI.where(place, r)
 	if not gdb or type(r) ~= "table" or not NEED_KIND[place] then
 		return nil
 	end
-	knownList = knownList or G.known(seeds, npcs)
+	known()
 	-- one answer per row a second (a card build asks for every row, and the strip can trigger redraws), and only
 	-- NPCs with a town count: the nearest one without a town would hide a farther one that names it
 	local now = GetTime()

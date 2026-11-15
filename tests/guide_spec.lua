@@ -382,6 +382,368 @@ describe("Guide", function()
 	end)
 end)
 
+describe("Guide over the shipped Data/Trainers.lua", function()
+	local ns = {}
+	assert(loadfile("Guide.lua"))("SkillupHelper", ns)
+	assert(loadfile("Data/Trainers.lua"))("SkillupHelper", ns)
+	local G, ROWS = ns.Guide, ns.Data.trainers
+
+	-- Real uiMap ids: Kalimdor's zones on continent 1, the others on 0; every map its own 1000 yd square, 100000 yd
+	-- from the next, so "the same map" is always nearer than another one.
+	local KALIMDOR = { [1411] = 1, [1412] = 1, [1413] = 1, [1454] = 1, [1456] = 1, [1457] = 1 }
+	local function realWorld(map, x, y)
+		if type(map) ~= "number" or type(x) ~= "number" then
+			return nil
+		end
+		local cont = (KALIMDOR[map] or (map >= 1438 and map <= 1452)) and 1 or 0
+		return cont, map * 1e5 - y * 10, -x * 10
+	end
+	local function at(map, x, y)
+		local c, wx, wy = realWorld(map, x, y)
+		return { continent = c, x = wx, y = wy }
+	end
+	local function knownFor(faction, learned, seeds)
+		local shipped, foreign = G.shippedRecords(ROWS, faction)
+		return G.known(seeds or {}, learned or {}, shipped, foreign)
+	end
+
+	local PROFESSIONS = {
+		"Alchemy",
+		"Blacksmithing",
+		"Cooking",
+		"Enchanting",
+		"Engineering",
+		"First Aid",
+		"Fishing",
+		"Herbalism",
+		"Leatherworking",
+		"Mining",
+		"Skinning",
+		"Tailoring",
+	}
+
+	it("resolves a trainer need for every profession and both factions, with a position", function()
+		local missing = {}
+		for _, faction in ipairs({ "Horde", "Alliance" }) do
+			local all = knownFor(faction)
+			for _, p in ipairs(PROFESSIONS) do
+				local list, stats = G.ranked(all, { kind = "trainer", profession = p }, nil, realWorld)
+				if #list == 0 or list[1].nopos then
+					missing[#missing + 1] = ("%s/%s"):format(p, faction)
+				end
+				assert.equal(#list, stats.servers)
+				assert.equal(stats.servers, stats.bySource.shipped)
+				for _, pick in ipairs(list) do
+					assert.equal("shipped", pick.source)
+					assert.is_true(pick.npc.id ~= nil and type(pick.name) == "string")
+				end
+			end
+		end
+		assert.same({}, missing)
+	end)
+
+	it("resolves the top rank-up of every profession to a trainer of that rank or one without a rank", function()
+		local missing = {}
+		for _, faction in ipairs({ "Horde", "Alliance" }) do
+			local all = knownFor(faction)
+			for _, p in ipairs(PROFESSIONS) do
+				local need = { kind = "trainer", profession = p, name = "Artisan", cap = 300 }
+				local list = G.ranked(all, need, nil, realWorld)
+				if #list == 0 then
+					missing[#missing + 1] = ("%s/%s"):format(p, faction)
+				end
+				for _, pick in ipairs(list) do
+					local cap = G.RANK_CAP[pick.npc.rank or ""]
+					assert.is_true(cap == nil or cap >= 300)
+					assert.is_false(pick.certain)
+				end
+			end
+		end
+		assert.same({}, missing)
+	end)
+
+	it("keeps the other faction's trainers out, and neutral ones in", function()
+		local horde = knownFor("Horde")
+		local ids = {}
+		for _, npc in ipairs(horde) do
+			ids[npc.id] = npc
+		end
+		assert.is_nil(ids[1215]) -- Alchemist Mallory, Alliance
+		assert.equal("Alchemy", ids[1386].trains) -- Rogvar, Horde
+		assert.equal("Alchemy", ids[2837].trains) -- Jaxin Chong, both
+		-- a Data/Npcs.lua seed of the other side is dropped with it; with no faction every side is kept
+		local seeds =
+			G.seedRecords({ { id = 3399, name = "Zamja", map = 1454, x = 57.4, y = 53.4, role = "cooktrainer" } })
+		local alliance = knownFor("A", nil, seeds)
+		for _, npc in ipairs(alliance) do
+			assert.is_true(npc.id ~= 3399)
+		end
+		local shipped, foreign = G.shippedRecords(ROWS, nil)
+		assert.is_nil(next(foreign))
+		assert.is_true(#shipped > #horde)
+	end)
+
+	it("picks the nearest first: the same map by distance, then the continent, then the rest", function()
+		local need = { kind = "trainer", profession = "Blacksmithing" }
+		-- at the Orgrimmar forge: Borgosh Corebender (79.4, 23.7) is a step away
+		local list = G.ranked(knownFor("Horde"), need, at(1454, 79.4, 24), realWorld)
+		assert.equal("Borgosh Corebender", list[1].name)
+		assert.near(3, list[1].distance, 1e-6)
+		assert.same(
+			{ "Orgrimmar", "shipped", "classic", "Position from Classic, unconfirmed" },
+			{ list[1].zone, list[1].source, list[1].confidence, list[1].note }
+		)
+		local nearest = G.nearest(knownFor("Horde"), need, at(1454, 79.4, 24), realWorld)
+		assert.equal(list[1].npc.id, nearest.npc.id)
+		local tier, last = 0, -1
+		for _, pick in ipairs(list) do
+			local t = pick.nopos and 2 or (pick.sameContinent and 0 or 1)
+			assert.is_true(t >= tier)
+			if t > tier then
+				tier, last = t, -1
+			end
+			if t == 0 then
+				assert.is_true(pick.distance >= last)
+				last = pick.distance
+			else
+				assert.is_nil(pick.distance)
+			end
+		end
+		assert.equal(2, tier)
+		-- every Orgrimmar trainer comes before the Thunder Bluff and Crossroads ones
+		local seenOther = false
+		for _, pick in ipairs(list) do
+			if pick.npc.map == 1454 then
+				assert.is_false(seenOther)
+			else
+				seenOther = true
+			end
+		end
+	end)
+
+	it("leaves a trainer of a lower rank out of a higher rank-up", function()
+		local dwukk = { trains = "Blacksmithing", rank = "journeyman" }
+		local expert = { kind = "trainer", profession = "Blacksmithing", name = "Expert", cap = 225 }
+		assert.same({ 0, "rank" }, { G.serves(dwukk, expert) })
+		assert.equal(1, (G.serves({ trains = "Blacksmithing", rank = "expert" }, expert)))
+		assert.equal(1, (G.serves({ trains = "Blacksmithing", rank = "master" }, expert)))
+		assert.equal(1, (G.serves({ trains = "Blacksmithing" }, expert)))
+		-- a recipe learned at skill 200 needs an Expert trainer; one at 150 a Journeyman can teach
+		local recipe = { kind = "trainer", profession = "Blacksmithing", name = "Golden Scale Coif", at = 200 }
+		assert.equal(0, (G.serves(dwukk, recipe)))
+		recipe.at = 150
+		assert.equal(1, (G.serves(dwukk, recipe)))
+		assert.equal(0, (G.serves({ trains = "Blacksmithing", rank = "apprentice" }, expert)))
+		-- an opened trainer's own list wins over its title
+		local opened = { trains = "Blacksmithing", rank = "journeyman", teaches = G.teachesSet({ "Expert" }) }
+		assert.equal(2, (G.serves(opened, expert)))
+		-- in Durotar the Journeyman next door is passed over for Orgrimmar's Expert
+		local need = G.needsOf({ kind = "trainRank", name = "Expert", cap = 225, at = 125 }, "Blacksmithing")[1]
+		assert.equal(225, need.cap)
+		local pick, _, excluded, stats = G.nearest(knownFor("Horde"), need, at(1411, 52, 40.7), realWorld)
+		assert.is_true(pick.npc.rank ~= "journeyman")
+		assert.equal(0, excluded)
+		assert.is_true(stats.belowRank >= 5)
+		assert.is_nil(G.needsOf({ kind = "train", name = "X", at = 10, cap = 75 }, "Cooking")[1].cap)
+	end)
+
+	it("gives a row without a position its zone only: no distance, no bearing, last in the list", function()
+		local need = { kind = "trainer", profession = "Blacksmithing" }
+		local list = G.ranked(knownFor("Horde"), need, at(1454, 79.4, 24), realWorld)
+		local gurdok
+		for _, pick in ipairs(list) do
+			if pick.npc.id == 256658 then
+				gurdok = pick
+			end
+		end
+		assert.same(
+			{ "Riverglades", "nopos", true, "In Riverglades, position not known" },
+			{ gurdok.zone, gurdok.confidence, gurdok.nopos, gurdok.note }
+		)
+		assert.is_nil(gurdok.distance)
+		assert.is_nil(gurdok.bearing)
+		assert.is_nil(gurdok.npc.x)
+		assert.is_true(list[#list].nopos)
+		-- alone, it is the pick: "away", with the zone in the chip and the strip, and no arrow
+		local only = G.nearest({ gurdok.npc }, need, at(1454, 79.4, 24), realWorld)
+		assert.equal("away", G.phase(only))
+		local s = { phase = "away", need = need, name = only.name, place = only.zone, confidence = only.confidence }
+		local d = G.describe(s)
+		assert.same({ "Gur'dok", "In Riverglades, position not known", nil }, { d.l1, d.l2, d.icon })
+		assert.equal("Gur'dok, in Riverglades, position not known", G.strip(s).a)
+		assert.equal("Position not known", G.confidenceText("nopos"))
+	end)
+
+	it("says a Classic position is unconfirmed, and nothing for a learned one", function()
+		local need = { kind = "trainer", profession = "Blacksmithing" }
+		local s = { phase = "far", need = need, name = "Snarl", place = "Orgrimmar", distance = 140 }
+		s.confidence = "classic"
+		local d = G.describe(s)
+		assert.equal("Orgrimmar, position from Classic, unconfirmed", d.l2)
+		assert.equal("Position from Classic, unconfirmed", d.note)
+		assert.equal("arrow", d.icon)
+		local strip = G.strip(s)
+		assert.same({ "Snarl, Orgrimmar", "Position from Classic, unconfirmed" }, { strip.a, strip.b })
+		-- close by, the chip says what to do; the note stays for the tooltip
+		s.phase = "near"
+		assert.same(
+			{ "Close. Target them to see who it is", "Position from Classic, unconfirmed" },
+			{ G.describe(s).l2, G.describe(s).note }
+		)
+		s.phase, s.confidence = "far", "confirmed"
+		assert.same({ "Blacksmithing trainer, Orgrimmar", nil }, { G.describe(s).l2, G.describe(s).note })
+		assert.is_nil(G.strip(s).b)
+		-- a named need to a trainer never opened: both doubts in the note, the place on the chip
+		s.need = { kind = "trainer", profession = "Blacksmithing", name = "Expert" }
+		s.certain, s.confidence = false, "classic"
+		d = G.describe(s)
+		assert.equal("Orgrimmar, position from Classic, unconfirmed", d.l2)
+		assert.equal("May teach Expert: not checked yet. Position from Classic, unconfirmed", d.note)
+		-- a seed (Data/Npcs.lua) is a Classic position too; the player's own Custom.lua row is confirmed
+		local seeds = G.seedRecords({
+			{ id = 1, name = "Seed", map = 1, x = 1, y = 1, role = "auction" },
+			{ id = 2, name = "Own", map = 1, x = 1, y = 1, role = "auction" },
+		}, { [2] = true })
+		assert.same({ "classic", "confirmed" }, { G.confidenceOf(seeds[1]), G.confidenceOf(seeds[2]) })
+		assert.same({ "seed", "seed" }, { G.sourceOf(seeds[1]), G.sourceOf(seeds[2]) })
+	end)
+
+	it("sends a recipe-vendor need to the shipped vendor that sells the recipe", function()
+		-- Abigail Shiel (Tirisfal Glades, Horde) sells recipe item 12226
+		local need = G.needsOf({ kind = "buyRecipe", item = 12226, where = "vendor" }, "Cooking")[1]
+		assert.same({ "vendor", 12226 }, { need.kind, need.items[1].item })
+		local pick, servers, _, stats = G.nearest(knownFor("Horde"), need, at(1420, 60, 52), realWorld)
+		assert.same({ 2118, "Abigail Shiel", "Tirisfal Glades" }, { pick.npc.id, pick.name, pick.zone })
+		assert.same({ "shipped", "classic", false }, { pick.source, pick.confidence, pick.partial })
+		assert.near(math.sqrt(10 * 10 + 4 * 4), pick.distance, 1e-6)
+		assert.equal(1, servers)
+		assert.same({ shipped = 1, learned = 0, seed = 0 }, stats.bySource)
+		-- she is the other side's for an Alliance character: nobody, and the why names the data and the faction
+		local none, n, _, st = G.nearest(knownFor("Alliance"), need, at(1420, 60, 52), realWorld)
+		assert.is_nil(none)
+		assert.equal(0, n)
+		assert.equal(
+			"Data/Trainers.lua has no vendor selling Recipe: Test for Alliance, and none in Data/Npcs.lua or learned",
+			G.whyNone(need, { stats = st, faction = "Alliance", thing = "Recipe: Test" })
+		)
+		-- a creature that only drops a recipe is no vendor
+		for _, npc in ipairs(knownFor(nil)) do
+			assert.is_true(npc.trains ~= nil or npc.sells ~= nil)
+		end
+	end)
+
+	it("lets what the character learned win over the shipped row of the same NPC, as confirmed", function()
+		local learned = {}
+		-- Snarl (1383), shipped at 79.6, 23.3 in Orgrimmar as an Expert: seen at another spot, teaching Artisan
+		G.learn(learned, {
+			id = 1383,
+			name = "Snarl",
+			map = 1454,
+			x = 70,
+			y = 30,
+			trains = "Blacksmithing",
+			teaches = { "Artisan" },
+		}, 5)
+		local all = knownFor("Horde", learned)
+		local need = { kind = "trainer", profession = "Blacksmithing", name = "Artisan", cap = 300 }
+		local pick, _, _, stats = G.nearest(all, need, at(1454, 79.4, 24), realWorld)
+		assert.same({ 1383, "learned", "confirmed", true }, { pick.npc.id, pick.source, pick.confidence, pick.certain })
+		assert.is_nil(pick.note)
+		assert.same({ 70, 30, "Orgrimmar", "expert" }, { pick.npc.x, pick.npc.y, pick.zone, pick.npc.rank })
+		assert.equal(1, stats.bySource.learned)
+		assert.is_true(stats.bySource.shipped > 0)
+		-- one record for the NPC, and the saved one is left as it was
+		local n = 0
+		for _, npc in ipairs(all) do
+			n = n + (npc.id == 1383 and 1 or 0)
+		end
+		assert.equal(1, n)
+		assert.is_nil(learned[1383].rank)
+		assert.is_nil(learned[1383].place)
+		-- learned over a seed over the shipped row: still one record, learned
+		local seeds = G.seedRecords({ { id = 1383, name = "Snarl", map = 1454, x = 79, y = 23, role = "trade" } })
+		local three = G.nearest(knownFor("Horde", learned, seeds), need, at(1454, 79.4, 24), realWorld)
+		assert.same({ 1383, "learned", 70 }, { three.npc.id, three.source, three.npc.x })
+		-- and a seed over the shipped row keeps the seed's position and the shipped profession
+		local two = G.nearest(
+			knownFor("Horde", nil, seeds),
+			{ kind = "trainer", profession = "Blacksmithing" },
+			at(1454, 79, 23),
+			realWorld
+		)
+		assert.same({ 1383, "seed", 79, "classic" }, { two.npc.id, two.source, two.npc.x, two.confidence })
+		-- a learned NPC of the other faction's list stays: the player opened its window
+		local mallory = {}
+		G.learn(
+			mallory,
+			{ id = 1215, name = "Alchemist Mallory", map = 1429, x = 39.8, y = 48.2, trains = "Alchemy" },
+			1
+		)
+		local got = G.nearest(
+			knownFor("Horde", mallory),
+			{ kind = "trainer", profession = "Alchemy" },
+			at(1429, 39, 48),
+			realWorld
+		)
+		assert.same({ 1215, "learned" }, { got.npc.id, got.source })
+	end)
+
+	it("shows the empty state only when shipped, seeded and learned data have nothing, and says which link", function()
+		local need = { kind = "trainer", profession = "Blacksmithing" }
+		local pick, servers, excluded, stats = G.nearest(G.known({}, {}, {}, {}), need, at(1454, 50, 50), realWorld)
+		assert.is_nil(pick)
+		assert.same({ 0, 0 }, { servers, excluded })
+		assert.same({ shipped = 0, learned = 0, seed = 0 }, stats.bySource)
+		assert.equal("none", G.phase(pick))
+		assert.equal(
+			"Data/Trainers.lua has no Blacksmithing trainer for Horde, and no Blacksmithing trainer learned or seeded",
+			G.whyNone(need, { stats = stats, faction = "Horde" })
+		)
+		assert.equal(
+			"Data/Trainers.lua is not loaded, and no Blacksmithing trainer learned or seeded",
+			G.whyNone(need, { stats = stats, faction = "Horde", shipped = false })
+		)
+		assert.matches("an unknown faction %(UnitFactionGroup gave none%)", G.whyNone(need, { stats = stats }))
+		assert.equal("Data/Npcs.lua has no auctioneer, and none learned", G.whyNone({ kind = "auction" }, {}))
+		local d = G.describe({ phase = "unknown", need = need, profession = "Blacksmithing" })
+		assert.same({ "No known trainer yet", "Ask a city guard for the Blacksmithing trainer" }, { d.l1, d.l2 })
+		-- with the shipped data the same need has a trainer for either side: the empty card cannot show
+		for _, faction in ipairs({ "Horde", "Alliance" }) do
+			assert.is_truthy(G.nearest(knownFor(faction), need, at(1454, 50, 50), realWorld))
+		end
+		-- trainers known, all below the rank: its own words and why
+		local low = {
+			{
+				id = 1,
+				name = "J",
+				map = 1454,
+				x = 1,
+				y = 1,
+				trains = "Blacksmithing",
+				rank = "journeyman",
+				shipped = true,
+			},
+		}
+		local up = { kind = "trainer", profession = "Blacksmithing", name = "Artisan", cap = 300 }
+		local none, _, _, st = G.nearest(low, up, nil, realWorld)
+		assert.is_nil(none)
+		assert.same({ 1, 0, 1 }, { st.belowRank, st.excluded, st.profession })
+		assert.equal(
+			"Data/Trainers.lua has 1 Blacksmithing trainer(s) for Horde, none of a rank that teaches Artisan (skill 300)",
+			G.whyNone(up, { stats = st, faction = "H" })
+		)
+		assert.equal("No trainer of that rank known", G.describe({ phase = "unknown", need = up, belowRank = 1 }).l1)
+		-- opened trainers whose lists lack the name
+		assert.equal(
+			"2 Cooking trainer(s) opened, none lists Goldthorn Tea",
+			G.whyNone(
+				{ kind = "trainer", profession = "Cooking", name = "Goldthorn Tea" },
+				{ stats = { excluded = 2 } }
+			)
+		)
+	end)
+end)
+
 describe("Guide strip and towns", function()
 	local G = load()
 	local trainer = { kind = "trainer", profession = "Leatherworking" }
