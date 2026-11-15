@@ -146,12 +146,12 @@ from one file; a correction of the shipped data on the same build needs two file
 
 ## Your own changes
 
-Copy `Data/Custom.example.lua` to `Data/Custom.lua` and edit it. It can change a recipe's learn skill, source,
-thresholds or reagents, leave a recipe out, add vendor reagents and guide NPCs, and add, correct or leave out spots
-and trainers. Updates never overwrite it. A bad entry is left out and named in chat; the rest applies. Restart the
-game the first time (a new file), `/reload` after later edits. [AGENTS.md](AGENTS.md) lists every key with examples.
-Without the file, BugGrabber shows one load warning for it (not an error); the reason it stays that way is in
-[docs/data-sources.md](docs/data-sources.md).
+Copy the folder `extras/SkillupHelper_Custom` out of `SkillupHelper`, next to it in `Interface/AddOns`, and edit
+its `Custom.lua` (`Custom.example.lua` beside it shows every kind of entry). It can change a recipe's learn skill,
+source, thresholds or reagents, leave a recipe out, add vendor reagents and guide NPCs, and add, correct or leave out
+spots and trainers. It is its own addon folder, so an update of Skillup Helper never overwrites it. A bad entry is
+left out and named in chat; the rest applies. Restart the game the first time (a new addon folder), `/reload` after
+later edits. [AGENTS.md](AGENTS.md) lists every key with examples.
 
 ## Limits and what is unconfirmed in Forever
 

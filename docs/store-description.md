@@ -42,8 +42,8 @@ recipe you must buy or one taught by a special NPC. Turn on "Plan special teache
 **The plan says a trainer recipe at the wrong skill.** Open the trainer once. The addon keeps what the trainer
 shows, and that wins over the shipped data.
 
-**Can I change the plan?** Yes. `Data/Custom.lua` (copy `Data/Custom.example.lua`) changes recipes, vendors, NPCs and
-places, and survives updates.
+**Can I change the plan?** Yes. A small addon of your own, `SkillupHelper_Custom` (copy it from `extras/` in the
+download), changes recipes, vendors, NPCs and places, and survives updates.
 
 **Is it Classic Era?** No. Forever only (interface 16001).
 

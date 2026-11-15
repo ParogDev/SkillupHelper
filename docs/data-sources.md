@@ -86,30 +86,31 @@ For one fact, from weakest to strongest:
    correction survives a new Wowhead import.
 4. `tools/data/npcs_seen.json` over a cmangos position, in `gen_npcs.py`.
 5. In the running game: what this player's own game showed (`SkillupHelperDB.learned`) over everything shipped,
-   and the player's `Data/Custom.lua` over that.
+   and the player's `SkillupHelper_Custom` table over that.
 
 Never overridden by a script: a hand-kept value in `overlay.manual.json` counts as shipped data, so the merge rule
 below applies to it like to any other value.
 
 ## Optional local files and the load warning
 
-`Data/Custom.lua` (the player's own changes) and `Data/Plan.lua` (fallback prices from a PC tool) are listed in
-the TOC and shipped by nobody: both are gitignored, and the packager leaves `Data/Plan.lua` out. When a file the TOC
-lists is missing, the client skips it and logs a load warning; BugGrabber shows one warning per missing file, never
-an error, and the addon runs normally.
+When a file the TOC lists is missing, the client skips it and logs a load warning; BugGrabber shows one warning per
+missing file on every start, never an error. `Data/Plan.lua` (fallback prices from a PC tool) is still such a file:
+gitignored, left out of the package, listed in the TOC.
 
-Decision (0.3.0): keep the two TOC lines and live with the warning. The other ways were weighed:
+The player's own changes no longer are (0.3.2). 0.3.0 listed `Data\Custom.lua` in the TOC and kept the warning; it
+hid real errors in every in-game check. They now live in a separate addon folder, `SkillupHelper_Custom`, which the
+player copies from `extras/` next to `SkillupHelper`. `## OptionalDeps: SkillupHelper_Custom` loads it first, its
+`Custom.lua` sets one global table, and `Core.lua` reads that into `ns.Data.custom`. SkillupHelper writes no new
+global (it only reads one), and an update never touches the player's folder.
 
 | Way | Why not |
 |---|---|
-| Ship empty placeholder files | an update unpacks the package over the folder and would overwrite the player's own `Data/Custom.lua` |
-| Drop the lines from the TOC | every existing `Data/Custom.lua` stops loading, without a word, after the update |
-| A separate addon folder `SkillupHelper_Custom` for the player's file | a new folder is seen only after a client restart; the two addons share no namespace, so it needs a new global (the wiring spec allows seven); and existing `Data/Custom.lua` files would still need the old TOC line, so the warning stays for everyone else |
+| Keep the TOC line (0.3.0) | a load warning on every start for every player without the file |
+| Ship an empty placeholder `Data/Custom.lua` | an update unpacks the package over the folder and would overwrite the player's own file |
 | Load the file from code | the client only loads files a TOC lists; an addon cannot open a file by path |
 
-If the warning becomes a real problem (a store review, many reports), the separate folder is the way: add it as an
-optional dependency, read its table through one new global, keep the old TOC line for a release or two with a chat
-note telling players to move their file, then drop it. It needs a client restart for every player who moves.
+Dropping the old line broke no one: no release had been published, so no player had a `Data/Custom.lua`. A player
+who adds the folder restarts the client once (a new addon folder is only seen at start).
 
 ## Staying current
 

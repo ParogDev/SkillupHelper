@@ -55,8 +55,9 @@ Read from the saved selftest and BugGrabber after that session:
 
 - Item 1: one BugGrabber entry, a warning, not an error: the TOC lists `Data\Custom.lua`, which is optional and was
   absent. `journalWiring.errors` empty, no `lastWhy`. A TOC cannot list an optional file without this warning; the
-  same holds for `Data\Plan.lua` in a packaged install. Decided: keep it (`docs/data-sources.md`, "Optional local
-  files and the load warning").
+  same holds for `Data\Plan.lua` in a packaged install. Decided then: keep it. Reversed in 0.3.2: the player's
+  changes moved to their own addon folder, `SkillupHelper_Custom` (`docs/data-sources.md`, "Optional local files
+  and the load warning").
 - Items 2, 3, 6, 24: pass (`openButton` true, `compartment` true, `skillApi` true, `prices` true).
 - Item 4: `bindingName` true, no key set.
 - Items 10, 11: `mapArtMissing` false, `tileFailures` 0, but no map had been drawn yet (`draws` 0): still open.

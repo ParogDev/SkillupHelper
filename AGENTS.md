@@ -9,9 +9,9 @@ relative to the addon folder. The game is WoW: Forever: a Mainline 12.1 client w
 |---|---|
 | Never send input to the game (keys, clicks, macros from outside) | anti-cheat; the player clicks, the addon never does |
 | Never edit `WTF\...\SavedVariables\SkillupHelper.lua` while the game runs | the game overwrites it on logout and `/reload` |
-| A new file (a new `.lua`, a new `Data/Custom.lua`) needs a game restart | the client reads the TOC and file list at start |
+| A new file (a new `.lua`, a new `SkillupHelper_Custom` folder) needs a game restart | the client reads the TOC and file list at start |
 | An edit to an existing listed file needs `/reload` | |
-| Never edit `Data/Recipes.lua`, `Data/Spots.lua`, `Data/Trainers.lua` by hand | generated; a regeneration drops your edit. Use `Data/Custom.lua` |
+| Never edit `Data/Recipes.lua`, `Data/Spots.lua`, `Data/Trainers.lua` by hand | generated; a regeneration drops your edit. Use `SkillupHelper_Custom` |
 | No globals beyond the seven in `tests/wiring_spec.lua` (`ALLOWED_GLOBALS`) | the load-order test fails on any other |
 | Check `issecretvalue(v)` before using any client value in an instance or encounter | Forever hands out secret values there; use them and the addon errors |
 | Nothing that taints in combat: no frame show/hide of secure frames, no binding change | `InCombatLockdown()` guards are in place; keep them |
@@ -26,7 +26,7 @@ relative to the addon folder. The game is WoW: Forever: a Mainline 12.1 client w
 | `Data/Trainers.lua` | generated: trainers and recipe vendors (`ns.Data.trainers`) |
 | `Data/Npcs.lua` | hand-kept seed NPCs for the guide chip (`ns.Data.npcs`) |
 | `Data/Plan.lua` | optional, local: fallback prices from a price tool (shape in `Data/Plan.example.lua`) |
-| `Data/Custom.lua` | optional, local: the player's own changes (shape in `Data/Custom.example.lua` and below) |
+| `extras/SkillupHelper_Custom/` | a template addon folder for the player's own changes, copied next to `SkillupHelper`; not loaded from here (shape in its `Custom.example.lua` and below) |
 
 The TOC lists both optional files, so a client without them logs one load warning per missing file (BugGrabber
 shows it as a warning, not an error). That is deliberate: see `docs/data-sources.md`, "Optional local files and
@@ -92,15 +92,19 @@ See `Data/Plan.example.lua`: `{ version = 2, pricesAt, effort, sellShare, vendor
 mv, stack } }, professions = { [line] = { name, from, to, rows } } }`. `items[].mv` is the fallback auction price
 when TSM has none. Without this file auction items have no price until TSM has data.
 
-## Change a plan without touching shipped files: `Data/Custom.lua`
+## Change a plan without touching shipped files: `SkillupHelper_Custom`
 
-1. Copy `Data/Custom.example.lua` to `Data/Custom.lua`.
-2. Keep only the entries you need. Restart the game the first time; `/reload` after later edits.
+1. Copy the folder `extras/SkillupHelper_Custom` next to `SkillupHelper` (`Interface/AddOns/SkillupHelper_Custom`).
+   It is an addon of its own: an update of SkillupHelper never overwrites it, and SkillupHelper's TOC lists no file
+   it might lack (`## OptionalDeps: SkillupHelper_Custom` loads it first).
+2. Copy the entries you need from `Custom.example.lua` into its `Custom.lua`, which sets the one global table
+   `SkillupHelper_Custom` (`Core.lua` reads it into `ns.Data.custom`). Restart the game the first time; `/reload`
+   after later edits.
 3. Check the result: a bad entry is left out and named in one chat line at login, in the journal's Settings and data
    page ("Your Custom file"), and in `SkillupHelperDB.selftest.data.custom.errors` and
    `selftest.journalWiring.customPlaces.errors`.
 
-What wins, weakest first: `Data/Recipes.lua`, `Data/Plan.lua`, `Data/Custom.lua`, then what a trainer showed in
+What wins, weakest first: `Data/Recipes.lua`, `Data/Plan.lua`, `SkillupHelper_Custom`, then what a trainer showed in
 game (`learned.trainers`) for learn ranks.
 
 | Goal | Key | Example |
@@ -110,7 +114,7 @@ game (`learned.trainers`) for learn ranks.
 | Change thresholds | `.y`, `.g` | `[3320] = { y = 45, g = 65 }` |
 | Change the training cost | `.cost` (copper) | `[3320] = { learn = 25, cost = 100 }` |
 | Leave a recipe out of every plan | `[spell] = false` | `[2663] = false` |
-| Add a recipe the data lacks | needs `y`, `g`, `mats` | see `[999001]` in `Data/Custom.example.lua` |
+| Add a recipe the data lacks | needs `y`, `g`, `mats` | see `[999001]` in `extras/SkillupHelper_Custom/Custom.example.lua` |
 | Add or remove a vendor reagent | `vendor[item] = copper` or `false` | `vendor = { [2880] = 100, [4289] = false }` |
 | Name an item your recipe makes | `items[item] = { name, sell, stack }` | `items = { [999002] = { name = "Example Buckle", sell = 150, stack = 20 } }` |
 | Add or replace a guide NPC | `npcs = { row }` (same id replaces) | `{ id = 3355, name = "Saru Steelfury", map = 1454, x = 76.6, y = 34.6, role = "trainer", trains = "Blacksmithing", place = "Orgrimmar" }` |
@@ -209,11 +213,11 @@ Step by step:
 3. `selftest.data.gameIsNewer` true? The shipped data predates the game build: a changed recipe may be off.
 4. Prices: `firstLaunch.prices` false means TSM has no auction data. Costs then count vendor items only.
 5. Wrong learn skill or cost for one recipe: open the trainer once (the game's word wins), or set
-   `recipes[line][spell].learn` / `.cost` in `Data/Custom.lua`.
-6. A recipe the player cannot get is planned: `[spell] = false` in `Data/Custom.lua`, or Hide on its shortcut.
+   `recipes[line][spell].learn` / `.cost` in `SkillupHelper_Custom`.
+6. A recipe the player cannot get is planned: `[spell] = false` in `SkillupHelper_Custom`, or Hide on its shortcut.
 7. A gap ("Nothing gives skill from X to Y"): the Overview row's tooltip names the reason. Usually a recipe item to
    buy (`/skillup recipes on`) or a special teacher (Settings: "Plan special teachers").
-8. Wrong place for a world skill: add or correct the spot in `Data/Custom.lua` (`spots`).
+8. Wrong place for a world skill: add or correct the spot in `SkillupHelper_Custom` (`spots`).
 9. "Why did it pick the dearer recipe?" With "Count selling what I craft" on (`resale = true`), what a product
    sells for lowers its recipe's cost; off (the default) the plan ranks by what the player pays and the card only
    notes "about Xs back if you sell N (not counted)". Leftover reagents are valued at salvage either way.
