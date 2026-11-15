@@ -97,7 +97,7 @@ When a file the TOC lists is missing, the client skips it and logs a load warnin
 missing file on every start, never an error. `Data/Plan.lua` (fallback prices from a PC tool) is still such a file:
 gitignored, left out of the package, listed in the TOC.
 
-The player's own changes no longer are (0.3.2). 0.3.0 listed `Data\Custom.lua` in the TOC and kept the warning; it
+The player's own changes no longer are (0.3.3). 0.3.0 listed `Data\Custom.lua` in the TOC and kept the warning; it
 hid real errors in every in-game check. They now live in a separate addon folder, `SkillupHelper_Custom`, which the
 player copies from `extras/` next to `SkillupHelper`. `## OptionalDeps: SkillupHelper_Custom` loads it first, its
 `Custom.lua` sets one global table, and `Core.lua` reads that into `ns.Data.custom`. SkillupHelper writes no new
