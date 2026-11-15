@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2
+
+- The guide knows which trainer rank teaches a recipe. A trainer teaches the recipes learned below the next rank's
+  training skill: a Journeyman trainer up to 124, an Expert up to 199, an Artisan the rest. Hillman's Shoulders
+  (learned at 130) now points at Arthur Moore, the Expert next to Dan Golthas in Undercity, not at Dan Golthas.
+  When every trainer the guide knows is below that rank, it says "needs an Expert Leatherworking trainer or
+  better". A trainer's own list, read in full, still wins over its rank.
+- The guide card names the trainer's rank ("Expert Leatherworking trainer").
+- Opening a trainer no longer re-reads its list on every frame while the window is open: reading stops once the
+  whole list is in, or after six tries. A failed read always puts the trainer window's filters back.
+
 ## 0.3.1
 
 - A step that crafts a reagent first (Cured Medium Hide from your own Medium Hide and Salt) gets a working button:

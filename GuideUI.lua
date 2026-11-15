@@ -237,6 +237,9 @@ end
 -- checked. Anything that cannot be read or restored makes the list partial: then it only ever counts as "may teach".
 local FILTER_TYPES = { "available", "unavailable", "used" }
 
+-- true while trainerServices runs: the TRAINER_UPDATEs its own filter switches raise are not a new list
+local reading = false
+
 local function trainerServices()
 	local names, partial = {}, false
 	local saved, turnedOn = {}, {}
@@ -268,25 +271,35 @@ local function trainerServices()
 			end
 		end
 	end
-	local okN, n = pcall(GetNumTrainerServices)
-	if not okN or type(n) ~= "number" or secret(n) then
-		n, partial = 0, true
-		status.teachesWhy = "GetNumTrainerServices is secret or failed"
-	end
-	for i = 1, n do
-		local ok, name, kind, _, _, sub = pcall(GetTrainerServiceInfo, i)
-		if not ok or type(name) ~= "string" or secret(name) or name == "" then
-			-- a name still loading (TRAINER_SERVICE_INFO_NAME_UPDATE) or secret: the list is not whole
+	-- the list read runs protected: a throw in it must still reach the filter restore below
+	local n = 0
+	local okRead, err = pcall(function()
+		local okN, count = pcall(GetNumTrainerServices)
+		if not okN or type(count) ~= "number" or secret(count) then
 			partial = true
-			status.teachesWhy = ("GetTrainerServiceInfo(%d) gave no readable name"):format(i)
-		elseif secret(kind) or kind ~= "header" then
-			names[#names + 1] = name
-			-- a rank-up may come as "Cooking" with the rank as its subtext ("Expert")
-			if type(sub) == "string" and not secret(sub) and sub ~= "" then
-				names[#names + 1] = sub .. " " .. name
-				names[#names + 1] = ("%s (%s)"):format(name, sub)
+			status.teachesWhy = "GetNumTrainerServices is secret or failed"
+			return
+		end
+		n = count
+		for i = 1, n do
+			local ok, name, kind, _, _, sub = pcall(GetTrainerServiceInfo, i)
+			if not ok or type(name) ~= "string" or secret(name) or name == "" then
+				-- a name still loading (TRAINER_SERVICE_INFO_NAME_UPDATE) or secret: the list is not whole
+				partial = true
+				status.teachesWhy = ("GetTrainerServiceInfo(%d) gave no readable name"):format(i)
+			elseif secret(kind) or kind ~= "header" then
+				names[#names + 1] = name
+				-- a rank-up may come as "Cooking" with the rank as its subtext ("Expert")
+				if type(sub) == "string" and not secret(sub) and sub ~= "" then
+					names[#names + 1] = sub .. " " .. name
+					names[#names + 1] = ("%s (%s)"):format(name, sub)
+				end
 			end
 		end
+	end)
+	if not okRead then
+		partial = true
+		status.teachesWhy = "trainer list read failed: " .. tostring(err)
 	end
 	if #names == 0 then
 		partial = true
@@ -353,10 +366,26 @@ local function learn(kind)
 		rec.sells = merchantItems()
 	elseif kind == "trainer" then
 		rec.trains = trainerLine()
-		local names, partial, n = trainerServices()
+		reading = true
+		local ok, names, partial, n = pcall(trainerServices)
+		reading = false
+		if not ok then
+			fail("trainer list read failed: " .. tostring(names))
+			status.lastTeaches = { why = tostring(names) }
+			names, partial, n = {}, true, 0
+		end
 		local held
 		rec.teaches, rec.teachesPartial, trainerVisit, held = G.trainerRead(trainerVisit, rec.id, names, partial, n)
-		status.lastTeaches.held = held
+		local lt = status.lastTeaches
+		-- a throw's cause (set above) wins over the last teachesWhy, which the throw may have left stale
+		lt.held, lt.why, lt.reads = held, ok and status.teachesWhy or lt.why, trainerVisit.reads
+		-- the trainer's rank as the shipped data has it (Data/Trainers.lua), for the selftest
+		for _, npc in ipairs(known()) do
+			if npc.id == rec.id then
+				lt.rank = npc.rank
+				break
+			end
+		end
 	elseif kind == "auction" then
 		rec.auction = true
 	end
@@ -787,6 +816,7 @@ function evaluate()
 		confidence = pick and pick.confidence,
 		unsure = pick and pick.unsure,
 		belowRank = stats and stats.belowRank,
+		rank = pick and pick.npc.rank,
 		thing = thing,
 		profession = cur and cur.profession,
 		compass = (not f and pick and pick.bearing) and G.compass(pick.bearing) or nil,
@@ -812,6 +842,7 @@ function evaluate()
 				confidence = pick and pick.confidence,
 				unsure = pick and pick.unsure,
 				belowRank = stats and stats.belowRank,
+				rank = pick and pick.npc.rank,
 				thing = thing,
 				profession = cur and cur.profession,
 				marked = not IsInGroup(),
@@ -1295,21 +1326,28 @@ if next(status.events) == nil then
 	status.events = "all registered"
 end
 
--- TRAINER_UPDATE comes in bursts while the list fills: one read per frame, after the burst's events.
+-- TRAINER_UPDATE comes in bursts while the list fills: one read per frame, after the burst's events. Our own filter
+-- switches raise it too, during the read (`reading`) or a frame later: so the visit stops reading once its whole list
+-- was read, or after G.TRAINER_READS reads (G.trainerWants).
 local trainerQueued = false
 local function trainerUpdate()
-	if trainerQueued then
+	if trainerQueued or reading then
 		return
 	end
 	trainerQueued = true
 	C_Timer.After(0, function()
 		trainerQueued = false
-		if gdb and open and open.kind == "trainer" then
+		if not (gdb and open and open.kind == "trainer") then
+			return
+		end
+		local wants, whyNot = G.trainerWants(trainerVisit)
+		status.trainerStop = whyNot
+		if wants then
 			ns.guard("guide learn", function()
 				learn("trainer")
 			end)
-			ns.guard("guide TRAINER_UPDATE", evaluate)
 		end
+		ns.guard("guide TRAINER_UPDATE", evaluate)
 	end)
 end
 
