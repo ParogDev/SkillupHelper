@@ -466,7 +466,14 @@ local function nextCard(st, env, listed)
 		card.color = "gold"
 		card.item = st.item
 		card.name = env.nameOf(st.item, "Recipe: " .. tostring(st.name))
-		card.verb = st.owned and "In your bags: learn it" or ("Buy it on the AH for %s"):format(money(st.price))
+		if st.owned then
+			card.verb = "In your bags: learn it"
+		elseif st.where == "vendor" then
+			local who = st.vendor and st.vendor.name
+			card.verb = ("Buy it from %s for %s"):format(who and tostring(who) or "its vendor", money(st.price))
+		else
+			card.verb = ("Buy it on the AH for %s"):format(money(st.price))
+		end
 		card.gain = ("learn at %d"):format(st.learn or 0)
 		if st.saves then
 			card.cost = ("saves %s over the plan without it"):format(money(st.saves))
@@ -560,7 +567,15 @@ local function laterRow(n, st, env)
 			n = n,
 			color = "gold",
 			text = "Train " .. st.name .. (st.unchecked and (", " .. V.UNCHECKED) or ""),
-			right = ("at %d"):format(st.at),
+			-- the trainer's price when the data or a trainer visit gave one
+			right = ("at %d"):format(st.at) .. (st.cost and st.cost > 0 and (", " .. env.money(st.cost)) or ""),
+		}
+	elseif st.kind == "buyRecipe" and st.where == "vendor" then
+		return {
+			n = n,
+			color = "gold",
+			text = "Buy " .. env.nameOf(st.item, "Recipe: " .. tostring(st.name)) .. " from a vendor",
+			right = env.money(st.price),
 		}
 	elseif st.kind == "buyRecipe" then
 		return {

@@ -391,6 +391,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 			level = caps.level,
 			ranks = ranks,
 			exclude = exclude,
+			-- "Alliance" | "Horde": whether a recipe vendor of the data can be assumed reachable
+			faction = caps.faction,
 			trainerSeen = caps.trainerSeen,
 			recipes = prof.recipes,
 			items = plan and plan.items or {},
@@ -617,6 +619,7 @@ function S.build(plan)
 				ranks = ranks,
 				exclude = settings.exclude,
 				trainerSeen = trainerSeen,
+				faction = S.faction(),
 			})
 		if ok then
 			model.planner = result
@@ -851,6 +854,12 @@ function S.playerSkillLine(name, values)
 	return nil, ("trainer's profession %s is not one of yours (GetProfessions)"):format(tostring(name or "unnamed"))
 end
 
+-- "Alliance" or "Horde", or nil when the client does not say (a secret, a neutral character).
+function S.faction()
+	local f = UnitFactionGroup and clean((UnitFactionGroup("player"))) or nil
+	return (f == "Alliance" or f == "Horde") and f or nil
+end
+
 -- The player's professions by skill line id: { [id] = { skill, cap } } (GetProfessions; secrets left out).
 function S.playerSkills()
 	local out = {}
@@ -898,6 +907,7 @@ function S.costOf(plan, id, prof, own, settings)
 		cap = own and own.cap or nil,
 		ranks = #saved > 0 and saved or nil,
 		exclude = settings.exclude,
+		faction = S.faction(),
 		trainerSeen = ns.savedTrainerSeen and ns.savedTrainerSeen(id) or nil,
 		effort = settings.effort or plan.effort,
 		luck = settings.luck,

@@ -264,6 +264,34 @@ local function capModel(ctx, input)
 	end
 end
 
+-- Why the vendor of recipe r's item is not assumed reachable, or nil: the item asks for a reputation, or the vendor
+-- is hostile to the character's faction (r.vendor.a / .h: the NPC's reaction to Alliance / Horde, nil = not known;
+-- faction = "Alliance" | "Horde" | nil, and with no faction given a vendor hostile to either side is not assumed).
+local function vendorBlock(r, faction)
+	if r.faction or r.rep then
+		return "its vendor asks for a reputation"
+	end
+	local v = r.vendor
+	local side = (faction == "Horde" and "h") or (faction == "Alliance" and "a") or nil
+	if (side and v[side] == -1) or (not side and (v.a == -1 or v.h == -1)) then
+		return "its vendor is the other faction's"
+	end
+	return nil
+end
+
+-- Where a recipe item comes from, for a shortcut's text: the vendor's name, else the kind of source.
+local FROM_TEXT = { vendor = "sold by a vendor", quest = "a quest reward", drop = "a drop", crafted = "crafted" }
+local function fromText(o)
+	if o.teacher then
+		return o.teacher
+	end
+	local v = o.recipeVendor
+	if type(v) == "table" and v.name then
+		return "sold by " .. tostring(v.name)
+	end
+	return o.from and (FROM_TEXT[o.from] or tostring(o.from)) or nil
+end
+
 -- Options (recipe variants) the planner can use: learned recipes, trainer recipes from their learn rank, recipe items
 -- with a price as candidates to buy. The client's colour at the current skill wins over the exported thresholds.
 -- input.exclude (dungeon, ahPatterns, notNow[spell]) drops recipes; input.ranks, level and target set the cap model.
@@ -331,7 +359,8 @@ function P.prepare(input)
 		if not out and y and g and g > skill then
 			local src = "known"
 			if not learned then
-				src = (r.src == "item" or r.src == "auto" or r.src == "special") and r.src or "trainer"
+				src = (r.src == "item" or r.src == "auto" or r.src == "special" or r.src == "unlisted") and r.src
+					or "trainer"
 			end
 			-- a trainer recipe no ordinary trainer was seen to teach is "not checked": gated, like a special teacher's
 			local unchecked = src == "trainer"
@@ -349,12 +378,24 @@ function P.prepare(input)
 			-- tradeable one is a buy only while it has a price. Both are gated: shown as shortcuts that say why.
 			local bop = src == "item" and r.bop == true
 			local recipePrice = (src == "item" and not bop) and buyOf(ctx, r.item or -1) or nil
+			local recipeWhere = "ah"
+			-- a vendor known to sell the recipe item, at the item's vendor price: the cheaper of vendor and auction.
+			-- A vendor the character may not reach (the other faction's, a reputation) is not assumed: vendorWhy.
+			local vendorWhy
+			if src == "item" and not bop and type(r.vendor) == "table" and type(r.buy) == "number" then
+				vendorWhy = vendorBlock(r, input.faction)
+				if not vendorWhy and (not recipePrice or r.buy < recipePrice) then
+					recipePrice, recipeWhere = r.buy, "vendor"
+				end
+			end
 			local noPrice = src == "item" and not bop and recipePrice == nil
 			local gated = not allowed
 				and (
 					unchecked
 					or bop
 					or noPrice
+					-- not in the data's list of the profession's recipes: not confirmed obtainable
+					or src == "unlisted"
 					or (src == "special" and not (input.exclude and input.exclude.special == false))
 				)
 			local at = -math.huge
@@ -382,6 +423,10 @@ function P.prepare(input)
 				teacher = (src == "special" or bop) and r.teacher or nil,
 				recipeItem = r.item,
 				recipePrice = recipePrice,
+				recipeWhere = recipePrice and recipeWhere or nil,
+				recipeVendor = src == "item" and r.vendor or nil,
+				vendorWhy = vendorWhy,
+				from = src == "item" and r.from or nil,
 				bop = bop or nil,
 				noPrice = noPrice or nil,
 				trainCost = src == "trainer" and r.cost or nil,
@@ -637,6 +682,7 @@ local function baselineFor(ctx, chance)
 				bought[c.spell] = true
 				buys[#buys + 1] =
 					{ spell = c.spell, item = c.recipeItem, price = c.recipePrice, learn = c.at, swap = true }
+				buys[#buys].where, buys[#buys].vendor = c.recipeWhere, c.recipeVendor
 			end
 		end
 	end
@@ -682,6 +728,8 @@ local function baselineFor(ctx, chance)
 			spell = best.spell,
 			item = best.recipeItem,
 			price = best.recipePrice,
+			where = best.recipeWhere,
+			vendor = best.recipeVendor,
 			learn = best.at,
 			saves = not fillsGap and bestSave or nil,
 			fillsGap = fillsGap or nil,
@@ -1136,11 +1184,14 @@ local function shortcutOf(o, saves)
 		needs = o.teacher or "a special teacher"
 	elseif o.unchecked then
 		needs = "no trainer you opened teaches it"
+	elseif o.src == "unlisted" then
+		why = "not confirmed obtainable in Forever"
 	elseif o.bop then
-		-- a recipe item that binds when picked up: never an auction buy; the data may say who has it
-		why = "its recipe binds when picked up" .. (o.teacher and (": " .. o.teacher) or "")
+		-- a recipe item that binds when picked up: never an auction buy; the data may say where it comes from
+		local from = fromText(o)
+		why = "its recipe binds when picked up" .. (from and (": " .. from) or "")
 	elseif o.noPrice then
-		why = "no auction price today"
+		why = "no auction price today" .. (o.vendorWhy and ("; " .. o.vendorWhy) or "")
 	end
 	return { spell = o.spell, name = o.name, saves = saves, src = o.src, needs = needs, why = why, bop = o.bop }
 end
@@ -1400,7 +1451,9 @@ local function finishCore(ctx, baseline, have, commits, own)
 					name = o.name,
 					item = b.item,
 					price = b.price,
-					where = "ah",
+					-- "vendor": the data names a vendor that sells it for less than the auction house
+					where = b.where or "ah",
+					vendor = b.vendor,
 					learn = b.learn,
 					owned = (own[b.item] or 0) > 0 or nil, -- in the bags already: learn it, no AH
 					saves = b.saves,
@@ -1786,7 +1839,7 @@ end
 -- Whether a step sends the user to the AH: a recipe to buy there, or a reagent it buys there.
 local function needsAh(ctx, st)
 	if st.kind == "buyRecipe" then
-		return not st.owned
+		return not st.owned and st.where ~= "vendor"
 	end
 	for _, b in ipairs(st.kind == "craft" and st.buy or {}) do
 		if isAh(ctx, b.item) then
@@ -1833,7 +1886,7 @@ local function tripOf(ctx, steps, chance, gold)
 		end
 		local cost = 0
 		if st.kind == "buyRecipe" then
-			cost = st.owned and 0 or (st.price or 0)
+			cost = (st.owned or st.where == "vendor") and 0 or (st.price or 0)
 		else
 			for _, b in ipairs(st.buy) do
 				if isAh(ctx, b.item) then
@@ -1846,7 +1899,7 @@ local function tripOf(ctx, steps, chance, gold)
 			break
 		end
 		if st.kind == "buyRecipe" then
-			if not st.owned then
+			if not st.owned and st.where ~= "vendor" then
 				add(st.item, 1, st.price, "count")
 				byItem[st.item].recipe = true
 			end
@@ -1962,7 +2015,10 @@ function P.shoppingOf(ctx, steps, trip)
 		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
 			break
 		elseif st.kind == "buyRecipe" then
-			if not st.owned then
+			if not st.owned and st.where == "vendor" then
+				local merchant = st.vendor and st.vendor.name
+				add(shop.vendor, vendorBy, st.item, 1, st.price, { merchant = merchant, kind = "pattern" }, j)
+			elseif not st.owned then
 				add(shop.ah, ahBy, st.item, 1, st.price, { kind = "pattern" }, j)
 			end
 		elseif st.kind == "craft" then
@@ -2090,7 +2146,8 @@ end
 --   counted when from <= 1: a profession not learned yet), level, exclude, trainerSeen, effort, luck;
 --   recipeItems = false: plan with trainer and auto recipes only.
 -- Returns { total, spent, back, trainingCost, steps, gaps = { { from, to, why } }, recipesToBuy = { { spell, name,
--- item, price } }, unknownPrices (items a recipe needs that have no price), unknownItems, reached, complete }.
+-- item, price } }, unknownPrices (reagents that have no price), unknownItems, unknownRecipeItems (tradeable recipe
+-- items with no price), reached, complete }; opts.faction as Planner.prepare's input.faction.
 -- total = spent - back + recipe items + trainingCost, in copper, buying for the luck percentile (rule 1). A gap is a
 -- stretch no recipe covers: with complete data there is none.
 function P.costToCap(prof, from, to, priceFn, opts)
@@ -2100,8 +2157,8 @@ function P.costToCap(prof, from, to, priceFn, opts)
 	local price = opts.price
 	local built = price == nil
 	price = price or {}
-	local unknown, unknownItems = {}, {}
-	local function need(i)
+	local unknown, unknownItems, unknownRecipes = {}, {}, 0
+	local function need(i, recipeItem)
 		if built and price[i] == nil and not unknown[i] then
 			local v = vendor[i]
 			if v then
@@ -2115,18 +2172,24 @@ function P.costToCap(prof, from, to, priceFn, opts)
 		end
 		if not (price[i] and price[i].buy) and not unknown[i] then
 			unknown[i] = true
-			unknownItems[#unknownItems + 1] = i
+			if recipeItem then
+				-- a recipe item nobody sells today: its recipe is a shortcut, not a hole in the reagent prices
+				unknownRecipes = unknownRecipes + 1
+			else
+				unknownItems[#unknownItems + 1] = i
+			end
 		end
 	end
 	local learned = opts.learned
 	local auto = {}
 	for spell, r in pairs(recipes) do
-		if not r.gone then
+		-- only recipes the plan may use by itself: not the unlisted, special or bind-on-pickup shortcuts
+		if not r.gone and r.src ~= "unlisted" and r.src ~= "special" and not (r.src == "item" and r.bop) then
 			for k = 1, #(r.mats or {}) - 1, 2 do
 				need(r.mats[k])
 			end
-			if r.src == "item" and r.item and not r.bop then
-				need(r.item)
+			if r.src == "item" and r.item then
+				need(r.item, true)
 			end
 		end
 		if r.src == "auto" then
@@ -2153,6 +2216,7 @@ function P.costToCap(prof, from, to, priceFn, opts)
 		ranks = ranks,
 		exclude = opts.exclude,
 		trainerSeen = opts.trainerSeen,
+		faction = opts.faction,
 		recipes = recipes,
 		items = opts.items or {},
 		learned = learned,
@@ -2172,6 +2236,7 @@ function P.costToCap(prof, from, to, priceFn, opts)
 		trainingCost = 0,
 		unknownPrices = #unknownItems,
 		unknownItems = unknownItems,
+		unknownRecipeItems = unknownRecipes,
 		reached = plan.cap,
 		capBlock = plan.capBlock,
 	}

@@ -40,7 +40,9 @@ function G.needsOf(step, profession)
 		out[1] = { kind = "trainer", profession = profession, name = step.name or step.rank, at = step.at }
 		return out
 	elseif step.kind == "buyRecipe" then
-		out[1] = { kind = "auction", items = { { item = step.item, count = 1 } } }
+		-- a recipe item the data's vendor sells for less than the auction house goes to a vendor
+		local kind = step.where == "vendor" and "vendor" or "auction"
+		out[1] = { kind = kind, items = { { item = step.item, count = 1 } } }
 		return out
 	end
 	local vendor, ah = {}, {}

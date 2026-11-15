@@ -458,7 +458,7 @@ end
 --   3. Data/Custom.lua (ns.Data.custom): optional, the player's own changes (Data/Custom.example.lua).
 -- No layer is ever written to: a changed row is a copy.
 
-local SOURCES = { auto = true, trainer = true, item = true, special = true }
+local SOURCES = { auto = true, trainer = true, item = true, special = true, unlisted = true }
 local NPC_ROLES = { trade = true, cook = true, lwtrainer = true, cooktrainer = true, auction = true, trainer = true }
 
 local function isCount(v)
@@ -502,8 +502,19 @@ local RECIPE_FIELDS = {
 		function(v)
 			return SOURCES[v] == true
 		end,
-		"auto, trainer, item or special",
+		"auto, trainer, item, special or unlisted",
 	},
+	from = { isText, "text (vendor, quest, drop, crafted)" },
+	vendor = {
+		function(v)
+			return type(v) == "table" and (v.name == nil or isText(v.name))
+		end,
+		"a table { name, npc, zone, a, h }",
+	},
+	buy = { isCount, "a number >= 0 (copper)" },
+	faction = { isCount, "a faction id" },
+	rep = { isCount, "a reputation rank" },
+	unc = { isFlag, "true or false" },
 	mats = { isMats, "a list { item, count, item, count, ... }" },
 	makes = { isId, "an item id" },
 	n = { isCount, "a number >= 0" },

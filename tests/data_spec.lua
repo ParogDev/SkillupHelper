@@ -314,7 +314,6 @@ describe("a trainer recipe with a learn rank below yellow", function()
 	it("is trained at its learn rank and crafted through its orange range: no gap, far fewer crafts", function()
 		local old = totals(P.run(smith(false)))
 		local plan = P.run(smith(true))
-		print(table.concat(F.describe(plan), "\n"))
 		local crafts, gaps, kinds = totals(plan)
 		assert.equal(0, gaps)
 		-- 47 points, nearly all orange: about one craft a point, not the 100+ of the yellow and green grind
@@ -449,6 +448,157 @@ describe("recipe items", function()
 		end
 		assert.equal(0, spells({}))
 		assert.equal(1, spells({ [9] = true }))
+	end)
+end)
+
+describe("where a recipe comes from", function()
+	local COD = 7828
+	local VENDOR = { name = "Kelsey Yance", npc = 2664, zone = 33 }
+	local function run(change, extra, noAhPrice)
+		local input = F.cooking()
+		local recipes = {}
+		for spell, r in pairs(input.recipes) do
+			recipes[spell] = r
+		end
+		local cod = { learn = 150 }
+		for k, v in pairs(input.recipes[COD]) do
+			cod[k] = cod[k] or v
+		end
+		for k, v in pairs(change or {}) do
+			cod[k] = v
+		end
+		recipes[COD] = cod
+		input.recipes = recipes
+		if noAhPrice then
+			input.price[I.CODRECIPE] = nil
+		end
+		for k, v in pairs(extra or {}) do
+			input[k] = v
+		end
+		return P.run(input)
+	end
+	local function step(plan, kind)
+		for _, st in ipairs(plan.steps) do
+			if st.kind == kind and st.spell == COD then
+				return st
+			end
+		end
+	end
+	local function cut(plan)
+		for _, st in ipairs(plan.steps) do
+			for _, c in ipairs(st.shortcuts or {}) do
+				if c.spell == COD then
+					return c
+				end
+			end
+		end
+	end
+
+	it("buys a recipe item from its vendor when that is cheaper than the auction house", function()
+		local plan = run({ from = "vendor", vendor = VENDOR, buy = 2200 })
+		local buy = step(plan, "buyRecipe")
+		assert.same({ "vendor", 2200, "Kelsey Yance" }, { buy.where, buy.price, buy.vendor.name })
+		-- a vendor buy is no auction house trip, and sits with the vendor stops
+		assert.is_false(P.needsAh({ price = {} }, buy))
+		for _, r in ipairs(plan.trip and plan.trip.rows or {}) do
+			assert.is_not.equal(I.CODRECIPE, r.item)
+		end
+		local atVendor = false
+		for _, r in ipairs(plan.shopping.vendor) do
+			atVendor = atVendor or (r.item == I.CODRECIPE and r.merchant == "Kelsey Yance")
+		end
+		assert.is_true(atVendor)
+		assert.same(
+			{ kind = "vendor", items = { { item = I.CODRECIPE, count = 1 } } },
+			(function()
+				local G = {}
+				assert(loadfile("Guide.lua"))("SkillupHelper", G)
+				return G.Guide.needsOf(buy, "Cooking")[1]
+			end)()
+		)
+		-- the auction house wins when it is cheaper
+		local ah = step(run({ from = "vendor", vendor = VENDOR, buy = 9000 }), "buyRecipe")
+		assert.same({ "ah", 2811 }, { ah.where, ah.price })
+		-- with no auction price the vendor alone makes it a plain buy
+		local only = step(run({ from = "vendor", vendor = VENDOR, buy = 2200 }, nil, true), "buyRecipe")
+		assert.equal("vendor", only.where)
+	end)
+
+	it("does not assume a vendor of the other faction, or one that asks for a reputation", function()
+		local horde = { name = "Kelsey Yance", npc = 2664, a = 1, h = -1 }
+		local plan = run({ vendor = horde, buy = 2200 }, { faction = "Horde" }, true)
+		assert.is_nil(step(plan, "buyRecipe"))
+		assert.equal("no auction price today; its vendor is the other faction's", cut(plan).why)
+		assert.equal(
+			"vendor",
+			step(run({ vendor = horde, buy = 2200 }, { faction = "Alliance" }, true), "buyRecipe").where
+		)
+		-- faction not known: a vendor hostile to either side is not assumed
+		assert.is_nil(step(run({ vendor = horde, buy = 2200 }, nil, true), "buyRecipe"))
+		local rep = run({ vendor = VENDOR, buy = 2200, faction = 529, rep = 5 }, nil, true)
+		assert.equal("no auction price today; its vendor asks for a reputation", cut(rep).why)
+		-- with an auction price it is still a buy there
+		assert.equal("ah", step(run({ vendor = horde, buy = 2200 }, { faction = "Horde" }), "buyRecipe").where)
+	end)
+
+	it("names the source of a bind-on-pickup recipe item on its shortcut", function()
+		assert.equal(
+			"its recipe binds when picked up: sold by Kelsey Yance",
+			cut(run({ bop = true, from = "vendor", vendor = VENDOR, buy = 2200 })).why
+		)
+		assert.equal("its recipe binds when picked up: a drop", cut(run({ bop = true, from = "drop" })).why)
+		assert.equal("its recipe binds when picked up: a quest reward", cut(run({ bop = true, from = "quest" })).why)
+	end)
+
+	it("never plans a recipe the data does not list, until the player says they can get it", function()
+		local plan = run({ src = "unlisted", item = false })
+		assert.is_nil(step(plan, "craft"))
+		assert.is_nil(step(plan, "train"))
+		assert.equal("not confirmed obtainable in Forever", cut(plan).why)
+		local used = run({ src = "unlisted", item = false }, { exclude = { allow = { [COD] = true } } })
+		assert.is_not_nil(step(used, "craft"))
+		-- a learned one is simply known
+		local known = run({ src = "unlisted", item = false }, { learned = { [COD] = true, [3398] = true } })
+		assert.is_not_nil(step(known, "craft"))
+	end)
+
+	it("shows the trainer's price on the train step and counts it", function()
+		local prof = shipped().professions[164]
+		prof.recipes[101].cost = 250
+		local r = P.costToCap(prof, 1, 60, function()
+			return 10
+		end, { cap = 75 })
+		local train
+		for _, st in ipairs(r.steps) do
+			train = train or (st.kind == "train" and st.spell == 101 and st)
+		end
+		assert.equal(250, train.cost)
+		assert.equal(250, r.trainingCost)
+		local d = ns.View.describe({
+			profession = "B",
+			skill = 1,
+			maxSkill = 75,
+			planner = P.run({
+				skill = 1,
+				cap = 75,
+				recipes = prof.recipes,
+				learned = { [100] = true },
+				price = { [1] = { buy = 10 } },
+			}),
+		}, {
+			money = L.money,
+			nameOf = function(_, f)
+				return f
+			end,
+			have = function()
+				return 0
+			end,
+		})
+		local right
+		for _, row in ipairs(d.later) do
+			right = right or (type(row.text) == "string" and row.text:find("^Train Belt") and row.right)
+		end
+		assert.equal("at 45, 2s 50c", right)
 	end)
 end)
 
