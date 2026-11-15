@@ -73,6 +73,13 @@
   regenerates the data and opens a pull request with a report of what changed. `tools/import_savedvars.py` merges
   shared files under a written rule (a newer build wins, otherwise two files must agree, conflicts are reported).
 
+## 0.2.17
+
+- A step whose reagent you can craft from something in your bags crafts it instead of buying it: with Medium Hide
+  in your bags, Hillman's Shoulders says "Craft 2 Cured Medium Hide first" and puts Salt on the vendor list rather
+  than buying Cured Medium Hide on the AH. Before, the planner only took that route when crafting the reagent from
+  bought materials was 20% cheaper than buying it.
+
 ## 0.2.16
 
 - The More tab has controls for the planner's options: "Buy for bad luck" (50% to 99%), "Effort per craft" with - and
