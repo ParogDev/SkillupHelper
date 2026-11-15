@@ -571,6 +571,52 @@ describe("Owned raw reagents of an intermediate", function()
 		assert.is_nil(bought[I.CURED])
 		assert.equal(st.crafts, bought[I.SALT])
 	end)
+
+	local function boughtOf(st)
+		local bought = {}
+		for _, b in ipairs(st.buy) do
+			bought[b.item] = b.count
+		end
+		return bought
+	end
+
+	-- In game: 15 Cured Medium Hide in the bags, plenty of Medium Leather, no raw hides. The cure variant used to take
+	-- the step because it shares the owned leather, then bought hides and Salt to cure what was already in the bags.
+	it("crafts from owned intermediates and never re-crafts them from bought raws", function()
+		local input = pantsInput(0)
+		input.have = { [I.CURED] = 16, [I.LIGHT] = 400 }
+		local st = P.run(input).steps[1]
+		assert.equal("Light Leather Pants", st.name)
+		assert.same({}, st.pre)
+		local bought = boughtOf(st)
+		assert.is_nil(bought[I.CURED])
+		assert.is_nil(bought[I.HIDE])
+		assert.is_nil(bought[I.SALT])
+	end)
+
+	-- Owned Salt alone (a vendor item) is no reason to cure: the hides would be bought anyway, and at buy prices the
+	-- cured hide is the cheaper route (under CRAFT_SAVING).
+	it("buys the intermediate when only a vendor raw of its recipe is owned", function()
+		local input = pantsInput(0)
+		input.have = { [I.SALT] = 40, [I.LIGHT] = 400 }
+		local st = P.run(input).steps[1]
+		assert.equal("Light Leather Pants", st.name)
+		assert.same({}, st.pre)
+		assert.is_nil(boughtOf(st)[I.HIDE])
+	end)
+
+	-- In game: 15 Medium Hide and 15 Salt, one Cured Medium Hide, plenty of leather: cure, never buy cured hides.
+	it("cures owned hides when one cured hide and owned leather are in the bags too", function()
+		local input = pantsInput(16)
+		input.have = { [I.HIDE] = 16, [I.SALT] = 16, [I.CURED] = 1, [I.LIGHT] = 400 }
+		local st = P.run(input).steps[1]
+		assert.equal("Light Leather Pants", st.name)
+		local bought = boughtOf(st)
+		assert.is_nil(bought[I.CURED])
+		assert.is_nil(bought[I.HIDE])
+		assert.equal(1, #st.pre)
+		assert.equal(I.CURED, st.pre[1].item)
+	end)
 end)
 
 describe("AH trip", function()
