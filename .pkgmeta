@@ -13,3 +13,5 @@ ignore:
   # Written on this PC from your own prices; the example documents the shape.
   - Data/Plan.lua
   - Data/Plan.example.lua
+  # The generator of Data/Recipes.lua and its overlay: for maintainers, not for the game folder.
+  - tools
