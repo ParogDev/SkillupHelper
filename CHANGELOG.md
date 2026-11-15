@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3
+
+- The TOC no longer lists `Data\Custom.lua`, a file nobody ships, so its load warning is gone from every start.
+  Your own changes now go in a small addon folder of your own, `SkillupHelper_Custom`: copy it from `extras/` next
+  to `SkillupHelper`, edit its `Custom.lua`, restart the game once. An update of Skillup Helper never overwrites it.
+  The shape is unchanged (`Custom.example.lua` in the same folder). A `Data/Custom.lua` left in the SkillupHelper
+  folder is no longer read: move its table into the new folder's `Custom.lua` as `SkillupHelper_Custom = { ... }`.
+
 ## 0.3.2
 
 - The guide knows which trainer rank teaches a recipe. A trainer teaches the recipes learned below the next rank's

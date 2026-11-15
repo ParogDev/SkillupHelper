@@ -217,22 +217,39 @@ describe("effectivePlan", function()
 	it("never raises on a custom file that is not a table", function()
 		local eff, report = L.effectivePlan(shipped(), nil, "oops")
 		assert.is_not_nil(eff)
-		assert.same({ "ns.Data.custom: must be a table" }, report.custom.errors)
+		assert.same({ "SkillupHelper_Custom: must be a table" }, report.custom.errors)
 		local _, errors = L.validateCustom({ recipes = 5, vendor = "x", npcs = true })
 		assert.equal(3, #errors)
 	end)
 
+	-- The player's addon sets one global table; load a file of it into a sandbox and return that table.
+	local function customTable(path)
+		local env = {}
+		local chunk = assert(loadfile(path))
+		setfenv(chunk, env)
+		chunk("SkillupHelper_Custom", {})
+		return env.SkillupHelper_Custom
+	end
+
 	it("accepts the shipped example file whole", function()
-		local ex = {}
-		assert(loadfile("Data/Custom.example.lua"))("SkillupHelper", ex)
-		local _, errors = L.validateCustom(ex.Data.custom)
+		local custom = customTable("extras/SkillupHelper_Custom/Custom.example.lua")
+		local _, errors = L.validateCustom(custom)
 		assert.same({}, errors)
 		local data = {}
 		assert(loadfile("Data/Recipes.lua"))("SkillupHelper", data)
-		local eff, report = L.effectivePlan(data.Data.recipes, nil, ex.Data.custom)
+		local eff, report = L.effectivePlan(data.Data.recipes, nil, custom)
 		assert.same({}, report.custom.errors)
 		assert.equal(1, eff.professions[164].recipes[2660].learn)
 		assert.is_nil(eff.professions[164].recipes[2663])
+	end)
+
+	it("ships a Custom.lua template that loads empty and clean", function()
+		local custom = customTable("extras/SkillupHelper_Custom/Custom.lua")
+		local _, errors = L.validateCustom(custom)
+		assert.same({}, errors)
+		local toc = assert(io.open("extras/SkillupHelper_Custom/SkillupHelper_Custom.toc")):read("*a")
+		assert.truthy(toc:find("## Interface: 16001", 1, true))
+		assert.truthy(toc:find("\nCustom.lua", 1, true))
 	end)
 end)
 

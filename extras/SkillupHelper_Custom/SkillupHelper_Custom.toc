@@ -1,0 +1,6 @@
+## Interface: 16001
+## Title: Skillup Helper: my changes
+## Notes: Your own changes to Skillup Helper's recipes, vendors, NPCs, spots and trainers. Edit Custom.lua.
+## X-Game: forever
+
+Custom.lua

@@ -1251,7 +1251,7 @@ local function init()
 		g.pin = nil
 	end
 	gdb = g
-	-- the shipped seeds, then the player's own (Data/Custom.lua npcs, checked by Logic.validateCustom)
+	-- the shipped seeds, then the player's own (SkillupHelper_Custom npcs, checked by Logic.validateCustom)
 	local data = ns.plan and ns.plan()
 	-- a Custom.lua row is the player's own position; the shipped seeds are Classic ones
 	local own = {}

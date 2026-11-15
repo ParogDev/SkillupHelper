@@ -1,12 +1,14 @@
 -- Your own changes to the recipe data, kept apart from the files the addon ships (an update never overwrites them).
 --
--- To use it: copy this file to Data/Custom.lua (same folder), keep what you need, then restart the game the first
--- time (a new file is only seen at start) and /reload after every later edit. This example file is not loaded.
+-- To use it: copy the folder extras/SkillupHelper_Custom out of SkillupHelper, next to it, so the game has
+-- Interface/AddOns/SkillupHelper_Custom/SkillupHelper_Custom.toc. Copy the entries you need from this example into
+-- that folder's Custom.lua. Restart the game the first time (a new addon folder is only seen at start) and /reload
+-- after every later edit. This example file is not loaded; only Custom.lua is.
 --
 -- The addon reads three layers, each on top of the one before:
 --   1. Data/Recipes.lua   shipped: every recipe of every profession (generated, do not edit);
 --   2. Data/Plan.lua      optional: fallback prices written by a price tool on your PC;
---   3. Data/Custom.lua    optional: this file. What you write here wins over both.
+--   3. Custom.lua         optional: your SkillupHelper_Custom table. What you write here wins over both.
 -- One thing wins over this file: what a profession trainer shows in game. Once you open a trainer, the skill it asks
 -- for each recipe is saved and used.
 --
@@ -20,9 +22,7 @@
 -- numbers in Data/Recipes.lua, or in a database site's address (.../spell=2660, .../item=2840).
 --
 -- The values below only show the shape: the learn ranks, the teacher and the coordinates are made up.
-local _, ns = ...
-ns.Data = ns.Data or {}
-ns.Data.custom = {
+SkillupHelper_Custom = {
 	recipes = {
 		-- [skill line id] = { [spell id] = fields to change, or false }
 		[164] = {
@@ -76,8 +76,26 @@ ns.Data.custom = {
 	-- in percent of that map, and a role: "trade" or "cook" (a vendor; list what it sells), "trainer" (name the
 	-- profession in `trains`), "auction". An entry with a shipped NPC's id replaces it.
 	npcs = {
-		{ id = 3355, name = "Saru Steelfury", map = 1454, x = 76.6, y = 34.6, role = "trainer", trains = "Blacksmithing", place = "Orgrimmar" },
-		{ id = 3356, name = "Sumi", map = 1454, x = 75, y = 34.2, role = "trade", place = "Orgrimmar", sells = { 2880, 3466 } },
+		{
+			id = 3355,
+			name = "Saru Steelfury",
+			map = 1454,
+			x = 76.6,
+			y = 34.6,
+			role = "trainer",
+			trains = "Blacksmithing",
+			place = "Orgrimmar",
+		},
+		{
+			id = 3356,
+			name = "Sumi",
+			map = 1454,
+			x = 75,
+			y = 34.2,
+			role = "trade",
+			place = "Orgrimmar",
+			sells = { 2880, 3466 },
+		},
 	},
 
 	-- Places to level a world skill: [skill line] = { [spot id] = spot, or false }. 633 Lockpicking, 186 Mining,

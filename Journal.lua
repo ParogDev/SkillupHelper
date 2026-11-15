@@ -1450,7 +1450,7 @@ local function customTrainer(e)
 	return row
 end
 
--- Data/Custom.lua's `spots` and `trainers` on top of the shipped Data/Spots.lua and Data/Trainers.lua.
+-- SkillupHelper_Custom's `spots` and `trainers` on top of the shipped Data/Spots.lua and Data/Trainers.lua.
 --   spots = { [skill line] = { [spot id] = spot | false } }: a new id adds a spot, a shipped id replaces it, false
 --           leaves it out. A spot: map, x, y, gets = { { t = target key, n } }, optional pts, pk, zone, area, note.
 --   trainers = { row, ... }: a row with a shipped id replaces it. Rows as in Data/Trainers.lua.
@@ -1606,7 +1606,7 @@ end
 
 P.custom = P.run("custom", function()
 	return P.applyCustom(ns.Data.spots, ns.Data.trainers, ns.Data.custom)
-end) or { applied = 0, errors = { "Data/Custom.lua spots and trainers could not be applied" } }
+end) or { applied = 0, errors = { "SkillupHelper_Custom spots and trainers could not be applied" } }
 
 local ev = CreateFrame("Frame")
 P.eventFrame = ev
@@ -1635,7 +1635,12 @@ ev:SetScript("OnEvent", function(_, event, unit, _, spell)
 			end
 			local errs = P.custom and P.custom.errors or {}
 			if #errs > 0 then
-				print(("SkillupHelper: Data/Custom.lua places and NPCs: %d left out. First: %s"):format(#errs, errs[1]))
+				print(
+					("SkillupHelper: SkillupHelper_Custom places and NPCs: %d left out. First: %s"):format(
+						#errs,
+						errs[1]
+					)
+				)
 			end
 		end)
 		P.run("tracker", P.updateTracker)
