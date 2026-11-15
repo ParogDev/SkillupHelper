@@ -388,10 +388,11 @@ end
 local EXCLUDE_FLAG = { dungeon = true, ahPatterns = true }
 
 -- Writes one More-tab control into SkillupHelperDB, under the keys the slash commands write:
---   luck (db.luck, one of L.LUCKS, nil resets), effort (db.effort, copper >= 0, nil resets), noRecipeBuys and
---   noAlts (true or nil), dungeon / ahPatterns (db.exclude[key]: true leaves them out), special (db.exclude.special:
---   false plans special teachers, nil leaves them out), allow / notNow (db.exclude[key][spell]: true or nil; one
---   clears the other, as /skillup allow and /skillup exclude <spellID> do).
+--   luck (db.luck, one of L.LUCKS, nil resets), effort (db.effort, copper >= 0, nil resets), noRecipeBuys,
+--   noAlts and resale ("Count selling what I craft", off by default) (true or nil), dungeon / ahPatterns
+--   (db.exclude[key]: true leaves them out), special (db.exclude.special: false plans special teachers, nil leaves
+--   them out), allow / notNow (db.exclude[key][spell]: true or nil; one clears the other, as /skillup allow and
+--   /skillup exclude <spellID> do).
 -- a = { key, value, spell }. Returns true, or false and the broken link.
 function L.applySetting(db, a)
 	if type(db) ~= "table" then
@@ -419,7 +420,7 @@ function L.applySetting(db, a)
 		end
 		db.effort = v
 		return true
-	elseif k == "noRecipeBuys" or k == "noAlts" then
+	elseif k == "noRecipeBuys" or k == "noAlts" or k == "resale" then
 		db[k] = v and true or nil
 		return true
 	end
@@ -450,18 +451,598 @@ function L.applySetting(db, a)
 	return false, "unknown setting " .. tostring(k)
 end
 
+-- The data layers -------------------------------------------------------------------------------------------------
+-- The planner reads one table, built once at load from three files:
+--   1. Data/Recipes.lua (ns.Data.recipes): shipped, every recipe of every profession, no auction prices;
+--   2. Data/Plan.lua (ns.Data.plan): optional, written on a PC by a price tool, for some professions only. Its
+--      fallback prices (items[].mv), sale values (recipes[].sell / takes), pricesAt and offline rows go on top;
+--   3. Data/Custom.lua (ns.Data.custom): optional, the player's own changes (Data/Custom.example.lua).
+-- No layer is ever written to: a changed row is a copy.
+
+local SOURCES = { auto = true, trainer = true, item = true, special = true, unlisted = true }
+local NPC_ROLES = { trade = true, cook = true, lwtrainer = true, cooktrainer = true, auction = true, trainer = true }
+
+local function isCount(v)
+	return type(v) == "number" and v >= 0 and v == v and v ~= math.huge
+end
+
+local function isId(v)
+	return type(v) == "number" and v > 0 and v == math.floor(v)
+end
+
+local function isText(v)
+	return type(v) == "string" and v ~= ""
+end
+
+local function isFlag(v)
+	return type(v) == "boolean"
+end
+
+local function isMats(v)
+	if type(v) ~= "table" or #v == 0 or #v % 2 ~= 0 then
+		return false
+	end
+	for i = 1, #v, 2 do
+		if not isId(v[i]) or not (type(v[i + 1]) == "number" and v[i + 1] > 0) then
+			return false
+		end
+	end
+	return true
+end
+
+-- field = { check, what it must be }
+local RECIPE_FIELDS = {
+	y = { isCount, "a number >= 0" },
+	g = { isCount, "a number >= 0" },
+	k = { isCount, "a number >= 0" },
+	learn = { isCount, "a number >= 0" },
+	cost = { isCount, "a number >= 0 (copper)" },
+	name = { isText, "text" },
+	teacher = { isText, "text" },
+	src = {
+		function(v)
+			return SOURCES[v] == true
+		end,
+		"auto, trainer, item, special or unlisted",
+	},
+	from = { isText, "text (vendor, quest, drop, crafted)" },
+	vendor = {
+		function(v)
+			return type(v) == "table" and (v.name == nil or isText(v.name))
+		end,
+		"a table { name, npc, zone, a, h }",
+	},
+	buy = { isCount, "a number >= 0 (copper)" },
+	faction = { isCount, "a faction id" },
+	rep = { isCount, "a reputation rank" },
+	unc = { isFlag, "true or false" },
+	mats = { isMats, "a list { item, count, item, count, ... }" },
+	makes = { isId, "an item id" },
+	n = { isCount, "a number >= 0" },
+	item = { isId, "an item id" },
+	bop = { isFlag, "true or false" },
+	gone = { isFlag, "true or false" },
+}
+local ITEM_FIELDS = {
+	name = { isText, "text" },
+	sell = { isCount, "a number >= 0 (copper)" },
+	mv = { isCount, "a number >= 0 (copper)" },
+	stack = { isCount, "a number >= 0" },
+}
+
+local function checkFields(row, fields, where, errors)
+	local ok = true
+	for k, v in pairs(row) do
+		local f = fields[k]
+		if not f then
+			errors[#errors + 1] = ("%s.%s: unknown field"):format(where, tostring(k))
+			ok = false
+		elseif not f[1](v) then
+			errors[#errors + 1] = ("%s.%s: must be %s"):format(where, tostring(k), f[2])
+			ok = false
+		end
+	end
+	return ok
+end
+
+local function sortedKeysOf(t)
+	local keys = {}
+	for k in pairs(t) do
+		keys[#keys + 1] = k
+	end
+	table.sort(keys, function(a, b)
+		return tostring(a) < tostring(b)
+	end)
+	return keys
+end
+
+-- Checks Data/Custom.lua's table. Returns the entries that are usable ({ recipes, vendor, items, npcs }, each maybe
+-- empty) and a list of errors, one per bad entry, each naming its key ("recipes[164][2660].learn: must be ...").
+-- A bad entry is left out; the rest of the file still applies. Never raises.
+function L.validateCustom(custom)
+	local clean, errors = { recipes = {}, vendor = {}, items = {}, npcs = {} }, {}
+	if custom == nil then
+		return clean, errors
+	end
+	if type(custom) ~= "table" then
+		return clean, { "ns.Data.custom: must be a table" }
+	end
+	for _, k in ipairs(sortedKeysOf(custom)) do
+		-- spots and trainers are checked and applied by Journal.lua (P.applyCustom)
+		if clean[k] == nil and k ~= "version" and k ~= "spots" and k ~= "trainers" then
+			errors[#errors + 1] = ("%s: unknown section (recipes, vendor, items, npcs, spots, trainers)"):format(
+				tostring(k)
+			)
+		end
+	end
+	local function section(name)
+		local t = custom[name]
+		if t ~= nil and type(t) ~= "table" then
+			errors[#errors + 1] = name .. ": must be a table"
+			return {}
+		end
+		return t or {}
+	end
+	local recipes = section("recipes")
+	for _, line in ipairs(sortedKeysOf(recipes)) do
+		local rows = recipes[line]
+		local at = ("recipes[%s]"):format(tostring(line))
+		if not isId(line) then
+			errors[#errors + 1] = at .. ": the key must be a skill line id (164 = Blacksmithing)"
+		elseif type(rows) ~= "table" then
+			errors[#errors + 1] = at .. ": must be a table of [spell id] = { ... } or false"
+		else
+			for _, spell in ipairs(sortedKeysOf(rows)) do
+				local row = rows[spell]
+				local where = ("%s[%s]"):format(at, tostring(spell))
+				if not isId(spell) then
+					errors[#errors + 1] = where .. ": the key must be a spell id"
+				elseif row ~= false and type(row) ~= "table" then
+					errors[#errors + 1] = where .. ": must be a table of fields, or false to leave the recipe out"
+				elseif row == false or checkFields(row, RECIPE_FIELDS, where, errors) then
+					clean.recipes[line] = clean.recipes[line] or {}
+					clean.recipes[line][spell] = row
+				end
+			end
+		end
+	end
+	local vendor = section("vendor")
+	for _, item in ipairs(sortedKeysOf(vendor)) do
+		local price = vendor[item]
+		local where = ("vendor[%s]"):format(tostring(item))
+		if not isId(item) then
+			errors[#errors + 1] = where .. ": the key must be an item id"
+		elseif price ~= false and not (type(price) == "number" and price > 0) then
+			errors[#errors + 1] = where .. ": must be the vendor's price in copper, or false"
+		else
+			clean.vendor[item] = price
+		end
+	end
+	local items = section("items")
+	for _, item in ipairs(sortedKeysOf(items)) do
+		local row = items[item]
+		local where = ("items[%s]"):format(tostring(item))
+		if not isId(item) then
+			errors[#errors + 1] = where .. ": the key must be an item id"
+		elseif type(row) ~= "table" then
+			errors[#errors + 1] = where .. ": must be a table of fields"
+		elseif checkFields(row, ITEM_FIELDS, where, errors) then
+			clean.items[item] = row
+		end
+	end
+	local npcs = section("npcs")
+	for i = 1, #npcs do
+		local r = npcs[i]
+		local where = ("npcs[%d]"):format(i)
+		local bad
+		if type(r) ~= "table" then
+			bad = "must be a table { id, name, map, x, y, role }"
+		elseif not isId(r.id) then
+			bad = "id must be the NPC id"
+		elseif not isText(r.name) then
+			bad = "name must be text"
+		elseif not isId(r.map) then
+			bad = "map must be a uiMap id"
+		elseif not (isCount(r.x) and r.x <= 100 and isCount(r.y) and r.y <= 100) then
+			bad = "x and y must be 0 to 100 (percent of the map)"
+		elseif not NPC_ROLES[r.role] then
+			bad = "role must be trade, cook, trainer, lwtrainer, cooktrainer or auction"
+		elseif r.role == "trainer" and not isText(r.trains) then
+			bad = 'a trainer needs trains = "the profession\'s name"'
+		elseif r.place ~= nil and not isText(r.place) then
+			bad = "place must be text"
+		elseif r.sells ~= nil and type(r.sells) ~= "table" then
+			bad = "sells must be a list of item ids"
+		end
+		if not bad and r.sells then
+			for _, item in ipairs(r.sells) do
+				if not isId(item) then
+					bad = "sells must be a list of item ids"
+				end
+			end
+		end
+		if bad then
+			errors[#errors + 1] = ("%s: %s"):format(where, bad)
+		else
+			clean.npcs[#clean.npcs + 1] = r
+		end
+	end
+	return clean, errors
+end
+
+local function copyOf(t)
+	local out = {}
+	for k, v in pairs(t or {}) do
+		out[k] = v
+	end
+	return out
+end
+
+-- row with over's fields on top; row itself when over changes nothing.
+local function overlaid(row, over)
+	local out
+	for k, v in pairs(over) do
+		if row[k] ~= v then
+			out = out or copyOf(row)
+			out[k] = v
+		end
+	end
+	return out or row
+end
+
+-- The table the planner reads, from the three layers (any may be nil), and what loaded:
+-- report = { shipped = { build, professions = { "Name(id) n recipes" } } or the broken link,
+--            plan = "present, ..." or "absent (optional)", custom = "absent (optional)" or { applied, errors } }.
+-- Returns nil (and the report) when no layer has a profession. `custom` is validated here (L.validateCustom).
+function L.effectivePlan(shipped, plan, custom)
+	local report = {}
+	shipped = type(shipped) == "table" and shipped or nil
+	plan = type(plan) == "table" and plan or nil
+	local clean, errors = L.validateCustom(custom)
+	local out = {
+		version = 2,
+		build = shipped and shipped.build or (plan and plan.build),
+		vendor = copyOf(shipped and shipped.vendor),
+		-- item rows a layer adds or changes sit in this table; every other item reads through to the shipped table
+		-- (thousands of rows that are never copied or walked)
+		items = setmetatable({}, { __index = shipped and shipped.items or nil }),
+		professions = {},
+	}
+	-- per profession: the layers' parts, merged the first time its `recipes` are read (lazy below)
+	local layers = {}
+	if shipped then
+		local profs = {}
+		local counts = type(shipped.counts) == "table" and shipped.counts or {}
+		for id, p in pairs(shipped.professions or {}) do
+			out.professions[id] = p
+			layers[id] = { base = p }
+			-- the generator's own count: a profession's recipe table is not walked at load
+			profs[#profs + 1] = ("%s(%s) %s recipes"):format(
+				tostring(p.name),
+				tostring(id),
+				tostring(counts[id] or "?")
+			)
+		end
+		table.sort(profs)
+		report.shipped = {
+			build = shipped.build,
+			-- where and when the overlay's facts were read ("Wowhead, Forever section, 2026-11-14")
+			source = shipped.source,
+			professions = profs,
+		}
+	else
+		report.shipped = "Data/Recipes.lua not loaded: the shipped recipe data is missing from this copy of the addon"
+	end
+	if plan then
+		-- a version 1 export has thresholds only (no reagents): its recipe rows cannot go over the shipped ones
+		local v2 = (plan.version or 1) >= 2
+		for _, k in ipairs({ "generatedAt", "pricesAt", "effort", "sellShare" }) do
+			out[k] = plan[k]
+		end
+		if not shipped then
+			out.version = plan.version or 1
+		end
+		for item, price in pairs(plan.vendor or {}) do
+			out.vendor[item] = price
+		end
+		for item, row in pairs(plan.items or {}) do
+			local b = out.items[item]
+			rawset(out.items, item, b and overlaid(b, row) or row)
+		end
+		local n = 0
+		for id, p in pairs(plan.professions or {}) do
+			n = n + 1
+			if not layers[id] then
+				out.professions[id] = p
+				layers[id] = { base = p }
+			else
+				layers[id].plan = p
+				layers[id].planRecipes = v2
+			end
+		end
+		report.plan = ("present, %d profession%s%s%s"):format(
+			n,
+			n == 1 and "" or "s",
+			plan.generatedAt and (", generated " .. tostring(plan.generatedAt)) or "",
+			(shipped and not v2) and ", version 1: its recipe rows are not used" or ""
+		)
+	else
+		report.plan = "absent (optional)"
+	end
+	if custom ~= nil then
+		local applied = 0
+		for line, rows in pairs(clean.recipes) do
+			local layer = layers[line]
+			if not layer then
+				errors[#errors + 1] = ("recipes[%s]: no profession with this skill line id in the data"):format(
+					tostring(line)
+				)
+			else
+				-- checked now (one lookup per entry, so the errors are known at login), applied on first use
+				local keep = {}
+				local baseRecipes = layer.base.recipes or {}
+				for _, spell in ipairs(sortedKeysOf(rows)) do
+					local row = rows[spell]
+					local known = baseRecipes[spell]
+						or (layer.planRecipes and layer.plan.recipes and layer.plan.recipes[spell])
+					if row == false or known or (row.y and row.g and row.mats) then
+						keep[spell] = row
+						applied = applied + 1
+					else
+						errors[#errors + 1] = ("recipes[%s][%s]: not in the data, and a new recipe needs y, g and mats"):format(
+							tostring(line),
+							tostring(spell)
+						)
+					end
+				end
+				layer.custom = next(keep) and keep or nil
+			end
+		end
+		for item, price in pairs(clean.vendor) do
+			out.vendor[item] = price or nil
+			applied = applied + 1
+		end
+		for item, row in pairs(clean.items) do
+			local b = out.items[item]
+			rawset(out.items, item, b and overlaid(b, row) or row)
+			applied = applied + 1
+		end
+		if #clean.npcs > 0 then
+			out.npcs = clean.npcs
+			applied = applied + #clean.npcs
+		end
+		table.sort(errors)
+		report.custom = { applied = applied, errors = errors }
+	else
+		report.custom = "absent (optional)"
+	end
+	if not next(out.professions) then
+		return nil, report
+	end
+	-- A profession a layer changes gets its own entry: the fields now (a handful), the recipes when first read.
+	-- Nothing walks a recipe table at login; only the professions the player opens are ever merged.
+	for id, layer in pairs(layers) do
+		if layer.plan or layer.custom then
+			local base, p = layer.base, layer.plan
+			local entry = {}
+			for _, src in ipairs({ base, p or {} }) do
+				for k, v in pairs(src) do
+					if k ~= "recipes" and k ~= "removed" then
+						entry[k] = v
+					end
+				end
+			end
+			if p then
+				-- the shipped data covers every rank; an export made for a lower target must not shorten the plan
+				entry.to = math.max(tonumber(base.to) or 0, tonumber(p.to) or 0)
+				entry.ranks = base.ranks
+			end
+			out.professions[id] = setmetatable(entry, {
+				__index = function(t, k)
+					if k ~= "recipes" and k ~= "removed" then
+						return nil
+					end
+					local recipes, removed = copyOf(base.recipes), false
+					if p and layer.planRecipes then
+						for spell, row in pairs(p.recipes or {}) do
+							local b = recipes[spell]
+							recipes[spell] = b and overlaid(b, row) or row
+						end
+					end
+					for spell, row in pairs(layer.custom or {}) do
+						if row == false then
+							-- out of the plan, also when the client lists it as learned (Scan.build reads `removed`)
+							recipes[spell] = nil
+							removed = removed or {}
+							removed[spell] = true
+						else
+							recipes[spell] = recipes[spell] and overlaid(recipes[spell], row) or row
+						end
+					end
+					rawset(t, "recipes", recipes)
+					rawset(t, "removed", removed)
+					return rawget(t, k) or nil
+				end,
+			})
+		end
+	end
+	return out, report
+end
+
+-- Every row of an item table, for a caller that must walk one: (item, row) pairs. effectivePlan's `items` holds only
+-- the rows a layer added or changed and reads the rest through __index from the shipped table, so pairs() or next()
+-- on it sees the overlay rows alone; this walks the overlay rows, then each shipped row the overlay does not replace.
+-- A plain table walks as pairs() would. Nothing in the addon iterates the item table today (every reader indexes
+-- items[id]): a new walker uses this.
+function L.eachItem(items)
+	items = type(items) == "table" and items or {}
+	local mt = getmetatable(items)
+	local base = mt and type(mt.__index) == "table" and mt.__index or nil
+	local inBase, k = false, nil
+	return function()
+		while true do
+			local v
+			if not inBase then
+				k, v = next(items, k)
+				if k ~= nil then
+					return k, v
+				end
+				inBase = true
+				if not base then
+					return nil
+				end
+			end
+			k, v = next(base, k)
+			if k == nil then
+				return nil
+			end
+			if rawget(items, k) == nil then
+				return k, v
+			end
+		end
+	end
+end
+
+-- How old the shipped data is, in plain words: "Recipe data: build 1.60.1.70938, learn ranks from Wowhead, Forever
+-- section, 2026-11-14. Your game is build 1.60.1.71000: newer than the data, so a recipe changed since may be off
+-- until the addon is updated." shipped = ns.Data.recipes (or nil); version, buildNumber = GetBuildInfo()'s first two.
+-- Returns the line and whether the game is newer than the data (false when either build is unknown): a note, never
+-- an error.
+function L.dataStatus(shipped, version, buildNumber)
+	if type(shipped) ~= "table" then
+		return "Recipe data: not loaded (Data/Recipes.lua is missing from this copy of the addon).", false
+	end
+	local line = ("Recipe data: build %s"):format(tostring(shipped.build or "unknown"))
+	if shipped.source then
+		line = line .. ", learn ranks and sources from " .. tostring(shipped.source)
+	end
+	line = line .. "."
+	local dataBuild = tonumber(tostring(shipped.build or ""):match("(%d+)$"))
+	local gameBuild = tonumber(buildNumber)
+	if not gameBuild then
+		return line, false
+	end
+	local game = ("%s.%s"):format(tostring(version or "?"), tostring(buildNumber))
+	if dataBuild and gameBuild > dataBuild then
+		return ("%s Your game is build %s: newer than the data, so a recipe changed since may be off until the addon is updated."):format(
+			line,
+			game
+		),
+			true
+	end
+	return ("%s Your game is build %s."):format(line, game), false
+end
+
+-- Seed NPCs for the guide: Data/Npcs.lua's rows, then Data/Custom.lua's (a custom row with a shipped row's id
+-- replaces it).
+function L.npcRows(shipped, custom)
+	local out, at = {}, {}
+	for _, list in ipairs({ shipped or {}, custom or {} }) do
+		for _, r in ipairs(list) do
+			if at[r.id] then
+				out[at[r.id]] = r
+			else
+				out[#out + 1] = r
+				at[r.id] = #out
+			end
+		end
+	end
+	return out
+end
+
+-- What a profession trainer showed in game on top of a profession entry. req = SkillupHelperDB.learned.trainers[line]
+-- of this profession's own skill line (the caller picks it by the profession's id, so another profession's trainer
+-- never applies): { [spellID or lowercased name] = { skill, cost } }. A recipe the trainer lists by spell ID is a
+-- trainer recipe (whatever the data said), learned at the skill the trainer asks: the game's own word wins over
+-- Custom.lua and the shipped data. A row keyed by name only (no spell ID from the client) cannot tell same-named
+-- recipes apart, so it applies only to a recipe the data already calls a trainer recipe (or gives no source), and to
+-- a gone one only when it is the only such recipe of that name: an item, drop or vendor recipe that shares a
+-- trainer recipe's name keeps its source. Returns prof itself when nothing changes.
+function L.withTrainerReq(prof, req)
+	if type(prof) ~= "table" or type(req) ~= "table" or not next(req) then
+		return prof
+	end
+	local all = prof.recipes or {}
+	local function byNameOK(r)
+		return type(r.name) == "string" and (r.src == nil or r.src == "trainer")
+	end
+	-- lowercased name -> { n = recipes that a name-keyed row may stand for, live = how many of them are not gone },
+	-- built only when the trainer table has a name key
+	local names
+	for k in pairs(req) do
+		if type(k) == "string" then
+			names = {}
+			break
+		end
+	end
+	if names then
+		for _, r in pairs(all) do
+			if byNameOK(r) then
+				local k = r.name:lower()
+				local c = names[k] or { n = 0, live = 0 }
+				c.n = c.n + 1
+				c.live = c.live + (r.gone and 0 or 1)
+				names[k] = c
+			end
+		end
+	end
+	local recipes
+	for spell, r in pairs(all) do
+		local e = req[spell]
+		if e == nil and names and byNameOK(r) then
+			local k = r.name:lower()
+			local c = names[k]
+			if c and (not r.gone or (c.n == 1 and c.live == 0)) then
+				e = req[k]
+			end
+		end
+		if type(e) == "table" then
+			local over = { src = "trainer" }
+			if type(e.skill) == "number" then
+				over.learn = e.skill
+			end
+			if type(e.cost) == "number" then
+				over.cost = e.cost
+			end
+			if r.gone then
+				-- the trainer teaches it: it is in the game
+				over.gone = false
+			end
+			local row = overlaid(r, over)
+			if row ~= r then
+				recipes = recipes or copyOf(prof.recipes)
+				recipes[spell] = row
+			end
+		end
+	end
+	if not recipes then
+		return prof
+	end
+	local out = copyOf(prof)
+	out.recipes = recipes
+	return out
+end
+
 -- The plan's profession entry for a profession the client names: by skill line id, then parent id, then name.
 function L.findProfession(plan, info)
 	if not plan or not plan.professions or not info then
 		return nil
 	end
-	local p = plan.professions[info.professionID] or plan.professions[info.parentProfessionID or -1]
+	-- the client's ids and names may be secret values (an instance): a secret is never a key or compared
+	local function clean(v)
+		if v == nil or (issecretvalue ~= nil and issecretvalue(v)) then
+			return nil
+		end
+		return v
+	end
+	local id, parent = clean(info.professionID), clean(info.parentProfessionID)
+	local p = (id ~= nil and plan.professions[id]) or (parent ~= nil and plan.professions[parent]) or nil
 	if p then
 		return p
 	end
-	local names = { info.professionName, info.parentProfessionName }
+	local names = { clean(info.professionName) or false, clean(info.parentProfessionName) or false }
 	for _, prof in pairs(plan.professions) do
-		for _, n in pairs(names) do
+		for _, n in ipairs(names) do
 			if type(n) == "string" and prof.name and n:lower() == prof.name:lower() then
 				return prof
 			end

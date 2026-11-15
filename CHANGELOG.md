@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.3.0
+
+- Recipes are ranked by what you pay: materials plus effort. Selling what you craft no longer makes a dearer recipe
+  look cheap (at Blacksmithing 55 the plan picked Coarse Grinding Stone over Rough because it counted selling all
+  37). Turn on "Count selling what I craft" (Settings and data, or `/skillup resale on`) to count it
+  again; with it off a step says what selling would bring, without counting it.
+- Mining: where no smelting recipe gives points (about 140 to 155 and 185 to 300), the plan shows "Mine nodes"
+  stretches from the node route, at no gold cost, instead of a red gap; on the panel strip, in the Next lines, in
+  the journal and in `/skillup cost mining`.
+- The mailbox panel on an alt turns pages instead of growing past the screen.
+- The price diagnostics count an item with no price as missing, not as a live TSM price.
+- Nothing scrolls. The panel at the profession window shows what to do now, the next three steps and a strip of
+  the whole path; its tabs are gone, and shopping, alts and settings are journal pages. The journal's Path page
+  shows one stretch of the path at a time (pick it on the timeline or with Previous and Next), Overview is a grid
+  of cards, and long lists turn pages.
+- "Learn X" followed by "Craft X" is one step ("Learn and craft 43 Copper Dagger"). Rank training is shown with the
+  stretch it unlocks, with its skill and cost. Steps are numbered without breaks.
+- A minimap button: left-click opens the journal, right-click a menu, drag moves it. `/skillup minimap` or
+  Settings and data hides it. Bar addons that use LibDataBroker get a "SkillupHelper" launcher.
+- Windows stay sharp wherever you drag them: every window sits on whole screen pixels.
+- A trainer window read at a low skill no longer hides the trainer's later recipes; that left a false "nothing
+  from 185 to 215" for Blacksmithing. An item without a price never makes a gap: the step is planned and says
+  "price unknown for N items".
+- The guide knows every shipped trainer and recipe vendor for your faction, nearest first, and no longer says
+  "No known trainer yet" when one is in the data.
+- A journal window with six pages. Overview lists every profession with your skill, the cost to 300 in materials,
+  recipes and training, and each skill range the addon cannot plan, with the reason. Path lays one profession out
+  from 1 to 300 on a timeline with its steps. Where ranks the places to level Mining, Herbalism, Skinning, Fishing
+  and Lockpicking at your skill, with the route, mob levels, flight point and map. Shopping, Alts and mail, and
+  Settings and data hold the rest.
+- Open it with the new button on the panel (it pulses once after an install or update), the addon menu by the
+  minimap, a key binding (Key Bindings > AddOns), or `/skillup journal`. `/skillup` with no profession window open
+  opens it too; with one open it still shows or hides the panel.
+- "Track this spot" on the Where page puts a small tracker on screen: next stop, distance, an arrow, the stops
+  done. A click opens a card with the map. The spot is kept per character. While it shows, the guide chip steps
+  aside, so only one of them is ever up.
+- The Mining window gets a card under the panel with the best node spot for your skill.
+- Every slash-command setting is a control on the Settings page and writes the same setting.
+- Without TradeSkillMaster auction data the journal says what to do; costs then count vendor items only.
+- Where to level world skills (`Data/Spots.lua`) and every trainer and recipe vendor (`Data/Trainers.lua`) ship with
+  the addon. Positions come from Classic data and are marked so until checked in Forever.
+- Gathering and picking locks near a mapped spot is counted (tries and skill-ups, in `learned.skillups`), so shared
+  files can correct the unconfirmed colour bands.
+- `Data/Custom.lua` can add, correct or leave out spots and trainers (`spots`, `trainers`).
+- `AGENTS.md` explains the folder, the data and how to change a plan, for AI assistants;
+  `docs/first-launch-checklist.md` lists what the game still has to confirm.
+- The addon now ships the recipes of every profession (`Data/Recipes.lua`): thresholds, reagents, the skill needed
+  to learn each recipe and what the trainer charges. It plans any profession out of the box; no file from a PC tool
+  is needed. Prices still come from TradeSkillMaster in game.
+- A trainer recipe is planned from the skill where you can learn it, through its orange range, with a Train step
+  that shows the price. Open your trainer once and the addon keeps the skill each recipe asks for.
+- Until a trainer is read, the plan assumes the usual ranks (75, 150, 225, 300) and runs past your current cap.
+- Recipe items: one you can buy is planned from TSM's price, or from its vendor when the data names one and that is
+  cheaper. One with no auction price today, one that binds when picked up, and a recipe not confirmed obtainable
+  are shown as shortcuts that say why, with Use it and Hide.
+- `/skillup cost` prints what levelling each profession to 300 costs at today's prices, the skill ranges nothing
+  covers, and how many prices TSM lacks. `/skillup cost tailoring` prints one.
+- `Data/Custom.lua` holds your own changes: a recipe's learn skill, source or reagents, a recipe to leave out,
+  vendor reagents, guide NPCs. `Data/Custom.example.lua` shows the shape. A bad entry is named in chat and left
+  out; the rest applies.
+- The "TSM data age unknown" line is gone: the age is only shown when it is known.
+- For maintainers: `tools/gen_recipes.py` rebuilds the data from the wago.tools export of the client
+  (`--check` lists uncovered skill ranges), with `tools/data/overlay.json` on top.
+- A recipe sold by a vendor now says where: "sold by Kelsey Yance in Stranglethorn Vale".
+- What your game teaches the addon (what trainers ask, what vendors sell and for how much, where the trainers and
+  vendors you opened stand, the skill at which a recipe changed colour, how often a craft gave a point) is kept in
+  one table of the saved file, `learned`. It holds no character, realm, account or guild name. You can share it
+  with a "Share what my game learned" issue so the shipped data gets it; `docs/data-sources.md` lists everything
+  the addon saves and what stays private. Your saved trainer ranks and learned NPCs move into it on first load.
+- For maintainers: `tools/update_data.py` looks for a newer game build every day (the `data-update` workflow),
+  regenerates the data and opens a pull request with a report of what changed. `tools/import_savedvars.py` merges
+  shared files under a written rule (a newer build wins, otherwise two files must agree, conflicts are reported).
+
 ## 0.2.17
 
 - A step whose reagent you can craft from something in your bags crafts it instead of buying it: with Medium Hide

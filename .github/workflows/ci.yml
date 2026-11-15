@@ -30,3 +30,9 @@ jobs:
         run: busted --verbose
       - name: stylua
         run: stylua --check .
+      # The data tools (tools/gen_recipes.py, import_wowhead.py, update_data.py, import_savedvars.py, luatable.py):
+      # standard library only, and no network (the tests replace the download). The coverage of the committed
+      # Data/Recipes.lua is checked by busted (tests/coverage_spec.lua): gen_recipes.py --check needs the client
+      # tables, which are not in the repo. The daily refresh itself is data-update.yml.
+      - name: python tools
+        run: python3 -m unittest discover -s tools/tests -v

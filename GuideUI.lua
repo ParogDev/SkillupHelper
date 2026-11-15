@@ -33,11 +33,15 @@ local status = {
 	worldMisses = 0,
 }
 local gdb -- SkillupHelperDB.guide
+local npcs = {} -- SkillupHelperDB.learned.npcs: the NPCs whose window was opened (guide.npcs before 0.3.0)
 local seeds = {}
 local cur -- the step to do now: { key, step, profession, color, base = { [item] = count at plan time }, hadNeeds }
 local open -- the window open now: { kind, npc } (npc nil when it could not be recorded)
+local trainerVisit -- the trainer window open now: { id, best = most service names read } (Guide.trainerRead)
 local worldCache = {}
-local knownList -- Guide.known(seeds, gdb.npcs), rebuilt only after a learn
+local shipped, foreign = {}, nil -- Data/Trainers.lua's trainers and recipe vendors of the player's faction
+local shippedFor -- the faction `shipped` was built for ("Horde" | "Alliance"), nil while it is not known
+local knownList -- Guide.known(seeds, npcs, shipped, foreign), rebuilt only after a learn
 local ghost -- a fade-out finished in combat: the chip is shown at alpha 0 until it can be hidden
 local view = { phase = "none" } -- the last evaluation: phase, need, pick, d (Guide.describe), since
 local want = { visible = false, row = false, name = nil, star = false }
@@ -107,7 +111,7 @@ end
 -- The player's position: { continent, x, y (world yards), map, mx, my (percent) }, or nil and why ("not now").
 local function here()
 	local okInst, inInstance = pcall(IsInInstance)
-	if okInst and inInstance and not secret(inInstance) then
+	if okInst and not secret(inInstance) and inInstance then
 		return nil, "in an instance"
 	end
 	local map = C_Map.GetBestMapForUnit("player")
@@ -177,6 +181,36 @@ local function merchantItems()
 		local ok, item = pcall(GetMerchantItemID, i)
 		if ok and type(item) == "number" and not secret(item) then
 			out[#out + 1] = item
+		end
+	end
+	return out
+end
+
+-- What the open vendor asks: { { item, price, stock }, ... } with price in copper for one item (nil when it costs
+-- something other than money) and stock nil when unlimited. C_MerchantFrame.GetItemInfo gives a MerchantItemInfo
+-- (price for a stack of stackCount, numAvailable -1 = unlimited). The price is the one this character is shown: a
+-- reputation discount is in it.
+local function merchantStock()
+	local out = {}
+	local okN, n = pcall(GetMerchantNumItems)
+	if not okN or type(n) ~= "number" or secret(n) or not (C_MerchantFrame and C_MerchantFrame.GetItemInfo) then
+		return out
+	end
+	for i = 1, n do
+		local okId, item = pcall(GetMerchantItemID, i)
+		local okInfo, info = pcall(C_MerchantFrame.GetItemInfo, i)
+		if okId and type(item) == "number" and not secret(item) and okInfo and type(info) == "table" then
+			local price, stack, left = info.price, info.stackCount, info.numAvailable
+			local sold = { item = item }
+			local extended = secret(info.hasExtendedCost) or info.hasExtendedCost
+			if type(price) == "number" and not secret(price) and not extended and price > 0 then
+				local per = (type(stack) == "number" and not secret(stack) and stack > 0) and stack or 1
+				sold.price = math.floor(price / per * 100 + 0.5) / 100
+			end
+			if type(left) == "number" and not secret(left) and left >= 0 then
+				sold.stock = left
+			end
+			out[#out + 1] = sold
 		end
 	end
 	return out
@@ -261,17 +295,46 @@ local function trainerServices()
 	for _, f in ipairs(turnedOn) do
 		pcall(SetTrainerServiceTypeFilter, f, false)
 		local ok, on = pcall(GetTrainerServiceTypeFilter, f)
-		if not ok or on then
+		if not ok or secret(on) or on then
 			fail(("trainer filter %s not restored after reading the list"):format(f))
 		end
 	end
-	status.lastTeaches = { services = n, names = #names, partial = partial, filtersOpened = #turnedOn }
-	return names, partial
+	-- the type filters as the player had them (each false one was opened for the read): a list read with a filter
+	-- that could not be opened is partial
+	status.lastTeaches = { services = n, names = #names, partial = partial, filtersOpened = #turnedOn, filters = saved }
+	return names, partial, n
+end
+
+-- The shipped trainers and recipe vendors (Data/Trainers.lua) for the player's faction. Built at login and again
+-- once the faction is known, when UnitFactionGroup gave none at login (every side is kept until then).
+local function loadShipped()
+	local rows = ns.Data.trainers
+	local faction = ns.Scan and ns.Scan.faction and ns.Scan.faction() or nil
+	if rows == nil then
+		status.shippedError = "Data/Trainers.lua not loaded: no shipped trainers or recipe vendors"
+	elseif faction == nil then
+		status.shippedError = "UnitFactionGroup(player) gave no faction: shipped NPCs of both sides are kept"
+	else
+		status.shippedError = nil
+	end
+	shipped, foreign = G.shippedRecords(rows, faction)
+	shippedFor = faction
+	knownList = nil
+	status.shipped, status.faction = #shipped, faction
+end
+
+-- Every NPC the guide knows: learned over seeds over shipped.
+local function known()
+	if not shippedFor and ns.Data.trainers and ns.Scan and ns.Scan.faction and ns.Scan.faction() then
+		loadShipped()
+	end
+	knownList = knownList or G.known(seeds, npcs, shipped, foreign)
+	return knownList
 end
 
 local function countLearned()
 	local n, t = 0, 0
-	for _, npc in pairs(gdb and gdb.npcs or {}) do
+	for _, npc in pairs(gdb and npcs or {}) do
 		n = n + 1
 		if type(npc.teaches) == "table" then
 			t = t + 1
@@ -290,7 +353,10 @@ local function learn(kind)
 		rec.sells = merchantItems()
 	elseif kind == "trainer" then
 		rec.trains = trainerLine()
-		rec.teaches, rec.teachesPartial = trainerServices()
+		local names, partial, n = trainerServices()
+		local held
+		rec.teaches, rec.teachesPartial, trainerVisit, held = G.trainerRead(trainerVisit, rec.id, names, partial, n)
+		status.lastTeaches.held = held
 	elseif kind == "auction" then
 		rec.auction = true
 	end
@@ -312,7 +378,15 @@ local function learn(kind)
 	local okInfo, info = pcall(C_Map.GetMapInfo, rec.map)
 	local mapName = okInfo and type(info) == "table" and not secret(info.name) and info.name or nil
 	rec.place = G.placeNear(rec.map, rec.x, rec.y, seeds, mapName)
-	local npc = gdb and G.learn(gdb.npcs, rec, time())
+	local npc = gdb and G.learn(npcs, rec, time())
+	if npc and kind == "vendor" and type(rec.id) == "number" then
+		-- what it sells and for how much, into the shared table (learned.vendors)
+		ns.guard("vendor stock", function()
+			local learned = ns.Learned.attach(SkillupHelperDB)
+			local v = ns.Learned.noteVendor(learned, rec, merchantStock(), ns.Learned.build())
+			status.lastVendor = v and { id = rec.id, map = rec.map } or "no item read from the vendor window"
+		end)
+	end
 	if npc then
 		knownList = nil
 		open.npc = npc
@@ -572,12 +646,12 @@ local function isOurPin()
 		return false
 	end
 	local p = C_Map.GetUserWaypoint()
-	if not p or p.uiMapID ~= waypointOurs.map or not p.position then
+	if not p or secret(p.uiMapID) or p.uiMapID ~= waypointOurs.map or not p.position then
 		return false
 	end
 	-- GetUserWaypoint gives a plain { x, y } table on this client, not a Vector2D (no GetXY)
 	local x, y = p.position.x, p.position.y
-	if type(x) ~= "number" or type(y) ~= "number" then
+	if secret(x) or secret(y) or type(x) ~= "number" or type(y) ~= "number" then
 		return false
 	end
 	return math.abs(x - waypointOurs.x) < 1e-3 and math.abs(y - waypointOurs.y) < 1e-3
@@ -609,6 +683,12 @@ local function togglePin()
 	if not npc then
 		return
 	end
+	if view.pick.nopos then
+		-- "not now" is not the word: the data has no position for this NPC, only its zone
+		fail(("no position for %s in the data: no pin"):format(tostring(npc.name)))
+		flash("Position not known: no pin", 3)
+		return
+	end
 	local okCan, can = pcall(C_Map.CanSetUserWaypointOnMap, npc.map)
 	if not okCan or not can then
 		fail(("C_Map.CanSetUserWaypointOnMap(%s) refused: no pin on this map"):format(tostring(npc.map)))
@@ -636,7 +716,7 @@ function evaluate()
 		return
 	end
 	local now = GetTime()
-	local phase, need, pick, why, excluded, certain
+	local phase, need, pick, why, excluded, certain, stats
 	if not gdb or not cur then
 		phase, why = "none", "no plan step yet (open a profession once)"
 	elseif gdb.stopped[cur.key] then
@@ -650,9 +730,10 @@ function evaluate()
 			cur.hadNeeds, cur.lastNeed = true, need
 			local h, hwhy = here()
 			local servers
-			knownList = knownList or G.known(seeds, gdb.npcs)
-			pick, servers, excluded = G.nearest(knownList, need, h, world)
+			pick, servers, excluded, stats = G.nearest(known(), need, h, world)
 			status.servers, status.excluded = servers, excluded
+			-- how many serve the need by where the record comes from, and how many a rank left out
+			status.serversBy, status.belowRank = stats.bySource, stats.belowRank
 			certain = pick and pick.certain
 			-- the open window counts when its NPC serves the need: a trainer only when its list has the name (or
 			-- was read in part); an NPC that could not be recorded, or a vendor without a position, is given the
@@ -668,9 +749,13 @@ function evaluate()
 				phase, why = "notnow", hwhy
 			elseif not pick then
 				phase = "unknown"
-				why = (#seeds == 0 and status.learned == 0) and "no seed and nothing learned"
-					or (excluded or 0) > 0 and G.unknownText(need, itemName, excluded)
-					or ("no known NPC serves this %s need"):format(need.kind)
+				-- the link that gave nothing: the shipped data for this faction, the seeds and what was learned
+				why = G.whyNone(need, {
+					stats = stats,
+					faction = shippedFor,
+					shipped = ns.Data.trainers ~= nil,
+					thing = need.items and need.items[1] and itemName(need.items[1].item) or nil,
+				})
 			else
 				local name = targetName()
 				phase = G.phase(pick, false, name ~= nil and name == pick.npc.name, view.phase)
@@ -689,6 +774,8 @@ function evaluate()
 	status.npc = pick and pick.npc.name
 	status.distance = pick and pick.distance and math.floor(pick.distance + 0.5)
 	status.certain = certain and true or false
+	status.source = pick and pick.source
+	status.confidence = pick and pick.confidence
 	local f = facing()
 	local thing = need and need.items and need.items[1] and itemName(need.items[1].item)
 	view.d = G.describe({
@@ -697,6 +784,9 @@ function evaluate()
 		name = pick and pick.npc.name,
 		distance = pick and pick.distance,
 		place = pick and pick.npc.place,
+		confidence = pick and pick.confidence,
+		unsure = pick and pick.unsure,
+		belowRank = stats and stats.belowRank,
 		thing = thing,
 		profession = cur and cur.profession,
 		compass = (not f and pick and pick.bearing) and G.compass(pick.bearing) or nil,
@@ -719,6 +809,9 @@ function evaluate()
 				name = pick and pick.npc.name,
 				distance = pick and pick.distance,
 				place = pick and pick.npc.place,
+				confidence = pick and pick.confidence,
+				unsure = pick and pick.unsure,
+				belowRank = stats and stats.belowRank,
 				thing = thing,
 				profession = cur and cur.profession,
 				marked = not IsInGroup(),
@@ -736,7 +829,11 @@ function evaluate()
 	end
 	angleGoal = (f and pick and pick.bearing) and G.arrowAngle(pick.bearing, f) or nil
 	local held = now - (view.since or now)
+	-- one floating widget at a time: while a spot is tracked (the tracker, Journal.lua) the chip stands aside
+	local yields = ns.Provider and ns.Provider.chipYields and ns.Provider.chipYields() or false
+	status.yields = yields or nil
 	want.visible = view.d ~= nil
+		and not yields
 		and not (phase == "done" and held > DONE_HOLD)
 		and not (phase == "notnow" and held > NOTNOW_HOLD)
 	want.row = want.visible and view.d.action ~= nil
@@ -763,6 +860,8 @@ local function placeChip()
 	else
 		chip:SetPoint("TOP", UIParent, "TOP", 0, -170)
 	end
+	-- on whole pixels, also for a point saved before the snap existed (Widgets.lua, "pixels")
+	ns.Widgets.snap(chip)
 end
 
 local function tip(owner, lines)
@@ -1048,7 +1147,7 @@ local function create()
 		if not dragging then
 			return
 		end
-		chip:StopMovingOrSizing()
+		ns.Widgets.dragStop(chip) -- stops and snaps to whole pixels: savePoint below keeps the snapped point
 		dragging, dragStoppedAt = false, GetTime()
 		savePoint()
 		placeSecure()
@@ -1056,8 +1155,11 @@ local function create()
 	end)
 	body:SetScript("OnEnter", function(self)
 		local lines = { "Click: pin on the map. Right-click: more." }
+		if view.d and view.d.note then
+			lines[#lines + 1] = view.d.note .. "."
+		end
 		if view.why then
-			lines[2] = view.why
+			lines[#lines + 1] = view.why
 		end
 		tip(self, lines)
 	end)
@@ -1065,6 +1167,8 @@ local function create()
 	chip:SetScript("OnUpdate", function(self, elapsed)
 		ns.guard("guide tick", onUpdate, self, elapsed)
 	end)
+	-- the chip's frames are made without the Widgets constructors: round their layout to whole pixels once
+	ns.Widgets.roundAll(chip)
 
 	sb = CreateFrame("Button", "SkillupHelperGuideTarget", UIParent, "SecureActionButtonTemplate")
 	sb:SetFrameStrata("MEDIUM")
@@ -1106,7 +1210,8 @@ local function init()
 		g = {}
 		SkillupHelperDB.guide = g
 	end
-	g.npcs = type(g.npcs) == "table" and g.npcs or {}
+	-- the learned NPCs live in the shared table (Learned.attach moves guide.npcs there once)
+	npcs = ns.Learned.attach(SkillupHelperDB, ns.Learned.build()).npcs
 	g.stopped = type(g.stopped) == "table" and g.stopped or {}
 	local p = g.pin
 	if type(p) == "table" and type(p.map) == "number" and type(p.x) == "number" and type(p.y) == "number" then
@@ -1115,12 +1220,21 @@ local function init()
 		g.pin = nil
 	end
 	gdb = g
-	seeds = G.seedRecords(ns.Data.npcs)
+	-- the shipped seeds, then the player's own (Data/Custom.lua npcs, checked by Logic.validateCustom)
+	local data = ns.plan and ns.plan()
+	-- a Custom.lua row is the player's own position; the shipped seeds are Classic ones
+	local own = {}
+	for _, r in ipairs(data and data.npcs or {}) do
+		own[r.id] = true
+	end
+	seeds = G.seedRecords(ns.Logic.npcRows(ns.Data.npcs, data and data.npcs), own)
 	knownList = nil
 	status.seeds = #seeds
+	-- the shipped trainers and recipe vendors of every profession, for the player's faction
+	loadShipped()
 	-- records learned before 0.2.8 have no town: give them one (a seed's nearby, else the map's name)
 	ns.guard("guide towns", function()
-		for _, npc in pairs(g.npcs) do
+		for _, npc in pairs(npcs) do
 			if type(npc) == "table" and npc.place == nil and npc.map then
 				local okInfo, info = pcall(C_Map.GetMapInfo, npc.map)
 				local mapName = okInfo and type(info) == "table" and not secret(info.name) and info.name or nil
@@ -1164,6 +1278,8 @@ local EVENTS = {
 	"MERCHANT_UPDATE",
 	"MERCHANT_CLOSED",
 	"TRAINER_SHOW",
+	-- the service list fills after the window opens: each update reads it again (Blizzard_TrainerUI redraws on it)
+	"TRAINER_UPDATE",
 	"TRAINER_CLOSED",
 	"AUCTION_HOUSE_SHOW",
 	"AUCTION_HOUSE_CLOSED",
@@ -1179,6 +1295,24 @@ if next(status.events) == nil then
 	status.events = "all registered"
 end
 
+-- TRAINER_UPDATE comes in bursts while the list fills: one read per frame, after the burst's events.
+local trainerQueued = false
+local function trainerUpdate()
+	if trainerQueued then
+		return
+	end
+	trainerQueued = true
+	C_Timer.After(0, function()
+		trainerQueued = false
+		if gdb and open and open.kind == "trainer" then
+			ns.guard("guide learn", function()
+				learn("trainer")
+			end)
+			ns.guard("guide TRAINER_UPDATE", evaluate)
+		end
+	end)
+end
+
 events:SetScript("OnEvent", function(_, event)
 	if event == "PLAYER_LOGIN" then
 		ns.guard("guide init", init)
@@ -1187,8 +1321,20 @@ events:SetScript("OnEvent", function(_, event)
 	if not gdb then
 		return
 	end
+	if event == "TRAINER_UPDATE" then
+		if open and open.kind == "trainer" then
+			trainerUpdate()
+		end
+		return
+	end
+	if event == "TRAINER_SHOW" or event == "TRAINER_CLOSED" then
+		trainerVisit = nil -- a new visit: no read of it taken yet
+	end
 	if WINDOW_KIND[event] then
-		ns.guard("guide learn", learn, WINDOW_KIND[event])
+		-- a closure, not an extra guard argument: plain Lua 5.1 xpcall (the tests) passes no arguments on
+		ns.guard("guide learn", function()
+			learn(WINDOW_KIND[event])
+		end)
 	elseif event == "MERCHANT_UPDATE" then
 		if open and open.kind == "vendor" then
 			ns.guard("guide learn", learn, "vendor")
@@ -1225,7 +1371,7 @@ function GUI.where(place, r)
 	if not gdb or type(r) ~= "table" or not NEED_KIND[place] then
 		return nil
 	end
-	knownList = knownList or G.known(seeds, gdb.npcs)
+	known()
 	-- one answer per row a second (a card build asks for every row, and the strip can trigger redraws), and only
 	-- NPCs with a town count: the nearest one without a town would hide a farther one that names it
 	local now = GetTime()

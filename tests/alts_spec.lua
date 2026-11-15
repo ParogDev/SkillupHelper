@@ -258,4 +258,50 @@ describe("View mail models", function()
 		d = V.mailPanel({}, live, {}, env, A.planAttach, 12)
 		assert.equal("Nothing left to mail from this character.", d.empty)
 	end)
+	it(
+		"pages the mailbox panel: no group grows past the room, every row on one page, buttons with the last row",
+		function()
+			local function group(to, n)
+				local rows = {}
+				for i = 1, n do
+					rows[i] = { name = to .. i }
+				end
+				return { to = to, rows = rows }
+			end
+			local h = {
+				title = 18,
+				row = 16,
+				tail = function()
+					return 36
+				end,
+			}
+			local groups = { group("A", 3), group("B", 40), group("C", 0), group("D", 2) }
+			local room = 200
+			local pages = V.mailPages(groups, room, h)
+			assert.is_true(#pages > 2)
+			local seen = {}
+			for p, page in ipairs(pages) do
+				local y = 0
+				for _, c in ipairs(page) do
+					y = y + h.title + (c.to - c.from + 1) * h.row + (c.tail and 36 or 0)
+					for i = c.from, c.to do
+						local key = c.g.to .. i
+						assert.is_nil(seen[key], key)
+						seen[key] = p
+					end
+					-- a carried-over group repeats its title; only its last chunk has the buttons
+					assert.equal(c.to == #c.g.rows, c.tail)
+				end
+				assert.is_true(y <= room, ("page %d is %d px"):format(p, y))
+			end
+			local n = 0
+			for _ in pairs(seen) do
+				n = n + 1
+			end
+			assert.equal(45, n)
+			assert.is_true(pages[2][1].cont)
+			-- nothing queued: one empty page
+			assert.same({ {} }, V.mailPages({}, room, h))
+		end
+	)
 end)

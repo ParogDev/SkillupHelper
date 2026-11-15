@@ -270,6 +270,35 @@ local function capModel(ctx, input)
 	end
 end
 
+-- Why the vendor of recipe r's item is not assumed reachable, or nil: the item asks for a reputation, or the vendor
+-- is hostile to the character's faction (r.vendor.a / .h: the NPC's reaction to Alliance / Horde, nil = not known;
+-- faction = "Alliance" | "Horde" | nil, and with no faction given a vendor hostile to either side is not assumed).
+local function vendorBlock(r, faction)
+	if r.faction or r.rep then
+		return "its vendor asks for a reputation"
+	end
+	local v = r.vendor
+	local side = (faction == "Horde" and "h") or (faction == "Alliance" and "a") or nil
+	if (side and v[side] == -1) or (not side and (v.a == -1 or v.h == -1)) then
+		return "its vendor is the other faction's"
+	end
+	return nil
+end
+
+-- Where a recipe item comes from, for a shortcut's text: the vendor's name, else the kind of source.
+local FROM_TEXT = { vendor = "sold by a vendor", quest = "a quest reward", drop = "a drop", crafted = "crafted" }
+local function fromText(o)
+	if o.teacher then
+		return o.teacher
+	end
+	local v = o.recipeVendor
+	if type(v) == "table" and v.name then
+		-- place: the zone the vendor stands in, by name (tools/gen_recipes.py, from the client's area and map tables)
+		return "sold by " .. tostring(v.name) .. (type(v.place) == "string" and (" in " .. v.place) or "")
+	end
+	return o.from and (FROM_TEXT[o.from] or tostring(o.from)) or nil
+end
+
 -- Options (recipe variants) the planner can use: learned recipes, trainer recipes from their learn rank, recipe items
 -- with a price as candidates to buy. The client's colour at the current skill wins over the exported thresholds.
 -- input.exclude (dungeon, ahPatterns, notNow[spell]) drops recipes; input.ranks, level and target set the cap model.
@@ -286,17 +315,62 @@ function P.prepare(input)
 		effort = input.effort or P.EFFORT,
 		-- true: plan only with recipes already known or trainable (the "/skillup recipes off" setting)
 		noRecipeBuys = input.noRecipeBuys == true,
+		-- true: selling the products counts against a recipe's cost (the "Count selling what I craft" setting, off by
+		-- default). Off: recipes are ranked by what the player pays, with no credit for any sale, AH or vendor.
+		resale = input.resale == true,
+		-- stretches levelled in the world (Mining's nodes): { { from, to, text, spot, why } }, sorted by from
+		world = {},
 		z = P.zOf(input.luck) or P.TRIP_Z,
 		options = {},
-		hidden = {}, -- gated options the plan never picks, offered in step.shortcuts and step.others
+		-- gated options: offered in step.shortcuts and step.others, and planned only where nothing else gives skill
+		hidden = {},
 		stockOnly = {}, -- variants that craft an intermediate from owned raw reagents: the stock pass only
+		excludedOut = {}, -- { at, g } of the recipes input.exclude dropped (a gap's reason)
+		unknownEach = 0, -- copper a unit of an unpriced reagent counts as, for ordering only (set below)
 		unconfirmed = 0, -- trainer recipes planned while no trainer of this profession was read yet
 		mismatch = {},
 		makers = {},
 	}
+	for _, w in ipairs(type(input.world) == "table" and input.world or {}) do
+		if type(w) == "table" and type(w.from) == "number" and type(w.to) == "number" and w.to > w.from then
+			ctx.world[#ctx.world + 1] = w
+		end
+	end
+	table.sort(ctx.world, function(a, b)
+		return a.from < b.from
+	end)
 	capModel(ctx, input)
 	local recipes = input.recipes or {}
 	local spells = sortedKeys(recipes)
+	-- What the trainer lists read so far can say about a recipe: nothing above the highest learn skill they listed.
+	-- A trainer window that hides what the character cannot learn yet (the client's default filter) lists only the
+	-- recipes learnable at that skill, so a recipe learned later is "not listed yet", never "no trainer teaches it".
+	-- (Read at skill 28, such a list once gated every trainer recipe above 28 and left Blacksmithing 185-215 a hole.)
+	local seenTop
+	if input.trainerSeen then
+		for _, spell in ipairs(spells) do
+			local r = recipes[spell]
+			local at = r.learn or r.y
+			if
+				type(at) == "number"
+				and (not seenTop or at > seenTop)
+				and (input.trainerSeen[spell] or (r.name and input.trainerSeen[string.lower(r.name)]))
+			then
+				seenTop = at
+			end
+		end
+	end
+	-- the dearest reagent with a price: what a unit of an unpriced reagent counts as when recipes are compared
+	-- (fallbackOpts). Recipe items are not reagents and stay out; with no price at all it is 0.
+	for _, spell in ipairs(spells) do
+		local mats = recipes[spell].mats or {}
+		for k = 1, #mats - 1, 2 do
+			local b = buyOf(ctx, mats[k])
+			if b and b > ctx.unknownEach then
+				ctx.unknownEach = b
+			end
+		end
+	end
 	for _, spell in ipairs(spells) do
 		local r = recipes[spell]
 		if
@@ -313,7 +387,13 @@ function P.prepare(input)
 		local r = recipes[spell]
 		local y, g = r.y, r.g
 		local learned = ctx.learned[spell] == true
+		-- gone: an item the recipe needs is not in the game data (Data/Recipes.lua); a learned one is real
 		local out = excluded(input.exclude, spell, r, learned)
+		if out and y and g and g > ctx.skill then
+			-- a recipe the user's settings keep out: a stretch only such recipes cover is a hole with its own reason
+			ctx.excludedOut[#ctx.excludedOut + 1] = { at = learned and -math.huge or (r.learn or 0), g = g }
+		end
+		out = out or (r.gone == true and not learned)
 		local diff = input.difficulty and input.difficulty[spell]
 		if not out and learned and diff ~= nil and y and g then
 			local cc, tc = CLIENT_COLOR[diff], colorOf(skill, y, g)
@@ -337,25 +417,64 @@ function P.prepare(input)
 		if not out and y and g and g > skill then
 			local src = "known"
 			if not learned then
-				src = (r.src == "item" or r.src == "auto" or r.src == "special") and r.src or "trainer"
+				src = (r.src == "item" or r.src == "auto" or r.src == "special" or r.src == "unlisted") and r.src
+					or "trainer"
 			end
-			-- a trainer recipe no ordinary trainer was seen to teach is "not checked": gated, like a special teacher's
+			-- a trainer recipe no ordinary trainer was seen to teach is "not checked": gated, like a special teacher's.
+			-- Only up to the highest learn skill the lists reached (seenTop, above).
 			local unchecked = src == "trainer"
 				and input.trainerSeen ~= nil
+				and seenTop ~= nil
+				and (r.learn or y) <= seenTop
 				and not input.trainerSeen[spell]
 				and not (r.name and input.trainerSeen[string.lower(r.name)])
 			if src == "trainer" and input.trainerSeen == nil then
 				ctx.unconfirmed = ctx.unconfirmed + 1
 			end
-			-- gated: not sure to be obtainable (special teacher, quest, unchecked trainer recipe). The plan never picks
-			-- it unless the user said "use it" (exclude.allow[spell]) or enabled special teachers; it is offered as a
-			-- shortcut on the steps it would make cheaper, or on a gap it fills.
+			-- gated: not sure to be obtainable (special teacher, quest, unchecked trainer recipe). The plan picks it only
+			-- when the user said "use it" (exclude.allow[spell]) or enabled special teachers, or where nothing sure
+			-- gives skill (the fallback of `forward`: never a hole while a recipe exists); it is offered as a shortcut
+			-- on the steps it would make cheaper.
 			local allowed = input.exclude and input.exclude.allow and input.exclude.allow[spell] == true
+			-- a recipe item: one that binds when picked up is never an auction buy (ItemSparse.Bonding = 1; checked
+			-- against auction data: none of those items is ever listed), and a tradeable one is an auction buy only
+			-- while it has a price.
+			local bop = src == "item" and r.bop == true
+			local recipePrice = (src == "item" and not bop) and buyOf(ctx, r.item or -1) or nil
+			local recipeWhere = "ah"
+			-- a vendor known to sell the recipe item, at the item's vendor price: the cheaper of vendor and auction,
+			-- and the one way to plan a recipe that binds when picked up. A vendor the character may not reach (the
+			-- other faction's, a reputation) is not assumed: vendorWhy.
+			local vendorWhy
+			if src == "item" and type(r.vendor) == "table" and type(r.buy) == "number" then
+				vendorWhy = vendorBlock(r, input.faction)
+				if not vendorWhy and (not recipePrice or r.buy < recipePrice) then
+					recipePrice, recipeWhere = r.buy, "vendor"
+				end
+			end
+			-- with no way to buy it, a recipe item is gated: a shortcut that says why
+			local noPrice = src == "item" and not bop and recipePrice == nil
+			local bopOnly = bop and recipePrice == nil
+			-- a recipe learned by character level (Poisons): not learnable yet below that level
+			local tooLow = not learned
+				and type(r.level) == "number"
+				and type(input.level) == "number"
+				and r.level > input.level
 			local gated = not allowed
-				and (unchecked or (src == "special" and not (input.exclude and input.exclude.special == false)))
+				and (
+					unchecked
+					or bopOnly
+					or noPrice
+					or tooLow
+					-- not in the data's list of the profession's recipes: not confirmed obtainable
+					or src == "unlisted"
+					or (src == "special" and not (input.exclude and input.exclude.special == false))
+				)
 			local at = -math.huge
 			if not learned then
-				at = r.learn or (src == "item" and 0 or y)
+				-- no learn skill in the data: a recipe item or a level-gated recipe has none, a trainer recipe is
+				-- assumed learnable from yellow
+				at = r.learn or ((src == "item" or type(r.level) == "number") and 0 or y)
 			end
 			local prod = ctx.product[spell]
 			if not prod then
@@ -375,13 +494,24 @@ function P.prepare(input)
 				unchecked = unchecked or nil,
 				gated = gated or nil,
 				allowed = allowed or nil,
-				teacher = src == "special" and r.teacher or nil,
+				teacher = (src == "special" or bop) and r.teacher or nil,
 				recipeItem = r.item,
-				recipePrice = src == "item" and buyOf(ctx, r.item or -1) or nil,
+				recipePrice = recipePrice,
+				recipeWhere = recipePrice and recipeWhere or nil,
+				recipeVendor = src == "item" and r.vendor or nil,
+				vendorWhy = vendorWhy,
+				from = src == "item" and r.from or nil,
+				bop = bop or nil,
+				noPrice = noPrice or nil,
+				level = r.level,
+				tooLow = tooLow or nil,
+				trainCost = src == "trainer" and r.cost or nil,
 				vendor = prod.vendor or 0,
 				sell = prod.sell,
 				takes = prod.takes or 0,
 				prodExport = prod.export,
+				-- resale off: the product's sale is information only (step.resale), never a credit
+				noResale = not ctx.resale or nil,
 			}
 			local plain = pairsOf(r.mats)
 			local list = { newOption(ctx, base, plain, nil, 1) }
@@ -439,18 +569,30 @@ function P.prepare(input)
 end
 
 -- Whether o's product goes to the AH: only when the sale beats the vendor and the market takes any.
--- costPt, stockPass and finish all count proceeds by this one rule.
-local function sells(o)
+-- costPt, stockPass and finish all count proceeds by this one rule. wouldSell ignores the resale setting (the card's
+-- note); sells is the rule the plan ranks and counts by: never true with resale off (o.noResale).
+local function wouldSell(o)
 	return o.sell ~= nil and o.sell > o.vendor and o.takes > 0
+end
+local function sells(o)
+	return not o.noResale and wouldSell(o)
 end
 P.sells = sells
 
--- What one craft of o brings back when cum crafts of it were already sold.
-local function backOf(o, cum)
-	if sells(o) and (cum or 0) < o.takes then
+-- What one craft of o would bring back when cum crafts of it were already sold, whatever the setting.
+local function resaleOf(o, cum)
+	if wouldSell(o) and (cum or 0) < o.takes then
 		return o.sell
 	end
 	return o.vendor
+end
+
+-- What one craft of o brings back when cum crafts of it were already sold: 0 with resale off.
+local function backOf(o, cum)
+	if o.noResale then
+		return 0
+	end
+	return resaleOf(o, cum)
 end
 P.backOf = backOf
 
@@ -482,6 +624,88 @@ local function costPt(ctx, o, s, cum, cheap, chance)
 	return c, p, net
 end
 P.costPt = costPt
+
+-- The fallback: recipes for a level no sure, fully priced recipe covers. The owner's rule: a stretch is never a hole
+-- because a price is missing or a recipe is gated; it is planned with the best recipe by what is known, and the step
+-- says what is not known (step.unpriced, step.gated). Only a stretch no obtainable recipe covers is a hole.
+--
+-- An unknown price is never counted as free. For ordering only, a unit of an unpriced reagent counts as the dearest
+-- reagent this profession has a price for (ctx.unknownEach, pessimistic), so:
+--   * a sure recipe with an unpriced reagent (rank 1) takes a level from a fully priced one only when it is cheaper
+--     even at that estimate (the priced one is nearly grey, say); at a similar yield the priced recipe wins;
+--   * a gated recipe is looked at only on a level no sure recipe covers, priced or not, the lower rank first:
+--       2  gated but ordinary (a trainer recipe no trainer listed, a tradeable recipe item with no auction price today)
+--       4  gated and uncertain (binds when picked up, not confirmed in Forever, a special teacher)
+--       +1 when it also has an unpriced reagent
+--   then the lower estimated cost per point, then fewer unpriced reagents.
+-- The estimate never reaches the user: a step's cost counts its priced reagents only and says which are not.
+-- Left out: recipes the user's settings drop, and a recipe the character level does not allow yet.
+local function fallbackOpts(ctx)
+	local list = {}
+	local function add(o, rank)
+		local known, units = 0, 0
+		for i, n in pairs(o.mats) do
+			local b = buyOf(ctx, i)
+			if b then
+				known = known + n * b
+			else
+				units = units + n
+			end
+		end
+		list[#list + 1] = { o = o, rank = rank, unknown = o.missing and #o.missing or 0, known = known, units = units }
+	end
+	for _, o in ipairs(ctx.options) do
+		-- with recipe buys off, a recipe item to buy stays out here as well
+		if o.missing and not (ctx.noRecipeBuys and o.src == "item" and o.recipePrice) then
+			add(o, 1)
+		end
+	end
+	for _, o in ipairs(ctx.hidden) do
+		-- recipe buys off means known and trainer recipes only: no recipe item, quest or special teacher either
+		if not o.tooLow and not (ctx.noRecipeBuys and o.src ~= "trainer") then
+			add(o, ((o.unchecked or o.noPrice) and 2 or 4) + (o.missing and 1 or 0))
+		end
+	end
+	return list
+end
+
+-- The best fallback at skill s among those of rank <= maxRank (nil: any). Returns o, its estimated cost per point
+-- (unpriced reagents at ctx.unknownEach), points per craft, the cost per point of its priced reagents alone, its rank;
+-- nil when none gives skill.
+local function fallbackAt(ctx, list, s, chance, maxRank)
+	local best, bc, bp, bk
+	for _, f in ipairs(list) do
+		local o = f.o
+		local p = (s >= o.at and (not maxRank or f.rank <= maxRank)) and chance(s, o.y, o.g) * o.k or 0
+		if p > 0 then
+			local back, effort = backOf(o, 0), ctx.effort * (1 + o.precrafts)
+			local net = f.known + f.units * ctx.unknownEach - back
+			local c = ((net > 0 and net or 0) + effort) / p
+			local wins
+			if not best then
+				wins = true
+			elseif f.rank ~= best.rank then
+				wins = f.rank < best.rank
+			elseif math.abs(c - bc) > 1e-9 then
+				wins = c < bc
+			elseif f.unknown ~= best.unknown then
+				wins = f.unknown < best.unknown
+			elseif o.spell ~= best.o.spell then
+				wins = o.spell < best.o.spell
+			else
+				wins = o.variant < best.o.variant
+			end
+			if wins then
+				local knownNet = f.known - back
+				best, bc, bp, bk = f, c, p, ((knownNet > 0 and knownNet or 0) + effort) / p
+			end
+		end
+	end
+	if not best then
+		return nil
+	end
+	return best.o, bc, bp, bk, best.rank
+end
 
 -- Cheaper per point; ties (both free, effort 0): fewer crafts, then the larger profit (skillup.py's key).
 local function better(c, p, net, bc, bp, bnet)
@@ -593,6 +817,7 @@ end
 -- replaced): smoothing and the stock pass leave it alone.
 local function forward(ctx, opts, chance)
 	local levels, cum = {}, {}
+	local fallbacks
 	for s = ctx.skill, ctx.cap - 1 do
 		local best, bc, bp, bnet
 		local costs = {}
@@ -617,12 +842,22 @@ local function forward(ctx, opts, chance)
 		if best then
 			so, sc, sp = swapAt(ctx, opts, best, s, cum, chance)
 		end
+		-- the fallback (above): against a priced recipe only a sure one with an unpriced reagent, at its estimate;
+		-- with nothing priced, any. level.fallback = "unpriced" (c is the estimate, known the priced part) or "gated".
+		local fo, fc, fp, fk, frank
+		if not (so and so.spell ~= best.spell) then
+			fallbacks = fallbacks or fallbackOpts(ctx)
+			fo, fc, fp, fk, frank = fallbackAt(ctx, fallbacks, s, chance, best and 1 or nil)
+		end
 		if so and so.spell ~= best.spell then
 			cum[so] = (cum[so] or 0) + 1 / sp
 			levels[s] = { o = so, c = sc, p = sp, costs = costs, picked = true, swapFrom = best.spell }
-		elseif best then
+		elseif best and not (fo and fc < bc - 1e-9) then
 			cum[best] = (cum[best] or 0) + 1 / bp
 			levels[s] = { o = best, c = bc, p = bp, costs = costs }
+		elseif fo then
+			local kind = frank == 1 and "unpriced" or "gated"
+			levels[s] = { o = fo, c = fc, p = fp, known = fk, costs = costs, fallback = kind }
 		else
 			levels[s] = false
 		end
@@ -636,7 +871,11 @@ local function baselineFor(ctx, chance)
 	for _, o in ipairs(ctx.options) do
 		if o.src ~= "item" then
 			opts[#opts + 1] = o
-		elseif o.recipePrice and not ctx.noRecipeBuys then
+		elseif not o.recipePrice then
+			-- here only because the user said "Use it" (exclude.allow): they can get the recipe, at a price nobody
+			-- knows. The plan says where it comes from (a "get the recipe" step) and counts no price for it.
+			opts[#opts + 1] = o
+		elseif not ctx.noRecipeBuys then
 			cands[#cands + 1] = o
 		end
 	end
@@ -653,18 +892,22 @@ local function baselineFor(ctx, chance)
 				bought[c.spell] = true
 				buys[#buys + 1] =
 					{ spell = c.spell, item = c.recipeItem, price = c.recipePrice, learn = c.at, swap = true }
+				buys[#buys].where, buys[#buys].vendor = c.recipeWhere, c.recipeVendor
 			end
 		end
 	end
 	local levels = forward(ctx, opts, chance)
-	for _ = 1, P.MAX_RECIPE_BUYS do
+	-- at most MAX_RECIPE_BUYS recipes bought to save money; one that fills a level no sure recipe covers (a gap, or
+	-- a gated fallback) is bought beyond that count: a priced recipe item goes before a gated recipe
+	local nBuys = 0
+	while true do
 		local best, bestSave
 		for _, c in ipairs(cands) do
 			if not bought[c.spell] and c.matBuy then
 				local save, cum = -c.recipePrice, 0
 				for s = ctx.skill, ctx.cap - 1 do
 					local cost, p = costPt(ctx, c, s, cum, nil, chance)
-					local v = levels[s] and levels[s].c or HUGE
+					local v = (levels[s] and levels[s].fallback ~= "gated") and levels[s].c or HUGE
 					if cost and cost < v then
 						save = save + (v - cost)
 						cum = cum + 1 / p
@@ -675,9 +918,10 @@ local function baselineFor(ctx, chance)
 				end
 			end
 		end
-		if not best then
+		if not best or (nBuys >= P.MAX_RECIPE_BUYS and bestSave < HUGE / 2) then
 			break
 		end
+		nBuys = nBuys + 1
 		bought[best.spell] = true
 		for _, c in ipairs(cands) do
 			if c.spell == best.spell then
@@ -698,6 +942,8 @@ local function baselineFor(ctx, chance)
 			spell = best.spell,
 			item = best.recipeItem,
 			price = best.recipePrice,
+			where = best.recipeWhere,
+			vendor = best.recipeVendor,
 			learn = best.at,
 			saves = not fillsGap and bestSave or nil,
 			fillsGap = fillsGap or nil,
@@ -708,8 +954,22 @@ local function baselineFor(ctx, chance)
 	-- a swap's recipe buy stands only when the swap took a level (a stale or costless swap buys nothing)
 	local used = {}
 	for s = ctx.skill, ctx.cap - 1 do
-		if levels[s] then
-			used[levels[s].o.spell] = true
+		local lv = levels[s]
+		if lv then
+			used[lv.o.spell] = true
+			-- a fallback level on a recipe item that has a price (its reagents lack one): the recipe is bought
+			if lv.fallback and lv.o.src == "item" and lv.o.recipePrice and not bought[lv.o.spell] then
+				bought[lv.o.spell] = true
+				buys[#buys + 1] = {
+					spell = lv.o.spell,
+					item = lv.o.recipeItem,
+					price = lv.o.recipePrice,
+					where = lv.o.recipeWhere,
+					vendor = lv.o.recipeVendor,
+					learn = lv.o.at,
+					fillsGap = true,
+				}
+			end
 		end
 	end
 	local kept = {}
@@ -812,7 +1072,8 @@ local function stockPass(ctx, base, have, route)
 						break
 					end
 					local c = numer / p
-					local gain = (lv and lv.c or HUGE) - c + P.BIAS
+					-- a gated fallback level counts as uncovered: owned stock of a sure recipe takes it
+					local gain = ((lv and lv.fallback ~= "gated") and lv.c or HUGE) - c + P.BIAS
 					if gain > 0 then
 						local list = perLevel[s] or {}
 						perLevel[s] = list
@@ -884,7 +1145,9 @@ local function partsOf(ctx, base, st)
 		local lf = st.left[s] or 1
 		if lf > EPS then
 			local lv = base.levels[s]
-			list[#list + 1] = lv and { o = lv.o, f = lf, c = lv.c, p = lv.p, s = s } or { gap = true, f = lf, s = s }
+			-- k: the cost per point the step shows (a fallback level's estimate stays inside the planner)
+			list[#list + 1] = lv and { o = lv.o, f = lf, c = lv.c, k = lv.known, p = lv.p, s = s }
+				or { gap = true, f = lf, s = s }
 		end
 		for _, part in ipairs(list) do
 			parts[#parts + 1] = part
@@ -970,8 +1233,10 @@ local function labelParts(ctx, parts, have)
 				out[#out + 1] = part
 				consume(o, crafts)
 			else
-				local a = { o = o, f = part.f * sf, c = part.c, p = part.p, s = part.s, source = stockLabel }
-				local b = { o = o, f = part.f * (1 - sf), c = part.c, p = part.p, s = part.s, source = "buy" }
+				local a =
+					{ o = o, f = part.f * sf, c = part.c, k = part.k, p = part.p, s = part.s, source = stockLabel }
+				local b =
+					{ o = o, f = part.f * (1 - sf), c = part.c, k = part.k, p = part.p, s = part.s, source = "buy" }
 				out[#out + 1] = a
 				consume(o, a.f / a.p)
 				out[#out + 1] = b
@@ -996,7 +1261,7 @@ local function segmentsOf(parts)
 			last.to = part.s + 1
 			last.alloc = last.alloc + (part.gap and 0 or part.f / part.p)
 			last.pts = last.pts + part.f
-			last.cost = last.cost + (part.c or 0) * part.f
+			last.cost = last.cost + (part.k or part.c or 0) * part.f
 		else
 			segs[#segs + 1] = {
 				o = part.o,
@@ -1006,7 +1271,7 @@ local function segmentsOf(parts)
 				to = part.s + 1,
 				alloc = part.gap and 0 or part.f / part.p,
 				pts = part.f,
-				cost = (part.c or 0) * part.f,
+				cost = (part.k or part.c or 0) * part.f,
 			}
 		end
 	end
@@ -1155,13 +1420,23 @@ P.SHORTCUT_MIN = 100 -- copper: a gated recipe saving less than this over a step
 
 -- A shortcut entry: the gated option o, what it saves over the step (nil on a gap), and what it takes to get it.
 local function shortcutOf(o, saves)
-	local needs
+	local needs, why
 	if o.src == "special" then
 		needs = o.teacher or "a special teacher"
 	elseif o.unchecked then
 		needs = "no trainer you opened teaches it"
+	elseif o.tooLow then
+		why = ("needs character level %d"):format(o.level)
+	elseif o.src == "unlisted" then
+		why = "not confirmed obtainable in Forever"
+	elseif o.bop then
+		-- a recipe item that binds when picked up: never an auction buy; the data may say where it comes from
+		local from = fromText(o)
+		why = "its recipe binds when picked up" .. (from and (": " .. from) or "")
+	elseif o.noPrice then
+		why = "no auction price today" .. (o.vendorWhy and ("; " .. o.vendorWhy) or "")
 	end
-	return { spell = o.spell, name = o.name, saves = saves, src = o.src, needs = needs }
+	return { spell = o.spell, name = o.name, saves = saves, src = o.src, needs = needs, why = why, bop = o.bop }
 end
 
 -- Other ways to cover a craft step: every spell the baseline priced at each of the step's levels, its extra cost over
@@ -1173,6 +1448,9 @@ local function othersOf(ctx, base, step, info)
 	local lo = math.floor(step.from)
 	local hi = math.min(math.max(lo, math.ceil(step.to - EPS) - 1), ctx.cap - 1)
 	local extra
+	-- a gated recipe need not cover the whole step: learnable part-way through, it is compared from its learn skill
+	-- on (the step's own recipe stays before that). part[spell] = { x = what it changes, from = its first level }.
+	local part = {}
 	for s = lo, hi do
 		local lv = base.levels[s]
 		if not lv or not lv.costs then
@@ -1181,6 +1459,11 @@ local function othersOf(ctx, base, step, info)
 		local f = math.max(0, math.min(step.to, s + 1) - math.max(step.from, s))
 		local now = {}
 		for spell, c in pairs(lv.costs) do
+			local g = info[spell]
+			if g and g.gated and spell ~= step.spell and c < lv.c then
+				part[spell] = part[spell] or { x = 0, from = s }
+				part[spell].x = part[spell].x + f * (c - lv.c)
+			end
 			-- an alternative covers the whole step: a spell missing at any level drops out. The spell a swap replaced
 			-- is not an alternative: the step offers "Back to" it (step.swapFrom).
 			if spell ~= step.spell and spell ~= step.swapFrom and (not extra or extra[spell]) then
@@ -1190,12 +1473,21 @@ local function othersOf(ctx, base, step, info)
 		extra = now
 	end
 	local out, cuts = {}, {}
+	for spell, pt in pairs(part) do
+		if pt.x < -P.SHORTCUT_MIN then
+			-- a gated recipe that would make this step, or the rest of it, cheaper: a shortcut, with what it saves
+			local cut = shortcutOf(info[spell], -pt.x)
+			cut.from = pt.from > lo and pt.from or nil
+			cuts[#cuts + 1] = cut
+		end
+	end
 	for spell, x in pairs(extra or {}) do
 		local o = info[spell]
-		if o and o.gated and x < -P.SHORTCUT_MIN then
-			-- a gated recipe that would make this step cheaper: a shortcut, with what it saves
-			cuts[#cuts + 1] = shortcutOf(o, -x)
-		else
+		if o and o.gated and part[spell] and part[spell].x < -P.SHORTCUT_MIN then
+			-- offered as a shortcut above
+			x = nil
+		end
+		if x then
 			out[#out + 1] = {
 				spell = spell,
 				name = o and o.name,
@@ -1278,9 +1570,90 @@ local function startOf(ctx, steps, i)
 	return ctx.skill
 end
 
+-- Why a stretch nothing covers is a hole: reason, why (text). A missing price or a gated recipe is never a reason (the
+-- fallback of `forward` plans those):
+--   "norecipe"    no obtainable recipe gives skill there (the true hole);
+--   "recipesOff"  only recipes to buy or get elsewhere do, and that is off (input.noRecipeBuys);
+--   "excluded"    only recipes the user's settings drop do (not now, AH patterns, dungeon patterns);
+--   "level"       only recipes learned at a higher character level do.
+local GAP_WHY = {
+	norecipe = "no recipe gives skill here",
+	recipesOff = "only a recipe to buy or get elsewhere gives skill here, and that is turned off",
+	excluded = "only recipes you turned off give skill here",
+	level = "the recipes here need a higher character level",
+}
+local function gapReason(ctx, from, to)
+	local lo, hi = math.floor(from), math.max(math.floor(from), math.ceil(to - EPS) - 1)
+	local function covers(at, g)
+		return at <= hi and g > lo
+	end
+	local reason = "norecipe"
+	for _, list in ipairs(ctx.noRecipeBuys and { ctx.options, ctx.hidden } or {}) do
+		for _, o in ipairs(list) do
+			if not o.learned and o.src ~= "trainer" and o.src ~= "auto" and not o.tooLow and covers(o.at, o.g) then
+				reason = "recipesOff"
+			end
+		end
+	end
+	if reason == "norecipe" then
+		for _, x in ipairs(ctx.excludedOut or {}) do
+			if covers(x.at, x.g) then
+				reason = "excluded"
+			end
+		end
+	end
+	if reason == "norecipe" then
+		for _, o in ipairs(ctx.hidden or {}) do
+			if o.tooLow and covers(o.at, o.g) then
+				reason = "level"
+			end
+		end
+	end
+	return reason, GAP_WHY[reason]
+end
+
+-- [from, to) cut by ctx.world (input.world = { { from, to, text, spot, why } }: stretches a world skill levels on its
+-- nodes, from Where's route): pieces { from, to, world = stretch | nil } in order, covering [from, to) edge to edge.
+local function worldSplit(ctx, from, to)
+	local out, at = {}, from
+	for _, w in ipairs(ctx.world) do
+		local a, b = math.max(at, w.from), math.min(to, w.to)
+		if b > a then
+			if a > at then
+				out[#out + 1] = { from = at, to = a }
+			end
+			out[#out + 1] = { from = a, to = b, world = w }
+			at = b
+		end
+	end
+	if at < to then
+		out[#out + 1] = { from = at, to = to }
+	end
+	return out
+end
+
+-- Why a gated option is gated, as one word (step.gated on a craft step the fallback planned).
+local function gateOf(o)
+	if not o.gated then
+		return nil
+	elseif o.unchecked then
+		return "unchecked"
+	elseif o.src == "special" then
+		return "special"
+	elseif o.src == "unlisted" then
+		return "unlisted"
+	elseif o.bop then
+		return "bop"
+	elseif o.noPrice then
+		return "noPrice"
+	end
+	return o.tooLow and "level" or "gated"
+end
+
 -- Rank training in the step list. Per rank-up (window [at, by]; at unknown = by): at or past by, train first. Else
--- batch it before a trainer visit already in the window, else the earliest step boundary in the window. When one run
--- straddles the whole window it is never split: the step carries step.rankUp ("train between at and by").
+-- it goes where its cap is reached: immediately before the first step that ends past `by` (before that step's own
+-- "train" or "buy recipe" step, which stays next to its craft). When that step starts before the rank can be trained
+-- (it straddles the whole window) it is never split: the step carries step.rankUp ("train between at and by").
 local function placeRanks(ctx, steps)
 	for _, up in ipairs(ctx.rankUps or {}) do
 		local lo, hi = up.at or up.by, up.by
@@ -1292,13 +1665,12 @@ local function placeRanks(ctx, steps)
 				by = up.by,
 				at = up.at,
 				level = up.level,
+				-- the character's level when the plan was made (nil: not known)
+				have = type(ctx.level) == "number" and ctx.level or nil,
 				cost = up.cost,
 				where = up.where,
 				skill = skill,
 			}
-		end
-		local function inWindow(s)
-			return s >= lo - EPS and s <= hi + EPS
 		end
 		local placed = false
 		if ctx.skill >= hi - EPS then
@@ -1311,27 +1683,20 @@ local function placeRanks(ctx, steps)
 		end
 		if not placed then
 			for i, st in ipairs(steps) do
-				if st.kind == "train" and inWindow(startOf(ctx, steps, i)) then
-					table.insert(steps, i, rankStep(startOf(ctx, steps, i)))
-					placed = true
-					break
-				end
-			end
-		end
-		if not placed then
-			for i = 1, #steps + 1 do
-				local s = startOf(ctx, steps, i)
-				if inWindow(s) then
-					table.insert(steps, i, rankStep(s))
-					placed = true
-					break
-				end
-			end
-		end
-		if not placed then
-			for _, st in ipairs(steps) do
 				if st.from and st.to and st.to > hi + EPS then
-					st.rankUp = up
+					if st.from < lo - EPS then
+						st.rankUp = up
+					else
+						local j = i
+						while
+							j > 1
+							and (steps[j - 1].kind == "train" or steps[j - 1].kind == "buyRecipe")
+							and steps[j - 1].spell == st.spell
+						do
+							j = j - 1
+						end
+						table.insert(steps, j, rankStep(st.from))
+					end
 					placed = true
 					break
 				end
@@ -1387,12 +1752,23 @@ local function finishCore(ctx, baseline, have, commits, own)
 			break
 		end
 		if seg.gap then
-			steps[#steps + 1] = {
-				kind = "gap",
-				from = seg.from,
-				to = seg.to,
-				why = "no known or buyable recipe gives skill here",
-			}
+			-- a stretch the world gives skill on (Mining's nodes, input.world) is a world step, never a hole
+			for _, piece in ipairs(worldSplit(ctx, seg.from, seg.to)) do
+				if piece.world then
+					local w = piece.world
+					steps[#steps + 1] = {
+						kind = "world",
+						from = piece.from,
+						to = piece.to,
+						name = w.text or "Gather in the world",
+						spot = w.spot,
+						why = w.why or "from gathering nodes",
+					}
+				else
+					local reason, why = gapReason(ctx, piece.from, piece.to)
+					steps[#steps + 1] = { kind = "gap", from = piece.from, to = piece.to, reason = reason, why = why }
+				end
+			end
 			cur = math.max(cur, seg.to)
 		elseif seg.source == "buy" and math.max(cur, seg.from) >= math.min(seg.to, ctx.cap) - EPS then
 			-- an earlier stock step's expected points already passed this stretch: nothing left to buy for
@@ -1419,7 +1795,9 @@ local function finishCore(ctx, baseline, have, commits, own)
 					name = o.name,
 					item = b.item,
 					price = b.price,
-					where = "ah",
+					-- "vendor": the data names a vendor that sells it for less than the auction house
+					where = b.where or "ah",
+					vendor = b.vendor,
 					learn = b.learn,
 					owned = (own[b.item] or 0) > 0 or nil, -- in the bags already: learn it, no AH
 					saves = b.saves,
@@ -1428,10 +1806,43 @@ local function finishCore(ctx, baseline, have, commits, own)
 				}
 			elseif o.train and not announced[o.spell] then
 				announced[o.spell] = true
-				steps[#steps + 1] =
-					{ kind = "train", spell = o.spell, name = o.name, at = o.at, unchecked = o.unchecked }
+				steps[#steps + 1] = {
+					kind = "train",
+					spell = o.spell,
+					name = o.name,
+					at = o.at,
+					unchecked = o.unchecked,
+					cost = o.trainCost,
+				}
 			end
 			local crafts
+			if not o.learned and o.src ~= "auto" and o.src ~= "known" and not announced[o.spell] then
+				-- a recipe the user said they can get ("Use it") that the plan cannot buy: say where it comes from, and
+				-- that its price is not known (never counted as free)
+				announced[o.spell] = true
+				local from
+				if o.src == "special" then
+					from = o.teacher or "a special teacher"
+				elseif o.src == "unlisted" then
+					from = "not confirmed obtainable in Forever"
+				else
+					from = fromText(o) or (o.bop and "binds when picked up, source not known") or nil
+					if not o.bop then
+						from = (from and (from .. "; ") or "") .. "auction house, no price today"
+					end
+				end
+				steps[#steps + 1] = {
+					kind = "buyRecipe",
+					spell = o.spell,
+					name = o.name,
+					item = o.recipeItem,
+					where = "source",
+					source = from,
+					priceUnknown = true,
+					learn = o.at,
+					owned = (o.recipeItem and (own[o.recipeItem] or 0) > 0) or nil,
+				}
+			end
 			local source = seg.source
 			if source ~= "buy" then
 				local limit = stockLimit(ctx, o, have, pool)
@@ -1467,6 +1878,9 @@ local function finishCore(ctx, baseline, have, commits, own)
 				points = pts,
 				committed = committed[o.spell] or nil,
 				unchecked = o.unchecked, -- taught by a trainer nobody has seen teach it yet
+				-- planned although gated, because nothing sure gives skill here: "unchecked" (trainer recipe no
+				-- trainer listed), "noPrice" (recipe item with no auction price), "bop", "unlisted", "special"
+				gated = gateOf(o),
 				color = colorOf(math.floor(from), o.y, o.g),
 				-- the chance at the first craft and at the last one
 				chance = {
@@ -1495,7 +1909,16 @@ local function finishCore(ctx, baseline, have, commits, own)
 				local count = math.ceil(need - use - EPS)
 				if count > 0 then
 					local pr = ctx.price[i] or {}
-					step.buy[#step.buy + 1] = { item = i, count = count, where = pr.where, each = pr.buy }
+					-- TSM.prices leaves buy = false (not nil) for an item TradeSkillMaster has no price for
+					step.buy[#step.buy + 1] = { item = i, count = count, where = pr.where, each = pr.buy or nil }
+					if not pr.buy then
+						-- no price: bought all the same, the step's cost is "at least" (cash.out leaves it out)
+						step.buy[#step.buy].unpriced = true
+						step.unpriced = step.unpriced or {}
+						local info = ctx.items[i]
+						step.unpriced[#step.unpriced + 1] =
+							{ item = i, name = info and info.name or nil, count = count }
+					end
 					out = out + count * (pr.buy or 0)
 					if pr.export then
 						export = true
@@ -1514,7 +1937,21 @@ local function finishCore(ctx, baseline, have, commits, own)
 				soldHere = math.max(0, math.min(crafts, o.takes - (sold[o.spell] or 0)))
 				sold[o.spell] = (sold[o.spell] or 0) + soldHere
 			end
-			step.cash = { out = out, back = soldHere * (o.sell or 0) + (crafts - soldHere) * o.vendor }
+			if o.noResale then
+				-- resale off: nothing comes back; what selling would bring is a note on the card, never a credit
+				step.cash = { out = out, back = 0 }
+				local each = resaleOf(o, 0)
+				if each > 0 and crafts > 0 then
+					local n = wouldSell(o) and math.min(crafts, o.takes) or crafts
+					step.resale = {
+						back = n * each + (crafts - n) * o.vendor,
+						crafts = crafts,
+						ah = wouldSell(o) and n or 0,
+					}
+				end
+			else
+				step.cash = { out = out, back = soldHere * (o.sell or 0) + (crafts - soldHere) * o.vendor }
+			end
 			if source ~= "buy" and step.color ~= "orange" then
 				local later = false
 				for j = idx + 1, #segs do
@@ -1723,10 +2160,47 @@ local function finishCore(ctx, baseline, have, commits, own)
 		end
 		return a.costPt < b.costPt
 	end)
-	-- options that cannot be priced and are not owned (U5)
+	-- what the plan buys at a price nobody knows: reagents (step.unpriced) and recipes to get (a buyRecipe step with
+	-- priceUnknown). plan.unpriced = { count = kinds, items = { { item, name, count, recipe = true | nil } } }, by item.
+	local unpriced, unpricedBy, planned = { count = 0, items = {} }, {}, {}
+	local function addUnpriced(key, item, name, count, recipe)
+		local e = unpricedBy[key]
+		if not e then
+			e = { item = item, name = name, count = 0, recipe = recipe }
+			unpricedBy[key] = e
+			unpriced.items[#unpriced.items + 1] = e
+		end
+		e.count = e.count + count
+	end
+	for _, step in ipairs(steps) do
+		if step.kind == "craft" then
+			planned[step.spell] = true
+			for _, u in ipairs(step.unpriced or {}) do
+				addUnpriced(u.item, u.item, u.name, u.count)
+			end
+		elseif step.kind == "buyRecipe" and step.priceUnknown and not step.owned then
+			local info = step.item and ctx.items[step.item]
+			addUnpriced(
+				"r" .. step.spell,
+				step.item,
+				info and info.name or ("Recipe: " .. tostring(step.name)),
+				1,
+				true
+			)
+		end
+	end
+	table.sort(unpriced.items, function(a, b)
+		if (a.recipe == true) ~= (b.recipe == true) then
+			return b.recipe == true
+		end
+		return (a.item or 0) < (b.item or 0)
+	end)
+	unpriced.count = #unpriced.items
+	plan.unpriced = unpriced
+	-- options that cannot be priced, are not owned and are not in the plan (U5)
 	local seenSpell = {}
 	for _, o in ipairs(ctx.options) do
-		if o.variant == 1 and o.missing and not seenSpell[o.spell] then
+		if o.variant == 1 and o.missing and not seenSpell[o.spell] and not planned[o.spell] then
 			local owned = false
 			for _, i in ipairs(o.missing) do
 				if (have[i] or 0) > 0 then
@@ -1791,15 +2265,16 @@ local function finishCore(ctx, baseline, have, commits, own)
 	return plan
 end
 
+-- An item with no price at all is an auction buy too (price unknown): never dropped from the lists.
 local function isAh(ctx, item)
 	local pr = ctx.price[item]
-	return pr ~= nil and pr.where ~= "vendor"
+	return pr == nil or pr.where ~= "vendor"
 end
 
 -- Whether a step sends the user to the AH: a recipe to buy there, or a reagent it buys there.
 local function needsAh(ctx, st)
 	if st.kind == "buyRecipe" then
-		return not st.owned
+		return not st.owned and st.where == "ah"
 	end
 	for _, b in ipairs(st.kind == "craft" and st.buy or {}) do
 		if isAh(ctx, b.item) then
@@ -1816,7 +2291,7 @@ P.needsAh = needsAh
 local function tripOf(ctx, steps, chance, gold)
 	local first
 	for i, st in ipairs(steps) do
-		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
+		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" or st.kind == "world" then
 			return nil
 		elseif needsAh(ctx, st) then
 			first = i
@@ -1831,7 +2306,8 @@ local function tripOf(ctx, steps, chance, gold)
 	local function add(item, count, each, field)
 		local r = byItem[item]
 		if not r then
-			r = { item = item, count = 0, buffer = 0, each = each or 0 }
+			-- unpriced: no price for it (each = 0 keeps the sums; the total is then "at least")
+			r = { item = item, count = 0, buffer = 0, each = each or 0, unpriced = each == nil or nil }
 			byItem[item] = r
 			rows[#rows + 1] = r
 		end
@@ -1840,13 +2316,13 @@ local function tripOf(ctx, steps, chance, gold)
 	end
 	for i = first, #steps do
 		local st = steps[i]
-		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
+		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" or st.kind == "world" then
 			ends = st.kind
 			break
 		end
 		local cost = 0
 		if st.kind == "buyRecipe" then
-			cost = st.owned and 0 or (st.price or 0)
+			cost = (st.owned or st.where ~= "ah") and 0 or (st.price or 0)
 		else
 			for _, b in ipairs(st.buy) do
 				if isAh(ctx, b.item) then
@@ -1859,7 +2335,7 @@ local function tripOf(ctx, steps, chance, gold)
 			break
 		end
 		if st.kind == "buyRecipe" then
-			if not st.owned then
+			if not st.owned and st.where == "ah" then
 				add(st.item, 1, st.price, "count")
 				byItem[st.item].recipe = true
 			end
@@ -1972,10 +2448,13 @@ function P.shoppingOf(ctx, steps, trip)
 	local stop = trip and trip.toStep or #steps
 	for j = i, stop do
 		local st = steps[j]
-		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" then
+		if st.kind == "train" or st.kind == "trainRank" or st.kind == "gap" or st.kind == "world" then
 			break
 		elseif st.kind == "buyRecipe" then
-			if not st.owned then
+			if not st.owned and st.where == "vendor" then
+				local merchant = st.vendor and st.vendor.name
+				add(shop.vendor, vendorBy, st.item, 1, st.price, { merchant = merchant, kind = "pattern" }, j)
+			elseif not st.owned and st.where == "ah" then
 				add(shop.ah, ahBy, st.item, 1, st.price, { kind = "pattern" }, j)
 			end
 		elseif st.kind == "craft" then
@@ -1985,7 +2464,7 @@ function P.shoppingOf(ctx, steps, trip)
 					local info = ctx.items[b.item] or {}
 					add(shop.vendor, vendorBy, b.item, b.count, b.each, { merchant = pr.merchant or info.merchant }, j)
 				elseif isAh(ctx, b.item) then
-					add(shop.ah, ahBy, b.item, b.count, b.each, { kind = "reagent" }, j)
+					add(shop.ah, ahBy, b.item, b.count, b.each, { kind = "reagent", unpriced = b.unpriced }, j)
 				end
 			end
 		end
@@ -2091,6 +2570,193 @@ function P.finish(ctx, baseline, have, opts)
 	plan.trip = tripOf(ctx, plan.steps, baseline.formula.chance, opts.gold)
 	plan.shopping = P.shoppingOf(ctx, plan.steps, plan.trip)
 	return plan
+end
+
+-- What a plan pays trainers: { total, recipes = n, ranks = n, unknown = n } (copper; unknown = trainer recipes and
+-- ranks whose price the data does not have). Trainer recipes are the plan's train steps; ranks are plan.rankUps (a
+-- rank trained inside one long step has no step of its own).
+function P.trainingOf(plan)
+	local t = { total = 0, recipes = 0, ranks = 0, unknown = 0 }
+	for _, st in ipairs(plan and plan.steps or {}) do
+		if st.kind == "train" then
+			t.recipes = t.recipes + 1
+			if type(st.cost) == "number" then
+				t.total = t.total + st.cost
+			else
+				t.unknown = t.unknown + 1
+			end
+		end
+	end
+	for _, up in ipairs(plan and plan.rankUps or {}) do
+		t.ranks = t.ranks + 1
+		if type(up.cost) == "number" then
+			t.total = t.total + up.cost
+		else
+			t.unknown = t.unknown + 1
+		end
+	end
+	return t
+end
+
+-- What it costs to level a profession entry (Data/Recipes.lua's shape: { recipes, ranks }) from skill `from` to `to`,
+-- for any profession, also one the character does not have: the real planner, run with nothing in the bags.
+-- priceFn(item) -> copper to buy one, or nil (no price). opts (all optional):
+--   vendor = { [item] = copper }, items = { [item] = { sell, ... } } (the data's tables);
+--   price, product: ready tables in Planner.prepare's shape (TSM.prices' result) instead of priceFn;
+--   learned = { [spell] = true } (default: every `auto` recipe, learned with the profession);
+--   ranks (default prof.ranks), cap (the live cap; default: the first rank cap above `from`, and that rank's cost is
+--   counted when from <= 1: a profession not learned yet), level, exclude, trainerSeen, effort, luck;
+--   recipeItems = false: plan with trainer and auto recipes only; resale = true: selling products counts;
+--   world = Planner.prepare's input.world (Mining's node stretches: a world step each, not a gap).
+-- Returns { total, spent, back, trainingCost, steps, gaps = { { from, to, why, reason } }, recipesToBuy = { { spell,
+-- name, item, price } }, unknownPrices (reagents that have no price), unknownItems, unknownRecipeItems (tradeable
+-- recipe items with no price), unpriced (what the plan itself buys at an unknown price: plan.unpriced), reached,
+-- complete }; opts.faction as Planner.prepare's input.faction.
+-- total = spent - back + recipe items + trainingCost, in copper, buying for the luck percentile (rule 1); with
+-- unpriced.count > 0 it is "at least" that. A gap is a stretch no obtainable recipe covers (reason: gapReason's, or
+-- "cap" for the stretch past the reachable cap), never a missing price: with complete data there is none.
+function P.costToCap(prof, from, to, priceFn, opts)
+	opts = opts or {}
+	local recipes = type(prof) == "table" and prof.recipes or {}
+	local vendor = opts.vendor or {}
+	local price = opts.price
+	local built = price == nil
+	price = price or {}
+	local unknown, unknownItems, unknownRecipes = {}, {}, 0
+	-- quiet: priced when a price exists, never counted as unknown (a shortcut's reagents: the plan uses them only as a
+	-- fallback, and then names them itself in `unpriced`)
+	local function need(i, recipeItem, quiet)
+		if built and price[i] == nil and not unknown[i] then
+			local v = vendor[i]
+			if v then
+				price[i] = { buy = v, where = "vendor", salvage = 0 }
+			else
+				local p = priceFn and priceFn(i)
+				if type(p) == "number" and p == p then
+					price[i] = { buy = p, where = "ah", salvage = 0 }
+				end
+			end
+		end
+		if not quiet and not (price[i] and price[i].buy) and not unknown[i] then
+			unknown[i] = true
+			if recipeItem then
+				-- a recipe item nobody sells today: its recipe is a shortcut, not a hole in the reagent prices
+				unknownRecipes = unknownRecipes + 1
+			else
+				unknownItems[#unknownItems + 1] = i
+			end
+		end
+	end
+	local learned = opts.learned
+	local auto = {}
+	for spell, r in pairs(recipes) do
+		-- only recipes the plan may use by itself: not the unlisted, special or bind-on-pickup shortcuts
+		-- (one the user allowed, "Use it", is planned like any other, so its reagents are priced too)
+		local allowed = opts.exclude and opts.exclude.allow and opts.exclude.allow[spell] == true
+		local shortcut = r.src == "unlisted" or r.src == "special" or (r.src == "item" and r.bop and not r.vendor)
+		if not r.gone and (allowed or not shortcut) then
+			for k = 1, #(r.mats or {}) - 1, 2 do
+				need(r.mats[k])
+			end
+			if r.src == "item" and r.item and not r.bop then
+				need(r.item, true)
+			end
+		elseif not r.gone then
+			for k = 1, #(r.mats or {}) - 1, 2 do
+				need(r.mats[k], false, true)
+			end
+		end
+		if r.src == "auto" then
+			auto[spell] = true
+		end
+	end
+	table.sort(unknownItems)
+	learned = learned or auto
+	local ranks = opts.ranks or prof.ranks or {}
+	local cap, first = opts.cap, nil
+	if not cap then
+		for _, rk in ipairs(ranks) do
+			if rk.cap and rk.cap > from and (not cap or rk.cap < cap) then
+				cap, first = rk.cap, rk
+			end
+		end
+		cap = cap or to
+	end
+	local plan = P.run({
+		skill = from,
+		cap = cap,
+		target = to,
+		level = opts.level,
+		ranks = ranks,
+		exclude = opts.exclude,
+		trainerSeen = opts.trainerSeen,
+		faction = opts.faction,
+		recipes = recipes,
+		items = opts.items or {},
+		learned = learned,
+		price = price,
+		product = opts.product,
+		effort = opts.effort,
+		luck = opts.luck,
+		noRecipeBuys = opts.recipeItems == false,
+		resale = opts.resale == true,
+		world = opts.world,
+		have = {},
+	})
+	local out = {
+		steps = plan.steps,
+		gaps = {},
+		world = {}, -- stretches levelled on nodes (opts.world): { { from, to, text, why, spot } }, no gold cost
+		recipesToBuy = {},
+		spent = 0,
+		back = 0,
+		trainingCost = 0,
+		unknownPrices = #unknownItems,
+		unknownItems = unknownItems,
+		unknownRecipeItems = unknownRecipes,
+		unknownRecipePrices = 0,
+		-- what the plan itself buys at an unknown price (the plan's own table: count, items)
+		unpriced = plan.unpriced,
+		reached = plan.cap,
+		capBlock = plan.capBlock,
+	}
+	if first and from <= 1 and type(first.cost) == "number" then
+		out.trainingCost = first.cost
+	end
+	local recipeCost = 0
+	for _, st in ipairs(plan.steps) do
+		if st.kind == "gap" then
+			out.gaps[#out.gaps + 1] = { from = st.from, to = st.to, why = st.why, reason = st.reason }
+		elseif st.kind == "world" then
+			-- levelled on nodes: no gold cost, no gap
+			out.world[#out.world + 1] = { from = st.from, to = st.to, text = st.name, why = st.why, spot = st.spot }
+		elseif st.kind == "craft" then
+			out.spent = out.spent + (st.cash and st.cash.out or 0)
+			out.back = out.back + (st.cash and st.cash.back or 0)
+		elseif st.kind == "buyRecipe" then
+			recipeCost = recipeCost + (st.price or 0)
+			out.recipesToBuy[#out.recipesToBuy + 1] =
+				{ spell = st.spell, name = st.name, item = st.item, price = st.price, source = st.source }
+			if st.priceUnknown and not st.owned then
+				-- a recipe to get at a price nobody knows: said, never counted as free
+				out.unknownRecipePrices = out.unknownRecipePrices + 1
+			end
+		end
+	end
+	-- trainer recipes and the ranks trained on the way: the same sum the panel shows (P.trainingOf)
+	out.trainingCost = out.trainingCost + P.trainingOf(plan).total
+	if (plan.cap or from) < to then
+		local why = "no rank raises the cap"
+		if plan.capBlock then
+			why = "the next rank is blocked (" .. tostring(plan.capBlock.reason) .. ")"
+		elseif plan.coverage then
+			why = "no recipe gives skill past " .. tostring(plan.coverage.to)
+		end
+		out.gaps[#out.gaps + 1] = { from = plan.cap or from, to = to, why = why, reason = "cap" }
+	end
+	out.total = out.spent - out.back + recipeCost + out.trainingCost
+	out.complete = #out.gaps == 0
+	return out
 end
 
 -- The whole planner in one call (tests, and the panel when nothing is cached).

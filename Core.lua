@@ -4,7 +4,41 @@ SkillupHelper = ns
 ns.Data = ns.Data or {}
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.2.17"
+ns.CODE_VERSION = "0.3.0"
+
+-- The data the planner reads, built once from the three layers (Logic.effectivePlan): the shipped Data/Recipes.lua,
+-- an optional local Data/Plan.lua on top, an optional Data/Custom.lua on top of both. ns.Data.layers says what
+-- loaded (selftest.data). A Data/Custom.lua that breaks the merge is left out and named, never a Lua error.
+function ns.plan()
+	if ns.Data.effective == nil then
+		local ok, eff, report = pcall(ns.Logic.effectivePlan, ns.Data.recipes, ns.Data.plan, ns.Data.custom)
+		if not ok then
+			local err = tostring(eff)
+			ok, eff, report = pcall(ns.Logic.effectivePlan, ns.Data.recipes, ns.Data.plan, nil)
+			if not ok then
+				eff, report = nil, { error = "data layers failed: " .. tostring(eff) }
+			end
+			report.custom = { applied = 0, errors = { "Data/Custom.lua could not be applied: " .. err } }
+		end
+		ns.Data.effective = eff or false
+		ns.Data.layers = report
+	end
+	return ns.Data.effective or nil
+end
+
+-- One chat line when Data/Custom.lua has entries that were left out (all of them are in selftest.data.custom).
+function ns.customNotice()
+	local c = ns.Data.layers and ns.Data.layers.custom
+	local errors = type(c) == "table" and c.errors or {}
+	if #errors == 0 then
+		return nil
+	end
+	return ("SkillupHelper: Data/Custom.lua: %d entr%s left out. First: %s"):format(
+		#errors,
+		#errors == 1 and "y" or "ies",
+		errors[1]
+	)
+end
 
 function ns.version()
 	local v = C_AddOns.GetAddOnMetadata(ADDON, "Version")
@@ -32,22 +66,33 @@ end
 -- The cap model's SavedVariables, made on first use (ns.capTables): ranks[skillLineID][cap] learned at the trainer;
 -- exclude = { dungeon, ahPatterns, special, notNow[spellID], allow[spellID] (gated recipes to use), swap[spellID] = spellID };
 -- trainerSeen[skillLineID][spellID or lowercased name] = true for the recipes an ordinary trainer lists.
+-- What the game taught (trainer ranks and learn ranks, recipe colours, vendors, NPC positions, skill-up counts) lives
+-- in saved.learned (Learned.lua), the one table that is safe to share: ns.capTables moves the pre-0.3.0 fields
+-- (ranks, colorSeen, trainerReq, guide.npcs) into it.
+local learned
 function ns.capTables(saved)
-	saved.ranks = type(saved.ranks) == "table" and saved.ranks or {}
+	local locale = GetLocale and GetLocale() or nil
+	learned = ns.Learned.attach(saved, ns.Learned.build(), locale)
 	saved.exclude = type(saved.exclude) == "table" and saved.exclude or {}
 	saved.exclude.notNow = type(saved.exclude.notNow) == "table" and saved.exclude.notNow or {}
 	saved.exclude.allow = type(saved.exclude.allow) == "table" and saved.exclude.allow or {}
 	-- swap[Y] = X: "use X instead of Y" (the Other way rows of a step)
 	saved.exclude.swap = type(saved.exclude.swap) == "table" and saved.exclude.swap or {}
 	saved.trainerSeen = type(saved.trainerSeen) == "table" and saved.trainerSeen or {}
-	-- colorSeen[spellID] = { o = highest skill seen orange, y = lowest seen yellow or green }, for learned recipes the
-	-- export does not list: it narrows their estimated yellow threshold (Scan.yellowOf)
-	saved.colorSeen = type(saved.colorSeen) == "table" and saved.colorSeen or {}
+	-- learned.colors[spellID] = { o = highest skill seen orange, y = lowest seen yellow or green, ... }: for learned
+	-- recipes the export does not list it narrows their estimated yellow threshold (Scan.yellowOf).
+	-- learned.trainers[skillLineID][spellID or lowercased name] = { skill, cost }: what a trainer asks for each recipe
+	-- it lists, read in game (Scan.readTrainer). It wins over the data's learn ranks (Logic.withTrainerReq).
 	return saved
 end
 
 function ns.savedColorSeen()
-	return db and db.colorSeen or nil
+	return learned and learned.colors or nil
+end
+
+-- SkillupHelperDB.learned, or nil before the SavedVariables load.
+function ns.learned()
+	return learned
 end
 
 -- What Data/Plan.lua holds, for the selftest; nil when the file is absent.
@@ -69,6 +114,22 @@ function ns.selftest.planSummary(plan)
 	return { generatedAt = plan.generatedAt, build = plan.build, professions = profs }
 end
 
+-- selftest.data: a copy of the data layers' report (ns.Data.layers, cached for the session and read by the guide and
+-- the journal) with the data's age on top: where and when the overlay was read, and whether the game is a newer build.
+-- The shared report itself is never written to.
+function ns.selftest.dataReport(layers, recipes, build, buildNumber)
+	if type(layers) ~= "table" then
+		return layers
+	end
+	local out = {}
+	for k, v in pairs(layers) do
+		out[k] = v
+	end
+	out.overlayRetrieved = type(recipes) == "table" and recipes.source or nil
+	out.status, out.gameIsNewer = ns.Logic.dataStatus(recipes, build, buildNumber)
+	return out
+end
+
 local function refreshSelftest()
 	if not db then
 		return
@@ -79,7 +140,10 @@ local function refreshSelftest()
 	st.build, st.interface, st.project = build .. "." .. tostring(buildNumber), interface, WOW_PROJECT_ID
 	st.loadedAt = st.loadedAt or date("%Y-%m-%d %H:%M:%S")
 	st.savedAt = date("%Y-%m-%d %H:%M:%S")
-	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent"
+	-- the data layers: the shipped build and recipe counts per profession, the local plan, the custom file
+	ns.plan()
+	st.data = ns.selftest.dataReport(ns.Data.layers, ns.Data.recipes, build, buildNumber)
+	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent (optional: the shipped data plans alone)"
 	st.lastScan = ns.lastScan
 	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
 	st.scans = ns.scans
@@ -88,25 +152,24 @@ local function refreshSelftest()
 	st.trips = db.trips
 	-- cap model: rank entries saved at trainers, and the last trainer read's broken link (nil when it read fine)
 	st.ranksSeen = ns.ranksSeen()
+	-- what the game taught, as counts (the table itself is SkillupHelperDB.learned), and the last craft counted
+	st.learned = ns.Learned.status(learned)
+	st.skillups = ns.skillupStatus
 	st.lastTrainerRead = ns.lastTrainerRead
 	st.tsm = ns.TSM.status()
 	st.craftedEvent = ns.craftedEvent
+	-- known only with a local Data/Plan.lua (its pricesAt); unknown is not stale
 	local age = ns.TSM.ageHours(ns.Data.plan)
 	st.tsmAgeHours = age and math.floor(age * 10 + 0.5) / 10
-	st.tsmStale = age == nil or age > ns.TSM.STALE_HOURS
+	st.tsmStale = age ~= nil and age > ns.TSM.STALE_HOURS
 	st.lastError = ns.lastError
 	st.panelErrors = ns.panelErrors
 	st.guide = ns.GuideUI and ns.GuideUI.status()
 	local ui = ns.UI.stats
 	st.ui = {
 		layout = ui.layout,
-		-- the shown tab and each tab's content height (scroll: the shown one overflows)
-		tab = ui.tab,
+		-- what the docked panel shows (the card, the next lines, why some are not shown)
 		views = ui.views,
-		-- Phase 2 of the redesign: the pieces, the action bar's rows and buttons, the previewed step, what is open
-		phase2 = ui.phase2,
-		-- Phase 3: settings controls, the Way menu, covered Shopping blocks folding, the tab pips
-		phase3 = ui.phase3,
 		animations = ui.animations,
 		played = ui.played,
 		lastDock = ui.lastDock,
@@ -155,20 +218,134 @@ function ns.guard(where, fn, ...)
 	return ok
 end
 
+-- Skill-ups per craft, for learned.skillups: a craft cast of a recipe of the open profession is kept until a scan
+-- at least SETTLE seconds later shows the skill, and the points gained since are its skill-ups (Learned.settle).
+-- Counted, never planned from: the numbers are for whoever checks the skill-up chance formula against the game.
+local SETTLE = 1.5
+local crafting = nil -- { line, skill, cap, recipes } of the last scan
+local crafts, craftsAt = {}, 0
+ns.skillupStatus = { casts = 0, counted = 0 }
+
+local function noteCraftCast(spellID)
+	if not learned or not ns.tradeSkillOpen or not crafting or type(spellID) ~= "number" then
+		return
+	end
+	if (issecretvalue and issecretvalue(spellID)) or type(crafting.recipes) ~= "table" then
+		return
+	end
+	if not crafting.recipes[spellID] or type(crafting.skill) ~= "number" then
+		return
+	end
+	local c = crafts[spellID] or { n = 0, skill = crafting.skill }
+	c.n = c.n + 1
+	crafts[spellID] = c
+	craftsAt = GetTime()
+	ns.skillupStatus.casts = ns.skillupStatus.casts + 1
+end
+
+-- model: a scan's model, or liveSkill()'s { professionID, skill, maxSkill } while the panel is hidden. A model with no
+-- profession (a failed scan, a secret id) settles nothing and drops nothing.
+local function settleCrafts(model)
+	local line = model and model.professionID
+	if line == nil or (issecretvalue and issecretvalue(line)) then
+		return
+	end
+	if next(crafts) and crafting and line == crafting.line and GetTime() - craftsAt >= SETTLE then
+		local n = ns.Learned.settle(learned, line, crafts, model.skill, crafting.cap)
+		ns.skillupStatus.counted = ns.skillupStatus.counted + n
+		ns.skillupStatus.last = { line = line, skill = model.skill, crafts = n }
+		crafts = {}
+	elseif next(crafts) and crafting and line ~= crafting.line then
+		crafts = {} -- another profession's window: the pending crafts cannot be settled against it
+	end
+	if not next(crafts) and type(model.skill) == "number" then
+		-- every learned recipe of the window counts (the client-only ones too: Scan.build's model.learned); the
+		-- data's recipes when a model has no such set; the last set when a hidden-panel read carries none
+		local recipes = model.learned or (model.plan and model.plan.recipes)
+		if recipes == nil and crafting and crafting.line == line then
+			recipes = crafting.recipes
+		end
+		crafting = { line = line, skill = model.skill, cap = model.maxSkill, recipes = recipes }
+	end
+end
+
+-- The open profession's skill straight from the client, for settling crafts without a scan (the panel hidden, the
+-- window closing): { professionID, skill, maxSkill }, or nil when there is none or it is a secret (not now).
+local function liveSkill()
+	local ok, info = pcall(ns.Scan.professionInfo)
+	if not ok or type(info) ~= "table" then
+		return nil
+	end
+	local id, skill, cap = info.professionID, info.skillLevel, info.maxSkillLevel
+	if issecretvalue and (issecretvalue(id) or issecretvalue(skill) or issecretvalue(cap)) then
+		return nil
+	end
+	if id == nil or type(skill) ~= "number" then
+		return nil
+	end
+	return { professionID = id, skill = skill, maxSkill = cap }
+end
+
+-- With the panel hidden ns.refresh scans nothing, so pending crafts settle here: SETTLE seconds after the last
+-- refresh event, again while some stay pending (at most a few times: a skill that never reads stops trying).
+local settleArmed, settleTries = false, 0
+local function settleSoon()
+	if settleArmed then
+		return
+	end
+	settleArmed = true
+	C_Timer.After(SETTLE, function()
+		settleArmed = false
+		if not ns.tradeSkillOpen then
+			return
+		end
+		ns.guard("skillups", function()
+			settleCrafts(liveSkill())
+		end)
+		if next(crafts) and settleTries < 5 then
+			settleTries = settleTries + 1
+			settleSoon()
+		else
+			settleTries = 0
+		end
+	end)
+end
+
+-- For the tests: the craft counter's steps (a cast, a settle with a model, a hidden-panel settle).
+ns.craftCounter = {
+	cast = function(spellID)
+		return noteCraftCast(spellID)
+	end,
+	settle = function(model)
+		return settleCrafts(model)
+	end,
+	pending = function()
+		return crafts
+	end,
+}
+
 local pending = false
 function ns.refresh()
-	if pending or not ns.UI.frame or not ns.UI.frame:IsShown() then
+	if not ns.UI.frame or not ns.UI.frame:IsShown() then
+		-- the panel hidden: no scan, but crafts made meanwhile still settle against the client's skill
+		if ns.tradeSkillOpen and next(crafts) then
+			settleSoon()
+		end
+		return
+	end
+	if pending then
 		return
 	end
 	pending = true
 	C_Timer.After(0.3, function()
 		pending = false
-		local ok, model = pcall(ns.Scan.build, ns.Data.plan)
+		local ok, model = pcall(ns.Scan.build, ns.plan())
 		if not ok then
 			ns.lastError = tostring(model)
 			model = { why = "scan failed: " .. tostring(model) }
 		end
 		ns.guard("draw", ns.UI.show, model)
+		ns.guard("skillups", settleCrafts, model)
 		ns.lastScan = ns.scanSummary(model)
 		ns.lastScan.dock = ns.dockKind
 		ns.lastScan.tsm = ns.TSM.status()
@@ -211,7 +388,9 @@ function ns.scanSummary(model)
 			mismatches = p.colourMismatch,
 			priceSources = p.prices,
 			tsmAgeHours = ageHours and math.floor(ageHours * 10 + 0.5) / 10,
-			tsmStale = ageHours == nil or ageHours > ns.TSM.STALE_HOURS,
+			tsmStale = ageHours ~= nil and ageHours > ns.TSM.STALE_HOURS,
+			-- the plan ran on the data's default ranks: no trainer of this profession was read yet
+			ranksAssumed = model.ranksAssumed,
 		}
 		local list = {}
 		for i, st in ipairs(p.steps) do
@@ -237,6 +416,7 @@ function ns.settings()
 		sellShare = db and db.sellShare,
 		noRecipeBuys = db and db.noRecipeBuys,
 		noAlts = db and db.noAlts,
+		resale = db and db.resale,
 		luck = db and db.luck,
 		trips = db and db.trips,
 		exclude = db and db.exclude,
@@ -249,14 +429,25 @@ function ns.savedTrainerSeen(skillLineID)
 	return db and skillLineID and db.trainerSeen and db.trainerSeen[skillLineID] or nil
 end
 
+-- One section of SkillupHelperDB.learned for a skill line, or nil (no table yet, or a hand-edited file without it).
+local function learnedFor(section, skillLineID)
+	local t = learned and skillLineID and learned[section]
+	return type(t) == "table" and t[skillLineID] or nil
+end
+
+function ns.savedTrainerReq(skillLineID)
+	return learnedFor("trainers", skillLineID)
+end
+
 function ns.savedRanks(skillLineID)
-	return db and skillLineID and db.ranks and db.ranks[skillLineID] or nil
+	return learnedFor("ranks", skillLineID)
 end
 
 function ns.ranksSeen()
 	local n = 0
-	for _, byCap in pairs(db and db.ranks or {}) do
-		for _ in pairs(byCap) do
+	local ranks = learned and learned.ranks
+	for _, byCap in pairs(type(ranks) == "table" and ranks or {}) do
+		for _ in pairs(type(byCap) == "table" and byCap or {}) do
 			n = n + 1
 		end
 	end
@@ -266,7 +457,7 @@ end
 -- TRAINER_SHOW / TRAINER_UPDATE: save the rank services of a profession trainer. Not a profession trainer is "not
 -- now" and leaves the last diagnostic alone.
 function ns.onTrainer()
-	if not db then
+	if not db or not learned then
 		return
 	end
 	local ok, parsed, why, state = pcall(ns.Scan.readTrainer)
@@ -279,7 +470,8 @@ function ns.onTrainer()
 	end
 	if parsed and parsed.skillLine and #parsed.ranks > 0 then
 		-- the planner's cache key carries the ranks: the next scan replans on its own
-		ns.Scan.saveRanks(db.ranks, parsed.skillLine, parsed.ranks, time())
+		ns.Scan.saveRanks(learned.ranks, parsed.skillLine, parsed.ranks, time())
+		ns.Learned.stampRanks(learned, parsed.skillLine, parsed.ranks, ns.Learned.build())
 	end
 	if parsed and parsed.skillLine and next(parsed.seen or {}) then
 		local first = db.trainerSeen[parsed.skillLine] == nil
@@ -294,6 +486,10 @@ function ns.onTrainer()
 				"SkillupHelper: trainer read. Recipes no trainer you've opened teaches are shortcuts now; another trainer can confirm them."
 			)
 		end
+	end
+	if parsed and parsed.skillLine and next(parsed.req or {}) then
+		-- the planner's cache key carries each recipe's learn rank: the next scan replans
+		ns.Learned.noteTrainer(learned, parsed.skillLine, parsed.req, ns.Learned.build())
 	end
 	ns.lastTrainerRead = why
 end
@@ -441,7 +637,13 @@ local function open()
 end
 
 local function close()
+	-- a last settle while the client still names the profession; crafts younger than SETTLE (their skill-up may not be
+	-- in yet) are dropped: without the window the skill they ended at is not known
+	ns.guard("skillups", function()
+		settleCrafts(liveSkill())
+	end)
 	ns.tradeSkillOpen = false
+	crafts, crafting = {}, nil
 	stopTicker()
 	ns.UI.setShown(false, false)
 end
@@ -470,6 +672,9 @@ end
 local okCrafted, errCrafted = pcall(f.RegisterEvent, f, "TRADE_SKILL_ITEM_CRAFTED_RESULT")
 ns.craftedEvent = okCrafted and "registered"
 	or ("TRADE_SKILL_ITEM_CRAFTED_RESULT not registered: " .. tostring(errCrafted))
+-- The player's own casts: a craft of the open profession is a try at a skill-up (noteCraftCast).
+ns.skillupStatus.event = pcall(f.RegisterUnitEvent, f, "UNIT_SPELLCAST_SUCCEEDED", "player") and "registered"
+	or "UNIT_SPELLCAST_SUCCEEDED not registered: crafts are not counted"
 -- A vendor opening or closing turns the Next card's Buy button on or off (the same events under TSM's vendoring
 -- window, which replaces MerchantFrame but not the merchant).
 for _, e in ipairs({ "MERCHANT_SHOW", "MERCHANT_CLOSED", "MERCHANT_UPDATE" }) do
@@ -506,7 +711,14 @@ for _, e in ipairs(AH_EVENTS) do
 		ns.UI.stats.ah.unregistered[e] = tostring(err)
 	end
 end
-f:SetScript("OnEvent", function(_, event, arg1, arg2)
+local trainerQueued = false
+f:SetScript("OnEvent", function(_, event, arg1, arg2, arg3)
+	if event == "UNIT_SPELLCAST_SUCCEEDED" then
+		if arg1 == "player" then
+			ns.guard("skillups", noteCraftCast, arg3)
+		end
+		return
+	end
 	if isAhEvent[event] then
 		ns.guard("ah", ns.UI.ahEvent, event, arg1, arg2)
 		return
@@ -521,7 +733,15 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 		return
 	end
 	if event == "TRAINER_SHOW" or event == "TRAINER_UPDATE" then
-		ns.onTrainer()
+		-- the list fills after TRAINER_SHOW, in a burst of TRAINER_UPDATEs: one read per frame, after the burst. An
+		-- empty read is "not now" (Scan.readTrainer) and what is saved only ever gains keys, so no read downgrades it.
+		if not trainerQueued then
+			trainerQueued = true
+			C_Timer.After(0, function()
+				trainerQueued = false
+				ns.onTrainer()
+			end)
+		end
 		return
 	end
 	if event == "BAG_UPDATE_DELAYED" then
@@ -551,6 +771,18 @@ f:SetScript("OnEvent", function(_, event, arg1, arg2)
 		end
 		ns.TSM.register()
 		refreshSelftest()
+		local notice = ns.customNotice()
+		if notice then
+			print(notice)
+		end
+		-- a game build newer than the shipped data: said once at login, in plain words, not as an error
+		local okStatus, status, newer = pcall(function()
+			local version, buildNumber = GetBuildInfo()
+			return ns.Logic.dataStatus(ns.Data.recipes, version, buildNumber)
+		end)
+		if okStatus and newer then
+			print("SkillupHelper: " .. status)
+		end
 	elseif event == "PLAYER_LOGOUT" then
 		refreshSelftest()
 	elseif event == "TRADE_SKILL_SHOW" then
@@ -580,18 +812,19 @@ function ns.capCommand(cmd, arg)
 	end
 	if cmd == "ranks" then
 		local ids = {}
-		for id in pairs(db.ranks) do
+		local saved = learned and learned.ranks or {}
+		for id in pairs(saved) do
 			ids[#ids + 1] = id
 		end
 		table.sort(ids)
 		if #ids == 0 then
 			print("SkillupHelper: no ranks saved yet: open your profession trainer once.")
 		end
-		local plan = ns.Data.plan
+		local plan = ns.plan()
 		for _, id in ipairs(ids) do
 			local p = plan and plan.professions and plan.professions[id]
 			print(("SkillupHelper: %s (%s)"):format(p and p.name or "skill line", tostring(id)))
-			for _, r in ipairs(ns.Scan.ranksArray(db.ranks[id])) do
+			for _, r in ipairs(ns.Scan.ranksArray(saved[id])) do
 				print(
 					("  %s to %s: skill %s, level %s, cost %s, at %s"):format(
 						unknown(r.name),
@@ -729,15 +962,56 @@ function ns.settingsView()
 	return {
 		luck = db and db.luck or ns.Planner.LUCK,
 		effort = db and db.effort,
-		defaultEffort = ns.Data.plan and ns.Data.plan.effort or ns.Planner.EFFORT,
+		defaultEffort = ns.plan() and ns.plan().effort or ns.Planner.EFFORT,
 		noRecipeBuys = db and db.noRecipeBuys,
 		noAlts = db and db.noAlts,
+		resale = db and db.resale,
 		dungeon = ex.dungeon,
 		ahPatterns = ex.ahPatterns,
 		special = ex.special,
 		allow = ex.allow or {},
 		notNow = ex.notNow or {},
 	}
+end
+
+-- "/skillup cost [profession]": one line per crafting profession of the data (or the one named): what levelling it
+-- to the top costs at TSM's prices now, the skill brackets no recipe covers, and how many prices TSM lacks. One
+-- profession per frame: each is a whole planner run.
+function ns.costCommand(arg)
+	local plan = ns.plan()
+	if not plan then
+		print("SkillupHelper: no recipe data loaded (Data/Recipes.lua).")
+		return true
+	end
+	local want = (arg or ""):lower()
+	local ids = {}
+	for id, prof in pairs(plan.professions) do
+		local name = tostring(prof.name or id):lower()
+		if (want == "" and not prof.side) or (want ~= "" and (name:find(want, 1, true) or tostring(id) == want)) then
+			ids[#ids + 1] = id
+		end
+	end
+	table.sort(ids)
+	if #ids == 0 then
+		print(("SkillupHelper: no profession named %q in the recipe data."):format(want))
+		return true
+	end
+	local own = ns.Scan.playerSkills()
+	local env = { money = ns.Logic.money }
+	local i = 0
+	local function nextOne()
+		i = i + 1
+		local id = ids[i]
+		if not id then
+			return
+		end
+		local prof = plan.professions[id]
+		local r, from, to, why = ns.Scan.costOf(plan, id, prof, own[id], ns.settings())
+		print("SkillupHelper: " .. ns.View.costLine(prof.name or id, from, to, r, env, why))
+		C_Timer.After(0, nextOne)
+	end
+	nextOne()
+	return true
 end
 
 SLASH_SKILLUPHELPER1 = "/skillup"
@@ -747,6 +1021,9 @@ function ns.command(msg)
 	local cmd, arg = (msg or ""):match("^%s*(%S*)%s*(.-)%s*$")
 	if cmd == "ranks" or cmd == "exclude" then
 		return ns.capCommand(cmd, arg)
+	end
+	if cmd == "cost" then
+		return ns.costCommand(arg)
 	end
 	if cmd == "allow" then
 		local spell = tonumber(arg)
@@ -793,6 +1070,26 @@ function ns.command(msg)
 		ns.refresh()
 		return true
 	end
+	if cmd == "resale" then
+		-- "/skillup resale on": selling what you craft counts against a recipe's cost (off, the default: ranked by
+		-- what you pay)
+		local word = arg:lower()
+		if word ~= "on" and word ~= "off" then
+			print(("SkillupHelper: /skillup resale on|off (now %s)."):format(db and db.resale and "on" or "off"))
+			return true
+		end
+		if not db then
+			print("SkillupHelper: SavedVariables not loaded yet, setting not changed.")
+			return true
+		end
+		db.resale = word == "on" or nil
+		print(
+			db.resale and "SkillupHelper: selling what you craft now counts against a recipe's cost."
+				or "SkillupHelper: recipes ranked by what you pay; selling what you craft does not count."
+		)
+		ns.refresh()
+		return true
+	end
 	if cmd ~= "effort" then
 		return false
 	end
@@ -803,7 +1100,7 @@ function ns.command(msg)
 	print(
 		("SkillupHelper: effort %s copper a craft."):format(
 			db and db.effort and tostring(db.effort)
-				or "default (" .. tostring(ns.Data.plan and ns.Data.plan.effort or 20) .. ")"
+				or "default (" .. tostring(ns.plan() and ns.plan().effort or ns.Planner.EFFORT) .. ")"
 		)
 	)
 	ns.refresh()

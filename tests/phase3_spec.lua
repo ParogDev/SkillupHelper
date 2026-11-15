@@ -1,5 +1,6 @@
--- Phase 3 of the panel redesign: the More tab's settings (Logic.applySetting, Logic.effortStep, View.moreItems), the
--- Way menu (View.wayMenu, the step menu's "Ways..."), covered Shopping blocks folding themselves. Frame-free.
+-- The pure models the journal's pages draw, kept in View.lua: the settings (Logic.applySetting, Logic.effortStep,
+-- View.moreItems), the Way menu (View.wayMenu), covered Shopping blocks folding themselves. Frame-free. The docked
+-- panel shows none of these any more (tests/panel_spec.lua): it links to the journal.
 
 local function load()
 	local ns = {}
@@ -283,7 +284,7 @@ describe("View.wayMenu", function()
 		assert.matches("shortcut", m.items[2].tip)
 	end)
 
-	it("the stock option is a note, and moves out of the Why row", function()
+	it("the stock option is a note in the menu", function()
 		local st = craft({
 			others = { { spell = 2, name = "Chain", extra = 10, src = "trainer" } },
 			alt = { crafts = 12, name = "Copper Mace", extra = 300 },
@@ -292,8 +293,6 @@ describe("View.wayMenu", function()
 		assert.is_true(m.stock)
 		assert.equal("note", m.items[3].kind)
 		assert.matches("Or use stock: 12x Copper Mace", m.items[3].label)
-		local why = ns.View.whyRow({ key = "k", notes = { "n" }, alt = "Or use stock", way = m }, false)
-		assert.equal(0, why.more)
 	end)
 
 	it("shortcuts become submenus with Use it and Hide after a divider; a gap reads Fill this gap", function()
@@ -309,13 +308,6 @@ describe("View.wayMenu", function()
 		assert.equal("Fill this gap", gap.label)
 		assert.equal("warn", gap.rightColor)
 		assert.equal("submenu", gap.items[1].kind)
-	end)
-
-	it("the step menu carries the row's ways", function()
-		local way = { title = "t", items = {} }
-		local m = ns.View.stepMenu({ n = 3, way = way }, false)
-		assert.equal(way, m.ways)
-		assert.is_nil(ns.View.stepMenu({ n = 3 }, false).ways)
 	end)
 end)
 

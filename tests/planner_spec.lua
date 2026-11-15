@@ -284,6 +284,18 @@ describe("Planner scenarios", function()
 		assert.is_true(n >= 3)
 	end)
 
+	it("S5b an item with no live and no export price counts as none, never as live", function()
+		local ns = load()
+		local plan = { items = { [1] = { name = "Priced" }, [2] = { name = "Nowhere" } }, vendor = {} }
+		local prof = { recipes = { [9] = { mats = { 1, 1, 2, 1 } } } }
+		local price, _, counts = ns.TSM.prices(plan, prof, function(source, item)
+			return source == "dbmarket" and item == 1 and 70 or nil
+		end)
+		assert.same({ 1, 0, 1 }, { counts.live, counts.export, counts.none })
+		assert.is_falsy(price[2].buy)
+		assert.equal(70, price[1].buy)
+	end)
+
 	it("S6 passes 2 to 4 stay under 3 ms (budget 2 ms plus half) on the Leatherworking fixture", function()
 		local recipes = {}
 		for s, r in pairs(F.LEATHER) do
@@ -1485,14 +1497,38 @@ describe("Alternatives and exclusions", function()
 		assert.equal(0, h.shortcuts)
 	end)
 
-	it("a gap only a gated recipe covers offers it as a shortcut that fills the gap", function()
-		local recipes = { [6] = recipe("R6", M4) }
-		local p = P.run(input(recipes, {}, { trainerSeen = { [99] = true } }))
-		local gap = p.steps[1]
-		assert.equal("gap", gap.kind)
-		assert.equal(6, gap.shortcuts[1].spell)
-		assert.is_nil(gap.shortcuts[1].saves)
-		assert.equal(1, p.shortcuts)
+	it("a stretch only a gated recipe covers is planned with it and says why it is gated, never a hole", function()
+		-- R1 (learn 100) was listed by a trainer, R6 (learn 100) was not: unchecked, and the only recipe from 110
+		local recipes = { [1] = recipe("R1", M1, { g = 110 }), [6] = recipe("R6", M4, { g = 160 }) }
+		local p = P.run(input(recipes, {}, { cap = 120, trainerSeen = { [1] = true } }))
+		assert.same({ 1, 6 }, craftSpells(p))
+		for _, st in ipairs(p.steps) do
+			assert.is_not.equal("gap", st.kind)
+			if st.kind == "craft" then
+				assert.equal(st.spell == 6 and "unchecked" or nil, st.gated)
+			elseif st.kind == "train" and st.spell == 6 then
+				assert.is_true(st.unchecked)
+			end
+		end
+	end)
+
+	it("a trainer list says nothing about recipes learned above the highest skill it listed", function()
+		-- the trainer window hides what the character cannot learn yet: read at skill 100 it lists R1 only
+		local recipes = {
+			[1] = recipe("R1", M1, { learn = 90, g = 105 }),
+			[6] = recipe("R6", M4, { learn = 104, y = 104 }),
+		}
+		local p = P.run(input(recipes, {}, { trainerSeen = { [1] = true } }))
+		assert.same({ 1, 6 }, craftSpells(p))
+		for _, st in ipairs(p.steps) do
+			assert.is_nil(st.unchecked)
+			assert.is_nil(st.gated)
+			assert.is_nil(st.shortcuts)
+		end
+		-- a list that matches no recipe of the data says nothing at all
+		p = P.run(input({ [6] = recipe("R6", M4) }, {}, { trainerSeen = { [99] = true } }))
+		assert.same({ 6 }, craftSpells(p))
+		assert.is_nil(p.steps[1].unchecked)
 	end)
 end)
 
@@ -1561,5 +1597,84 @@ describe("Shopping by place", function()
 		for _, r in ipairs(shop.vendor) do
 			assert.is_true(r.count > 0)
 		end
+	end)
+end)
+
+describe("Count selling what I craft (resale setting)", function()
+	local P
+	before_each(function()
+		P = load().Planner
+	end)
+	-- Blacksmithing 55: Rough Grinding Stone (2 Rough Stone at 8c, vendors for 5c) against Coarse Grinding Stone
+	-- (2 Coarse Stone at 60c, sells for about 2s on the AH, the market takes hundreds, vendors for 10c)
+	local ROUGH, COARSE, RG, CG = 2835, 2836, 3470, 3478
+	local function input(resale)
+		return {
+			skill = 55,
+			cap = 56,
+			recipes = {
+				[3320] = { y = 45, g = 85, k = 1, name = "Rough Grinding Stone", mats = { ROUGH, 2 }, src = "trainer" },
+				[3326] = {
+					y = 50,
+					g = 90,
+					k = 1,
+					name = "Coarse Grinding Stone",
+					mats = { COARSE, 2 },
+					src = "trainer",
+				},
+			},
+			learned = { [3320] = true, [3326] = true },
+			price = {
+				[ROUGH] = { buy = 8, where = "ah", salvage = 2 },
+				[COARSE] = { buy = 60, where = "ah", salvage = 15 },
+			},
+			product = { [3320] = { vendor = 5, takes = 0 }, [3326] = { vendor = 10, sell = 200, takes = 400 } },
+			items = { [ROUGH] = { name = "Rough Stone" }, [COARSE] = { name = "Coarse Stone" }, [RG] = {}, [CG] = {} },
+			have = {},
+			effort = 20,
+			resale = resale,
+		}
+	end
+
+	it(
+		"off (the default): Rough wins, ranked by what the player pays; the card notes the sale, nothing counts",
+		function()
+			local plan = P.run(input(nil))
+			assert.same({ "Rough Grinding Stone buy" }, crafts(plan))
+			local st = plan.steps[1]
+			assert.equal(0, st.cash.back)
+			assert.is_false(has(st.tags, "needs AH sale"))
+			-- Coarse: no credit, so 2 * 60 + 20 effort over a 0.875 chance
+			local ctx = P.prepare(input(nil))
+			for _, o in ipairs(ctx.options) do
+				assert.is_false(P.sells(o))
+				assert.equal(0, P.backOf(o, 0))
+				if o.spell == 3326 then
+					assert.near(140 / 0.875, (P.costPt(ctx, o, 55, 0, nil, P.chance)), 1e-6)
+				end
+			end
+			-- Rough vendors for 5c: information on the card, not a credit
+			assert.equal(st.crafts * 5, st.resale.back)
+		end
+	)
+
+	it("on: Coarse wins, its AH sale paying for the stone", function()
+		local plan = P.run(input(true))
+		assert.same({ "Coarse Grinding Stone buy" }, crafts(plan))
+		local st = plan.steps[1]
+		assert.equal(st.crafts * 200, st.cash.back)
+		assert.is_true(has(st.tags, "needs AH sale"))
+		assert.is_nil(st.resale)
+	end)
+
+	it("costToCap counts no sale when off and the sale when on", function()
+		local inp = input(nil)
+		local prof = { recipes = inp.recipes }
+		local opts = { price = inp.price, product = inp.product, items = inp.items, cap = 56, learned = inp.learned }
+		local off = P.costToCap(prof, 55, 56, nil, opts)
+		assert.equal(0, off.back)
+		opts.resale = true
+		local on = P.costToCap(prof, 55, 56, nil, opts)
+		assert.is_true(on.back > 0)
 	end)
 end)

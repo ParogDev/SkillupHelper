@@ -37,10 +37,23 @@ function G.needsOf(step, profession)
 	end
 	if type(step.kind) == "string" and step.kind:find("^train") then
 		-- "train" (a recipe) and any later train step (a rank-up): the service to learn is step.name, else step.rank
-		out[1] = { kind = "trainer", profession = profession, name = step.name or step.rank, at = step.at }
+		-- cap: a rank-up's new skill cap (trainRank), which a trainer of a lower rank does not teach
+		out[1] = {
+			kind = "trainer",
+			profession = profession,
+			name = step.name or step.rank,
+			at = step.at,
+			cap = step.kind == "trainRank" and step.cap or nil,
+		}
 		return out
 	elseif step.kind == "buyRecipe" then
-		out[1] = { kind = "auction", items = { { item = step.item, count = 1 } } }
+		-- a recipe item the data's vendor sells for less than the auction house goes to a vendor
+		local kind = step.where == "vendor" and "vendor" or "auction"
+		if step.where == "source" or not step.item then
+			-- a recipe to get from a quest, a drop or a teacher: no NPC the guide knows
+			return out
+		end
+		out[1] = { kind = kind, items = { { item = step.item, count = 1 } } }
 		return out
 	end
 	local vendor, ah = {}, {}
@@ -102,9 +115,22 @@ function G.sameProfession(a, b)
 	return long:sub(-#short - 1) == " " .. short
 end
 
+-- The skill cap a trainer's rank (Data/Trainers.lua `rank`, from its title) teaches up to. Classic's ladder,
+-- unconfirmed for Forever: a trainer without a rank in the data is taken to teach everything.
+G.RANK_CAP = { apprentice = 75, journeyman = 150, expert = 225, artisan = 300, master = 300, ["grand master"] = 300 }
+
+-- Whether a trainer's rank reaches a trainer need: a rank-up to need.cap, or a recipe learned at skill need.at.
+-- True when either side is not known.
+function G.rankReaches(npc, need)
+	local cap = type(npc.rank) == "string" and G.RANK_CAP[npc.rank] or nil
+	local want = type(need.cap) == "number" and need.cap or (type(need.at) == "number" and need.at or nil)
+	return cap == nil or want == nil or cap >= want
+end
+
 -- How well an NPC serves a need: the number of the need's items it sells (vendor); 1 for an auctioneer; for a trainer
 -- of the profession 2 when its learned service list has the need's name (certain), 1 when that is not known (a seed,
--- a trainer never opened, a list read in part, or a need without a name), 0 when its full list lacks the name.
+-- a trainer never opened, a list read in part, or a need without a name), 0 when its full list lacks the name or,
+-- for a trainer never opened, when its rank is below the need (second value "rank").
 function G.serves(npc, need)
 	if need.kind == "vendor" then
 		local n = 0
@@ -119,7 +145,13 @@ function G.serves(npc, need)
 			return 0
 		end
 		local name = G.norm(need.name)
-		if not name or type(npc.teaches) ~= "table" then
+		if type(npc.teaches) ~= "table" then
+			-- never opened: only its title's rank says what it teaches
+			if not G.rankReaches(npc, need) then
+				return 0, "rank"
+			end
+			return 1
+		elseif not name then
 			return 1
 		end
 		-- a rank-up may be listed as the profession with the rank before it ("Expert Cooking")
@@ -144,6 +176,8 @@ local function merge(seed, npc)
 	m.trains = npc.trains or seed.trains
 	m.auction = npc.auction or seed.auction
 	m.place = npc.place or seed.place
+	m.rank = npc.rank or seed.rank
+	m.limited = npc.limited or seed.limited
 	if seed.sells or npc.sells then
 		m.sells = {}
 		for item in pairs(seed.sells or {}) do
@@ -156,20 +190,111 @@ local function merge(seed, npc)
 	return m
 end
 
--- Every known NPC, learned merged over seeded (same id).
-function G.known(seeds, learned)
+-- Every known NPC (same id merged): learned over seeded over shipped. shipped: G.shippedRecords' records
+-- (Data/Trainers.lua); foreign: its second value, the ids of the other faction's NPCs, whose seeds are left out
+-- (Data/Npcs.lua has no faction of its own). A learned NPC always stays: the player opened its window.
+function G.known(seeds, learned, shipped, foreign)
 	local byId, out = {}, {}
-	for id, npc in pairs(learned or {}) do
-		byId[id] = npc
+	for _, npc in ipairs(shipped or {}) do
+		byId[npc.id] = npc
 	end
 	for _, npc in ipairs(seeds or {}) do
-		local l = byId[npc.id]
-		byId[npc.id] = l and merge(npc, l) or npc
+		if not (foreign and foreign[npc.id]) then
+			local s = byId[npc.id]
+			byId[npc.id] = s and merge(s, npc) or npc
+		end
+	end
+	for id, npc in pairs(learned or {}) do
+		local s = byId[id]
+		byId[id] = s and merge(s, npc) or npc
 	end
 	for _, npc in pairs(byId) do
 		out[#out + 1] = npc
 	end
 	return out
+end
+
+-- Where a record comes from: "learned" (a window the player opened; it wins over the other two), "seed"
+-- (Data/Npcs.lua, Data/Custom.lua) or "shipped" (Data/Trainers.lua).
+function G.sourceOf(npc)
+	return npc.shipped and "shipped" or npc.seed and "seed" or "learned"
+end
+
+-- How far a record's position can be trusted: "confirmed" (learned, or the player's own Custom.lua row), "classic"
+-- (a Classic position, unconfirmed for Forever) or "nopos" (no position: the zone name only, no waypoint).
+function G.confidenceOf(npc)
+	if G.sourceOf(npc) == "learned" then
+		return "confirmed"
+	elseif npc.nopos or type(npc.x) ~= "number" or type(npc.y) ~= "number" or npc.map == nil then
+		return "nopos"
+	end
+	return npc.confidence or "classic"
+end
+
+G.TEXT = {
+	classic = "position from Classic, unconfirmed",
+	nopos = "position not known",
+}
+
+-- The confidence line of a pick for a card: nil when the position was measured on this client.
+-- "Position from Classic, unconfirmed" | "In Desolace, position not known" | "Position not known".
+function G.confidenceText(confidence, place)
+	if confidence == "classic" then
+		return "Position from Classic, unconfirmed"
+	elseif confidence == "nopos" then
+		return place and ("In %s, %s"):format(place, G.TEXT.nopos) or "Position not known"
+	end
+	return nil
+end
+
+-- "Horde", "Alliance" or nil -> "H", "A" or nil ("H" and "A" pass through).
+function G.side(faction)
+	local c = type(faction) == "string" and faction:sub(1, 1):upper() or nil
+	return (c == "A" or c == "H") and c or nil
+end
+
+-- Data/Trainers.lua's rows as NPC records for one faction ("Horde" | "Alliance" | "H" | "A"; nil keeps every side):
+-- trainers (trains, rank) and recipe vendors (sells) of that faction and neutral ones. Rows without a position are
+-- kept with nopos = true (the zone in `place`, no waypoint); creatures that only drop a recipe are left out. Each
+-- record has shipped = true and confidence "classic" | "confirmed". Where.trainerRecords builds the same records for
+-- the errand map, without the nopos rows and the rank.
+-- Returns the records and the set of ids of the other faction's NPCs.
+function G.shippedRecords(rows, faction)
+	local out, foreign = {}, {}
+	local side = G.side(faction)
+	for _, r in ipairs(rows or {}) do
+		local f = r.faction
+		local mine = f == nil or f == "B" or side == nil or f == side
+		if not mine then
+			foreign[r.id] = true
+		elseif r.role == "trainer" or r.sells then
+			local sells
+			if r.sells then
+				sells = {}
+				for _, item in ipairs(r.sells) do
+					sells[item] = true
+				end
+			end
+			local nopos = r.nopos or r.map == nil or type(r.x) ~= "number" or type(r.y) ~= "number"
+			out[#out + 1] = {
+				id = r.id,
+				name = r.name,
+				map = r.map,
+				x = not nopos and r.x or nil,
+				y = not nopos and r.y or nil,
+				place = r.place,
+				sells = sells,
+				trains = r.role == "trainer" and r.trains or nil,
+				rank = r.rank,
+				limited = r.limited,
+				unsure = r.unsure,
+				nopos = nopos or nil,
+				shipped = true,
+				confidence = r.classic and "classic" or "confirmed",
+			}
+		end
+	end
+	return out, foreign
 end
 
 -- Direction in radians, counter-clockwise from north (the convention of GetPlayerFacing), from world position a to
@@ -192,49 +317,108 @@ end
 -- world(map, x, y) -> continent, wx, wy or nil. Picks the best server first (the higher G.serves score: a vendor
 -- selling every item beats one selling some, a trainer known to teach the name beats one that may), then the
 -- shortest distance on the player's continent; other continents last, without a distance.
--- Returns { npc, distance, bearing, wx, wy, continent, sameContinent, partial, certain } or nil, how many serve it,
--- and how many trainers of the profession were left out because their full service list lacks the name.
-function G.nearest(npcs, need, here, world)
-	local best, bestKey, servers, excluded = nil, nil, 0, 0
+-- An NPC without a position (nopos) comes after every NPC that has one: it has a zone, no distance and no waypoint.
+-- Returns { npc, distance, bearing, wx, wy, continent, sameContinent, partial, certain, name, zone, source
+-- ("learned" | "seed" | "shipped"), confidence ("confirmed" | "classic" | "nopos"), note (G.confidenceText), nopos,
+-- unsure } or nil, how many serve it, how many trainers of the profession were left out because their full service
+-- list lacks the name, and the counts { servers, excluded, belowRank (left out by their rank), profession (records
+-- of the need's profession, whatever they teach), bySource = { shipped, learned, seed } (of the servers) }.
+local function scan(npcs, need, here, world, each)
+	local stats = { servers = 0, excluded = 0, belowRank = 0, profession = 0 }
+	stats.bySource = { shipped = 0, learned = 0, seed = 0 }
 	local named = need.kind == "trainer" and G.norm(need.name) ~= nil
 	local want = need.kind == "vendor" and #need.items or 1
 	for _, npc in ipairs(npcs) do
-		local s = G.serves(npc, need)
-		if s == 0 and named and G.sameProfession(need.profession, npc.trains) then
-			excluded = excluded + 1
+		local s, why = G.serves(npc, need)
+		if need.kind == "trainer" and G.sameProfession(need.profession, npc.trains) then
+			stats.profession = stats.profession + 1
+			if why == "rank" then
+				stats.belowRank = stats.belowRank + 1
+			elseif s == 0 and named then
+				stats.excluded = stats.excluded + 1
+			end
 		end
 		if s > 0 then
-			servers = servers + 1
-			local cont, wx, wy = world(npc.map, npc.x, npc.y)
+			stats.servers = stats.servers + 1
+			local source = G.sourceOf(npc)
+			stats.bySource[source] = stats.bySource[source] + 1
+			local confidence = G.confidenceOf(npc)
+			local cont, wx, wy
+			if confidence ~= "nopos" then
+				cont, wx, wy = world(npc.map, npc.x, npc.y)
+			end
 			local dist, same = nil, false
 			if here and cont and cont == here.continent then
 				same = true
 				local dx, dy = wx - here.x, wy - here.y
 				dist = math.sqrt(dx * dx + dy * dy)
 			end
-			-- lower is better: a higher serve score, then the same continent, then distance
-			local key = -s * 1e9 + (same and 0 or 1e8) + (dist or 0)
-			-- ids are numbers, or "name:<Name>" for an NPC learned without a readable GUID: compare as strings
-			if not bestKey or key < bestKey or (key == bestKey and tostring(npc.id) < tostring(best.npc.id)) then
-				bestKey = key
-				best = {
-					npc = npc,
-					distance = dist,
-					wx = wx,
-					wy = wy,
-					continent = cont,
-					sameContinent = same,
-					partial = need.kind == "vendor" and s < want,
-					-- false only for a named trainer need whose trainer may or may not teach it
-					certain = not named or s >= 2,
-				}
-				if same then
-					best.bearing = G.bearing(here.x, here.y, wx, wy)
-				end
-			end
+			-- lower is better: a higher serve score, then the same continent, then distance; no position last
+			local tier = confidence == "nopos" and 2e8 or (same and 0 or 1e8)
+			each(npc, -s * 1e9 + tier + (dist or 0), s, dist, same, cont, wx, wy, source, confidence, named, want)
 		end
 	end
-	return best, servers, excluded
+	return stats
+end
+
+local function pickOf(need, here, npc, s, dist, same, cont, wx, wy, source, confidence, named, want)
+	local pick = {
+		npc = npc,
+		name = npc.name,
+		zone = npc.place,
+		distance = dist,
+		wx = wx,
+		wy = wy,
+		continent = cont,
+		sameContinent = same,
+		partial = need.kind == "vendor" and s < want,
+		-- false only for a named trainer need whose trainer may or may not teach it
+		certain = not named or s >= 2,
+		source = source,
+		confidence = confidence,
+		note = G.confidenceText(confidence, npc.place),
+		nopos = confidence == "nopos" or nil,
+		unsure = npc.unsure or nil,
+	}
+	if same then
+		pick.bearing = G.bearing(here.x, here.y, wx, wy)
+	end
+	return pick
+end
+
+-- ids are numbers, or "name:<Name>" for an NPC learned without a readable GUID: compare as strings
+local function before(keyA, idA, keyB, idB)
+	if keyA ~= keyB then
+		return keyA < keyB
+	end
+	return tostring(idA) < tostring(idB)
+end
+
+-- The nearest server of a need: documented above `scan`, which does the pass.
+function G.nearest(npcs, need, here, world)
+	local bestKey, best
+	local stats = scan(npcs, need, here, world, function(npc, key, ...)
+		if not best or before(key, npc.id, bestKey, best[1].id) then
+			bestKey, best = key, { npc, ... }
+		end
+	end)
+	local pick = best and pickOf(need, here, unpack(best, 1, 11)) or nil
+	return pick, stats.servers, stats.excluded, stats
+end
+
+-- Every NPC serving `need`, best first (G.nearest's order and pick shape; the first is G.nearest's pick), and
+-- the same counts. For a card that lists the choices.
+function G.ranked(npcs, need, here, world)
+	local list = {}
+	local stats = scan(npcs, need, here, world, function(npc, key, ...)
+		local pick = pickOf(need, here, npc, ...)
+		pick.key = key
+		list[#list + 1] = pick
+	end)
+	table.sort(list, function(a, b)
+		return before(a.key, a.npc.id, b.key, b.npc.id)
+	end)
+	return list, stats
 end
 
 -- The guide's state for the chip and the card: "none" (no known NPC), "away" (another continent or no position),
@@ -318,6 +502,41 @@ function G.unknownText(need, nameOf, excluded)
 	)
 end
 
+-- The diagnostic `why` of the empty state: which link gave nothing for a need. c = { stats (G.nearest's fourth
+-- value), faction ("Horde" | "Alliance" | nil), shipped (Data/Trainers.lua is loaded), thing (the first item's name) }.
+function G.whyNone(need, c)
+	c = c or {}
+	local stats = c.stats or {}
+	local side = G.side(c.faction)
+	local who = side == "H" and "Horde"
+		or side == "A" and "Alliance"
+		or "an unknown faction (UnitFactionGroup gave none)"
+	local data = c.shipped == false and "Data/Trainers.lua is not loaded" or nil
+	if need.kind == "trainer" then
+		local p = need.profession or "profession"
+		if (stats.excluded or 0) > 0 then
+			return ("%d %s trainer(s) opened, none lists %s"):format(stats.excluded, p, tostring(need.name))
+		elseif (stats.belowRank or 0) > 0 then
+			return ("Data/Trainers.lua has %d %s trainer(s) for %s, none of a rank that teaches %s (skill %s)"):format(
+				stats.belowRank,
+				p,
+				who,
+				tostring(need.name or "it"),
+				tostring(need.cap or need.at or "?")
+			)
+		end
+		return ("%s, and no %s trainer learned or seeded"):format(
+			data or ("Data/Trainers.lua has no %s trainer for %s"):format(p, who),
+			p
+		)
+	elseif need.kind == "auction" then
+		return "Data/Npcs.lua has no auctioneer, and none learned"
+	end
+	return ("%s, and none in Data/Npcs.lua or learned"):format(
+		data or ("Data/Trainers.lua has no vendor selling %s for %s"):format(tostring(c.thing or "these items"), who)
+	)
+end
+
 -- A list of trainer service names as the set G.serves looks names up in.
 function G.teachesSet(list)
 	local set = {}
@@ -328,6 +547,26 @@ function G.teachesSet(list)
 		end
 	end
 	return set
+end
+
+-- One read of a trainer's service list during a visit. The server fills the list after TRAINER_SHOW and sends
+-- TRAINER_UPDATE as it does, so: a read with no service is "not yet" (nothing saved), and a read with fewer names
+-- than one already taken in the same visit (a list still loading, a filter changed) never replaces the fuller one.
+-- visit = { id, best } of the visit so far, or nil at a new one. Returns teaches, partial to save (nil, nil: keep
+-- what is saved), the visit, and why a read was held back.
+function G.trainerRead(visit, id, names, partial, services)
+	if type(visit) ~= "table" or visit.id ~= id then
+		visit = { id = id, best = 0 }
+	end
+	names = type(names) == "table" and names or {}
+	if (tonumber(services) or 0) < 1 or #names == 0 then
+		return nil, nil, visit, "not yet: the trainer listed no services (the list fills after the window opens)"
+	end
+	if #names < visit.best then
+		return nil, nil, visit, ("kept the fuller list of this visit (%d names over %d)"):format(visit.best, #names)
+	end
+	visit.best = #names
+	return names, partial and true or nil, visit, nil
 end
 
 -- Merges what a window just showed into the learned records. rec = { id, name, map, x, y, sells (list of item ids),
@@ -349,6 +588,10 @@ function G.learn(learned, rec, now)
 	if rec.teaches then
 		npc.teaches = G.teachesSet(rec.teaches)
 		npc.teachesPartial = rec.teachesPartial and true or nil
+	elseif npc.teachesPartial and type(npc.teaches) == "table" and next(npc.teaches) == nil then
+		-- an empty partial list saved before 0.3.0 by a read made before the trainer's list had filled: unknown,
+		-- not "teaches nothing"; the next read with services replaces it
+		npc.teaches, npc.teachesPartial = nil, nil
 	end
 	npc.trains = rec.trains or npc.trains
 	npc.auction = rec.auction or npc.auction
@@ -383,9 +626,10 @@ function G.placeNear(map, x, y, seeds, mapName)
 	return best or mapName
 end
 
--- Turns Data/Npcs.lua's rows ({ ..., role, sells = { ids } }) into NPC records.
+-- Turns Data/Npcs.lua's rows ({ ..., role, sells = { ids } }) into NPC records. confirmed: a set of ids whose
+-- position is the player's own (Data/Custom.lua rows); the others are Classic positions (G.confidenceOf).
 local ROLE_TRAINS = { lwtrainer = "Leatherworking", cooktrainer = "Cooking" }
-function G.seedRecords(rows)
+function G.seedRecords(rows, confirmed)
 	local out = {}
 	for _, r in ipairs(rows or {}) do
 		local sells
@@ -403,9 +647,11 @@ function G.seedRecords(rows)
 			y = r.y,
 			place = r.place,
 			sells = sells,
-			trains = ROLE_TRAINS[r.role],
+			-- role "trainer" (Data/Custom.lua) names its profession itself
+			trains = ROLE_TRAINS[r.role] or (r.role == "trainer" and r.trains or nil),
 			auction = r.role == "auction" or nil,
 			seed = true,
+			confidence = confirmed and confirmed[r.id] and "confirmed" or nil,
 		}
 	end
 	return out
@@ -490,9 +736,25 @@ function G.describe(s)
 				d.l2 = withPlace(role(s), s.place or "another continent")
 			end
 		end
+		local notes = {}
 		if maybe then
 			d.l2 = ("May teach %s: not checked yet"):format(need.name)
+			notes[#notes + 1] = d.l2
 		end
+		-- on the way there the place and how far it can be trusted matter most: that line wins over "may teach"
+		local note = G.confidenceText(s.confidence, s.place)
+		if note then
+			notes[#notes + 1] = note
+			if s.confidence == "nopos" then
+				d.icon, d.l2 = nil, note
+			elseif p == "far" or p == "away" then
+				d.l2 = ("%s, %s"):format(s.place or role(s), G.TEXT.classic)
+			end
+		end
+		if s.unsure and need.kind == "vendor" then
+			notes[#notes + 1] = "Listed as a source, not confirmed as a vendor"
+		end
+		d.note = notes[1] and table.concat(notes, ". ") or nil
 		if s.compass and d.icon then
 			d.icon = nil
 			d.r1 = d.r1 ~= "" and (d.r1 .. " " .. s.compass) or s.compass
@@ -520,6 +782,9 @@ function G.describe(s)
 		if need.kind == "trainer" and need.name and (s.excluded or 0) > 0 then
 			d.l1 = "No trainer found"
 			d.l2 = ("None you've opened teaches %s"):format(need.name)
+		elseif need.kind == "trainer" and (s.belowRank or 0) > 0 then
+			d.l1 = "No trainer of that rank known"
+			d.l2 = ("Ask a city guard for a higher %s trainer"):format(s.profession or need.profession or "profession")
 		elseif need.kind == "trainer" then
 			d.l1 = "No known trainer yet"
 			d.l2 = ("Ask a city guard for the %s trainer"):format(s.profession or need.profession or "profession")
@@ -562,6 +827,10 @@ function G.strip(s)
 	local out = { phase = p, icon = d.icon, tint = d.tint, ar = d.r1 or "", arTint = "ash", tip = STRIP_TIP }
 	if p == "far" then
 		out.a = ("%s, %s"):format(name, s.place or role(s):lower())
+	elseif p == "away" and s.confidence == "nopos" then
+		out.a = s.place and ("%s, in %s, %s"):format(name, s.place, G.TEXT.nopos)
+			or ("%s, %s"):format(name, G.TEXT.nopos)
+		out.tip = "No position known for this NPC: nothing to pin on the map."
 	elseif p == "away" then
 		out.a = ("%s, %s"):format(name, s.place or "another continent")
 	elseif p == "near" or p == "arrived" then
@@ -598,6 +867,10 @@ function G.strip(s)
 		and s.certain == false
 	then
 		out.b = ("May teach %s: not checked yet"):format(need.name)
+	end
+	if (p == "far" or p == "away") and s.confidence == "classic" then
+		local c = G.confidenceText("classic")
+		out.b = out.b and (out.b .. ". " .. c) or c
 	end
 	if s.thenNeed then
 		local t = "Then: " .. thenLabel(s.thenNeed, s.profession)

@@ -102,7 +102,8 @@ function T.prices(plan, prof, get, sellShare)
 			local v, fromExport = marketOf(i)
 			e.buy, e.where, e.export = v, v and "ah" or nil, fromExport
 		end
-		if e.buy == nil then
+		-- no price leaves buy = false (marketOf's "looked, nothing"), never a live price
+		if not e.buy then
 			counts.none = counts.none + 1
 		elseif e.export then
 			counts.export = counts.export + 1
@@ -118,7 +119,8 @@ function T.prices(plan, prof, get, sellShare)
 		for k = 1, #mats - 1, 2 do
 			addItem(mats[k])
 		end
-		if r.item then
+		-- a recipe item that binds when picked up is never bought: no price asked
+		if r.item and not r.bop then
 			addItem(r.item)
 		end
 		if r.makes then

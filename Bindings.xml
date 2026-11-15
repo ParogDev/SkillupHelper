@@ -1,0 +1,6 @@
+<Bindings>
+	<!-- Key Bindings > AddOns. No default key; the name is BINDING_NAME_SKILLUPHELPER_JOURNAL (JournalUI.lua). -->
+	<Binding name="SKILLUPHELPER_JOURNAL" category="ADDONS">
+		SkillupHelper_OnCompartmentClick("SkillupHelper", "Binding")
+	</Binding>
+</Bindings>

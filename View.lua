@@ -1,18 +1,20 @@
 -- What the panel shows, as plain tables: the model (Scan.build) in, a view description out. No frames and no client
 -- calls except through `env`, so busted tests it whole; UI.lua only draws what this returns.
 --
--- The panel wears the colour of the step to do now: the Next card's stripe, its pulse and the runway bar take the
--- recipe's difficulty colour, everything else stays ink and bone.
+-- The panel wears the colour of the step to do now: the card's stripe and its pulse take the recipe's difficulty
+-- colour, everything else stays ink and bone. The docked panel draws `now`, `next`, `strip` and `journal`; the
+-- lists (shopping, alts, settings) are the journal's pages.
 local _, ns = ...
 local V = {}
 ns.View = V
 
-V.MATS_FOLD = 5 -- reagent rows on the Next card before "N more reagents"
-V.MAX_LINKS = 2 -- link rows on the Next card, one per off-card tab
--- The panel's tabs, in strip order.
-V.TABS = { "plan", "shopping", "alts", "more" }
-V.TAB_LABEL = { plan = "Plan", shopping = "Shopping", alts = "Alts", more = "More" }
+-- The docked panel is the glance: one card for the step to do now, the next few lines, the whole path as a strip
+-- and a button into the journal. Nothing in it scrolls, so every list it shows has a fixed cap.
+V.BUY_LINES = 2 -- "buy" lines on the card; the rest fold into the second line
+V.MAX_LINKS = 2 -- link lines on the card: Shopping, Alts
+V.MAX_NEXT = 3 -- lines under "Next"
 V.MIN_HEIGHT = 96
+V.RANK_CAPS = { 75, 150, 225 } -- ticks on the path strip (Skills.RANK_CAPS without the top)
 
 -- Colours as r, g, b. The four difficulty colours are the game's own; the rest is the panel's palette.
 V.RGB = {
@@ -82,7 +84,7 @@ end
 -- (same step, numbers update in place), "advance" (the skill passed the step: slide the next one in), "replace"
 -- (the plan changed its mind at the same skill: crossfade).
 function V.transition(prev, cur)
-	local a, b = prev and prev.next, cur and cur.next
+	local a, b = prev and prev.now, cur and cur.now
 	if not a or not b or prev.profession ~= cur.profession then
 		return "first"
 	end
@@ -107,6 +109,23 @@ local TAG_TEXT = {
 }
 
 local WHERE = { vendor = "vendor", ah = "AH" }
+local BUY_AT = { vendor = " at a vendor", AH = " on the AH" }
+
+local function upper1(s)
+	return (tostring(s):gsub("^%l", string.upper))
+end
+
+local function plural(n, word)
+	return ("%d %s%s"):format(n, word, n == 1 and "" or "s")
+end
+
+-- Names joined inside a budget of characters, the rest as "and N more" (Where.fitList): never an ellipsis.
+local function fitList(parts, budget)
+	if ns.Where and ns.Where.fitList then
+		return ns.Where.fitList(parts, budget)
+	end
+	return table.concat(parts, ", ")
+end
 
 -- A field the planner may leave nil (unknown, never guessed), as text.
 local function known(v, f)
@@ -119,14 +138,33 @@ local function known(v, f)
 	return type(v) == "number" and tostring(math.floor(v)) or tostring(v)
 end
 
--- A rank's terms: "level 20, 5g" ("unknown" for what the trainer has not shown yet).
+-- A rank's terms: the skill it asks for and its price, "at 50, 5s" (from a trainer visit, else the data's default
+-- ranks). The skill is `at`; a rank whose skill nobody knows is trained "by <the cap before it>". The character level
+-- is said only when it matters: too low ("needs level 10, you are 8"), or not known while the rank asks for more than
+-- level 1 ("needs level 10, character level not known yet"). The player's level: st.have (the planner's), else
+-- env.level.
 function V.rankTerms(st, env)
-	return ("level %s, %s"):format(known(st.level), st.cost and env.money(st.cost) or "cost unknown")
+	local parts = {}
+	if type(st.at) == "number" then
+		parts[#parts + 1] = ("at %d"):format(st.at)
+	elseif type(st.by) == "number" then
+		parts[#parts + 1] = ("by %d"):format(st.by)
+	end
+	parts[#parts + 1] = type(st.cost) == "number" and env.money(st.cost) or "price not known yet"
+	local need = type(st.level) == "number" and st.level or nil
+	local have = (type(st.have) == "number" and st.have) or (type(env.level) == "number" and env.level) or nil
+	if need and have and have < need then
+		parts[#parts + 1] = ("needs level %d, you are %d"):format(need, have)
+	elseif need and need > 1 and not have then
+		parts[#parts + 1] = ("needs level %d, character level not known yet"):format(need)
+	end
+	return table.concat(parts, ", ")
 end
 
--- "Train Expert (225) — level 20, 5g".
+-- "Train Journeyman (to 150) at 50, 5s".
 function V.rankLine(st, env)
-	return ("Train %s (%s) — %s"):format(st.name or "the next rank", known(st.cap), V.rankTerms(st, env))
+	local cap = type(st.cap) == "number" and (" (to %d)"):format(st.cap) or ""
+	return ("Train %s%s %s"):format(st.name or "the next rank", cap, V.rankTerms(st, env))
 end
 
 local SRC_TEXT = {
@@ -235,7 +273,9 @@ function V.shortcutRows(cuts, env)
 	for _, c in ipairs(cuts or {}) do
 		local what = c.saves and ("Shortcut: %s saves %s"):format(tostring(c.name or c.spell), env.money(c.saves))
 			or ("Fills this gap: %s"):format(tostring(c.name or c.spell))
-		local text = c.needs and ("%s (needs: %s)"):format(what, tostring(c.needs)) or what
+		local text = c.needs and ("%s (needs: %s)"):format(what, tostring(c.needs))
+			or (c.why and ("%s (%s)"):format(what, tostring(c.why)))
+			or what
 		out[#out + 1] = {
 			text = text,
 			use = {
@@ -375,7 +415,7 @@ local function craftMats(st, env, listed)
 	local function row(item)
 		local r = byItem[item]
 		if not r then
-			r = { item = item, name = env.nameOf(item), need = 0, have = env.have(item) }
+			r = { item = item, name = env.nameOf(item) or ("item " .. tostring(item)), need = 0, have = env.have(item) }
 			byItem[item] = r
 			order[#order + 1] = r
 		end
@@ -392,10 +432,27 @@ local function craftMats(st, env, listed)
 	for _, b in ipairs(st.buy or {}) do
 		local r = row(b.item)
 		r.need = r.need + b.count
-		r.buy = { count = b.count, where = WHERE[b.where] or "?", cost = (b.each or 0) * b.count }
+		r.buy = {
+			count = b.count,
+			where = WHERE[b.where] or "?",
+			cost = (b.each or 0) * b.count,
+			unpriced = b.unpriced == true or nil,
+		}
 	end
 	for _, r in ipairs(order) do
 		r.covered = r.buy == nil
+		if r.buy then
+			-- the card's sentence: "You have 13 of 24 Rough Stone; buy 11 at a vendor: 88c"
+			local place = BUY_AT[r.buy.where] or ""
+			r.text = ("You have %d of %d %s; buy %d%s%s"):format(
+				math.min(r.have, r.need),
+				r.need,
+				r.name,
+				r.buy.count,
+				place,
+				r.buy.unpriced and ", price unknown" or (": " .. env.money(r.buy.cost))
+			)
+		end
 		if r.buy and listed and listed[r.item] then
 			r.right = ("%d/%d, on the list"):format(math.min(r.have, r.need), r.need)
 		elseif r.buy then
@@ -452,6 +509,14 @@ local function nextCard(st, env, listed)
 		card.shortcuts = V.shortcutRows(st.shortcuts, env)
 		card.way = V.wayMenu(st, env)
 		return card
+	elseif st.kind == "world" then
+		-- levelled on nodes (Mining between smelting recipes): no gold, never a hole
+		card.color = "bone"
+		card.name = tostring(st.name or "Gather in the world")
+		card.verb = ("%d to %d"):format(math.floor(st.from), math.floor(st.to))
+		card.gain = st.why or "from gathering nodes"
+		card.cost = "no gold"
+		return card
 	elseif st.kind == "train" then
 		card.color = "gold"
 		card.name = st.name
@@ -464,7 +529,23 @@ local function nextCard(st, env, listed)
 		card.color = "gold"
 		card.item = st.item
 		card.name = env.nameOf(st.item, "Recipe: " .. tostring(st.name))
-		card.verb = st.owned and "In your bags: learn it" or ("Buy it on the AH for %s"):format(money(st.price))
+		if st.owned then
+			card.verb = "In your bags: learn it"
+		elseif st.where == "source" then
+			-- a recipe the user chose to use that the plan cannot buy: where it comes from, price not known
+			card.verb = "Get the recipe: " .. tostring(st.source or "source not known")
+			card.cost = "recipe price unknown"
+		elseif st.where == "vendor" then
+			local who = st.vendor and st.vendor.name
+			local place = who and type(st.vendor.place) == "string" and (" in " .. st.vendor.place) or ""
+			card.verb = ("Buy it from %s%s for %s"):format(
+				who and tostring(who) or "its vendor",
+				place,
+				money(st.price)
+			)
+		else
+			card.verb = ("Buy it on the AH for %s"):format(money(st.price))
+		end
 		card.gain = ("learn at %d"):format(st.learn or 0)
 		if st.saves then
 			card.cost = ("saves %s over the plan without it"):format(money(st.saves))
@@ -487,6 +568,13 @@ local function nextCard(st, env, listed)
 		card.cost = ("%s a point"):format(money(st.costPt))
 	end
 	card.mats = craftMats(st, env, listed)
+	if st.resale and (st.resale.back or 0) > 0 then
+		-- "Count selling what I craft" is off: what selling would bring is information, the plan never ranks on it
+		card.resale = ("about %s back if you sell %d (not counted)"):format(
+			money(st.resale.back),
+			st.resale.crafts or 0
+		)
+	end
 	if st.rankUp then
 		local up = st.rankUp
 		card.notes[#card.notes + 1] = ("Train %s between %s and %s"):format(
@@ -523,6 +611,10 @@ local function nextCard(st, env, listed)
 	if st.committed then
 		card.notes[#card.notes + 1] = ("On your AH list: this recipe holds until %d"):format(math.floor(st.to or 0))
 	end
+	if card.resale then
+		-- last, so a tight fit drops it before anything the plan needs
+		card.notes[#card.notes + 1] = upper1(card.resale)
+	end
 	local tags = {}
 	for _, t in ipairs(st.tags or {}) do
 		tags[#tags + 1] = TAG_TEXT[t] or t
@@ -537,49 +629,139 @@ local function nextCard(st, env, listed)
 	return card
 end
 
--- One later step as a compact row: { n, color, text, right }.
-local function laterRow(n, st, env)
-	if st.kind == "gap" then
-		return {
-			n = n,
-			color = "warn",
-			text = "No recipe gives skill" .. (st.shortcuts and " (a shortcut fills it)" or ""),
-			right = ("%d to %d"):format(st.from, st.to),
-		}
-	elseif st.kind == "trainRank" then
-		return {
-			n = n,
-			color = "gold",
-			text = ("Train %s (%s)"):format(st.name or "the next rank", known(st.cap)),
-			right = V.rankTerms(st, env),
-		}
-	elseif st.kind == "train" then
-		return {
-			n = n,
-			color = "gold",
-			text = "Train " .. st.name .. (st.unchecked and (", " .. V.UNCHECKED) or ""),
-			right = ("at %d"):format(st.at),
-		}
-	elseif st.kind == "buyRecipe" then
-		return {
-			n = n,
-			color = "gold",
-			text = "Buy " .. env.nameOf(st.item, "Recipe: " .. tostring(st.name)),
-			right = env.money(st.price),
-		}
+-- "price unknown for 2 items", and the names for the tooltip. nil with nothing unpriced.
+function V.unpricedText(names)
+	if type(names) ~= "table" or #names == 0 then
+		return nil
 	end
-	return {
-		n = n,
-		color = st.color or "grey",
-		text = ("%dx %s%s%s"):format(
-			st.crafts,
-			st.name,
-			st.source == "stock" and ", from stock" or "",
-			-- the shortcut itself (what it saves, what it needs) shows on the Next card
-			st.shortcuts and " · shortcut" or ""
-		),
-		right = ("%d to %d"):format(math.floor(st.from), math.floor(st.to)),
-	}
+	return ("price unknown for %s"):format(plural(#names, "item")), "Price unknown: " .. table.concat(names, ", ")
+end
+
+-- The card's face, what the panel draws of a step: card.title ("Craft 12 Rough Grinding Stone"), card.sub ("28 to
+-- 40, orange") and card.lines = { { text, color, tip, note } }: what to buy, what it costs and at most two notes.
+-- Every line is a whole sentence that wraps; a list that would run long is cut here with "and N more", never by the
+-- frame.
+local function cardFace(card, st, env)
+	local money = env.money
+	local lines = {}
+	local function add(text, color, tip, note)
+		if text and text ~= "" then
+			lines[#lines + 1] = { text = text, color = color or "ash", tip = tip, note = note }
+		end
+	end
+	card.lines = lines
+	if st.kind == "trainRank" then
+		local cap = type(st.cap) == "number" and (" (to %d)"):format(st.cap) or ""
+		card.title = ("Train %s%s"):format(st.name or "the next rank", cap)
+		card.sub = upper1(V.rankTerms(st, env))
+			.. (st.where and (", " .. (WHERE_RANK[st.where] or tostring(st.where))) or "")
+		add(card.notes[1], "ash", nil, true)
+		return card
+	elseif st.kind == "gap" then
+		card.title = ("No recipe from %d to %d"):format(math.floor(st.from), math.floor(st.to))
+		card.sub = upper1(st.why or "no recipe in the data gives skill here")
+		return card
+	elseif st.kind == "world" then
+		card.title = ("%s, %d to %d"):format(tostring(st.name or "Gather"), math.floor(st.from), math.floor(st.to))
+		card.sub = upper1(tostring(st.why or "from gathering nodes")) .. ", no gold"
+		return card
+	elseif st.kind == "train" then
+		card.title = "Train " .. tostring(st.name)
+		card.sub = ("At the trainer from skill %d%s"):format(
+			st.at or 0,
+			(type(st.cost) == "number" and st.cost > 0) and (", " .. money(st.cost)) or ""
+		)
+		if st.unchecked then
+			add(upper1(V.UNCHECKED), "ash", nil, true)
+		end
+		return card
+	elseif st.kind == "buyRecipe" then
+		local learn = (", learn at %d"):format(st.learn or 0)
+		if st.owned then
+			card.title, card.sub = "Learn " .. card.name, "It is in your bags" .. learn
+		elseif st.where == "source" then
+			card.title = "Get " .. card.name
+			card.sub = ("From: %s%s"):format(tostring(st.source or "source not known"), learn)
+			add("Price unknown for the recipe", "warn")
+		elseif st.where == "vendor" then
+			local who = st.vendor and st.vendor.name
+			local place = who and type(st.vendor.place) == "string" and (" in " .. st.vendor.place) or ""
+			card.title = "Buy " .. card.name
+			card.sub = ("From %s%s for %s%s"):format(
+				who and tostring(who) or "its vendor",
+				place,
+				money(st.price),
+				learn
+			)
+		else
+			card.title = "Buy " .. card.name
+			card.sub = ("On the AH for %s%s"):format(money(st.price), learn)
+		end
+		if st.saves then
+			add(("Saves %s over the plan without it"):format(money(st.saves)), "ash", nil, true)
+		end
+		return card
+	end
+	card.title = ("Craft %d %s"):format(st.crafts or 0, tostring(st.name))
+	local sub = ("%d to %d, %s"):format(math.floor(st.from or 0), math.floor((st.to or 0) + 0.5), card.color)
+	if st.chance and card.color ~= "orange" then
+		local a, b = math.floor(st.chance[1] * 100 + 0.5), math.floor(st.chance[2] * 100 + 0.5)
+		sub = sub .. (a == b and (", %d%% a craft"):format(a) or (", %d%% falling to %d%% a craft"):format(a, b))
+	end
+	card.sub = sub
+	-- what to buy: a sentence per reagent, the rest folded into the last line with their sentences in its tooltip
+	local buys, total = {}, 0
+	for _, r in ipairs(card.mats) do
+		if r.buy then
+			buys[#buys + 1] = r
+			total = total + (r.buy.unpriced and 0 or r.buy.cost)
+		end
+	end
+	for k, r in ipairs(buys) do
+		if k < V.BUY_LINES or #buys == V.BUY_LINES then
+			add(r.text, "bone")
+		elseif k == V.BUY_LINES then
+			local names, tip = {}, {}
+			for j = k, #buys do
+				names[#names + 1] = ("%d %s"):format(buys[j].buy.count, buys[j].name)
+				tip[#tip + 1] = buys[j].text
+			end
+			add(("Also buy %s"):format(fitList(names, 64)), "bone", table.concat(tip, "\n"))
+		end
+	end
+	if #buys == 0 and #card.mats > 0 then
+		add("You have every reagent", "green")
+	end
+	local names = {}
+	for _, u in ipairs(st.unpriced or {}) do
+		names[#names + 1] = tostring(u.name or env.nameOf(u.item))
+	end
+	local unpriced, unpricedTip = V.unpricedText(names)
+	if total > 0 then
+		local cost = ("%s for this step"):format(money(total))
+		if st.costPt then
+			cost = cost .. (", %s a point"):format(money(st.costPt))
+		end
+		add(unpriced and (cost .. ", " .. unpriced) or cost, "ash", unpricedTip)
+	elseif unpriced then
+		add(upper1(unpriced), "warn", unpricedTip)
+	end
+	-- notes: what must be crafted first, then the first of the plan's own notes
+	local pre = {}
+	for _, p in ipairs(card.pre or {}) do
+		pre[#pre + 1] = ("%d %s"):format(p.count, p.name)
+	end
+	if #pre > 0 then
+		-- not a note the fit may drop: it is what to do before this step
+		add(("First craft %s"):format(fitList(pre, 64)), "bone")
+	end
+	for _, n in ipairs(card.notes) do
+		if not n:find("^Craft %d+ .* first$") then
+			add(n, "ash", nil, true)
+			break
+		end
+	end
+	return card
 end
 
 local VERDICT_TEXT = {
@@ -616,15 +798,14 @@ end
 -- The quiet line about price freshness, or nil when the prices are live and recent.
 local function staleLine(p)
 	local parts = {}
+	-- the age comes from a local Data/Plan.lua (pricesAt); without one it is not known, and nothing is claimed
 	local age = p.ageHours
-	if age == nil then
-		parts[#parts + 1] = "TSM data age unknown"
-	elseif age > ns.TSM.STALE_HOURS then
+	if age ~= nil and age > ns.TSM.STALE_HOURS then
 		parts[#parts + 1] = ("TSM prices are %.0f h old: sync the TSM app"):format(age)
 	end
 	local export = p.prices and p.prices.export or 0
 	if export > 0 then
-		parts[#parts + 1] = ("%d prices from the export"):format(export)
+		parts[#parts + 1] = ("%d prices not from TSM (bundled or exported)"):format(export)
 	end
 	return #parts > 0 and table.concat(parts, "; ") or nil
 end
@@ -660,6 +841,19 @@ local function legacyCard(m, env)
 			right = s.short > 0 and ("buy %d"):format(s.short) or ("%d/%d"):format(s.need, s.need),
 		}
 	end
+	card.title = ("Craft about %d %s"):format(m.craftsLeft or 0, tostring(st.recipe))
+	card.sub = ("%s, %s"):format(card.gain, color)
+	card.lines = {}
+	local short = {}
+	for _, r in ipairs(card.mats) do
+		if not r.covered then
+			short[#short + 1] = ("%d %s"):format(r.need - (r.have or 0), r.name)
+		end
+	end
+	if #short > 0 then
+		card.lines[1] = { text = ("Buy %s"):format(fitList(short, 64)), color = "bone" }
+	end
+	card.lines[#card.lines + 1] = { text = card.cost, color = "ash" }
 	return card
 end
 
@@ -800,7 +994,14 @@ function V.tripBlock(trip, env, saved)
 		commit = trip.commit,
 		saved = saved ~= nil,
 	}
-	local ENDS = { train = "the trainer", gap = "a gap", gold = "your gold", cap = "the cap" }
+	local ENDS = {
+		train = "the trainer",
+		trainRank = "the trainer",
+		gap = "a gap",
+		world = "the nodes",
+		gold = "your gold",
+		cap = "the cap",
+	}
 	b.title = ("One AH trip: %s, covers to %d (up to %s)"):format(
 		env.money(trip.total),
 		math.floor(trip.to or 0),
@@ -1026,6 +1227,50 @@ function V.mailPanel(groups, live, state, env, pick, max)
 	return out
 end
 
+-- The mailbox panel's groups split into pages that fit `room` px (nothing scrolls): a page break falls between
+-- rows, a group carried over repeats its title (cont = true), and its note and buttons (h.tail) stay with its last
+-- row. h = { title, row, tail = function(g) -> px }. Returns pages = { { { g, from, to, cont, tail } } }, every row
+-- on exactly one page; a group's first chunk always holds at least one row (or its tail when it has none).
+function V.mailPages(groups, room, h)
+	local pages, page, y = {}, {}, 0
+	local function turn()
+		pages[#pages + 1] = page
+		page, y = {}, 0
+	end
+	for _, g in ipairs(groups or {}) do
+		local n, i, first = #(g.rows or {}), 1, true
+		local tail = h.tail(g)
+		while true do
+			if y > 0 and y + h.title + (i <= n and h.row or tail) > room then
+				turn()
+			end
+			y = y + h.title
+			local from = i
+			while i <= n and y + h.row + (i == n and tail or 0) <= room do
+				y, i = y + h.row, i + 1
+			end
+			if i == from and i <= n then
+				-- a page too short for one row and its buttons: the row goes anyway (never lost)
+				y, i = y + h.row, i + 1
+			end
+			local done = i > n
+			if done then
+				y = y + tail
+			end
+			page[#page + 1] = { g = g, from = from, to = i - 1, cont = not first, tail = done }
+			first = false
+			if done then
+				break
+			end
+			turn()
+		end
+	end
+	if #page > 0 or #pages == 0 then
+		pages[#pages + 1] = page
+	end
+	return pages
+end
+
 local PLACE = { trainer = "Trainer", vendor = "Vendor", ah = "Auction House" }
 
 -- A row's cost: its own total when the planner gives one, else unit price times count; nil when unknown.
@@ -1239,6 +1484,51 @@ function V.atCapLine(m)
 	return ("At your cap (%d): the next rank at the trainer raises it."):format(cap)
 end
 
+-- One line of "/skillup cost": what Planner.costToCap found for a profession. r = its result, or nil and why.
+function V.costLine(name, from, to, r, env, why)
+	local head = ("%s %d to %d"):format(tostring(name), from, to)
+	if type(r) ~= "table" then
+		return ("%s: no estimate (%s)"):format(head, tostring(why or "the planner failed"))
+	end
+	local parts = {}
+	if r.trainingCost and r.trainingCost > 0 then
+		parts[#parts + 1] = "training " .. env.money(r.trainingCost)
+	end
+	local n = #(r.recipesToBuy or {})
+	if n > 0 then
+		parts[#parts + 1] = ("%d recipe%s to buy"):format(n, n == 1 and "" or "s")
+	end
+	local unknown = r.unknownRecipePrices or 0
+	if unknown > 0 then
+		parts[#parts + 1] = ("%d recipe price%s unknown"):format(unknown, unknown == 1 and "" or "s")
+	end
+	local state = "complete"
+	if #(r.gaps or {}) > 0 then
+		local gaps = {}
+		for _, g in ipairs(r.gaps) do
+			gaps[#gaps + 1] = ("%d-%d"):format(math.floor(g.from), math.floor(g.to))
+		end
+		state = "nothing gives skill at " .. table.concat(gaps, ", ")
+	end
+	if #(r.world or {}) > 0 then
+		-- node stretches (Mining): levelled in the world at no gold cost, not a hole
+		local spans = {}
+		for _, w in ipairs(r.world) do
+			spans[#spans + 1] = ("%d-%d"):format(math.floor(w.from), math.floor(w.to))
+		end
+		state = ("%s; %s %s"):format(state, table.concat(spans, ", "), tostring(r.world[1].why or "in the world"))
+	end
+	local missing = r.unknownPrices or 0
+	return ("%s: %s%s; %s; %s"):format(
+		head,
+		env.money(r.total),
+		#parts > 0 and (" (" .. table.concat(parts, ", ") .. ")") or "",
+		state,
+		missing == 0 and "every price from TSM"
+			or ("%d price%s missing from TSM"):format(missing, missing == 1 and "" or "s")
+	)
+end
+
 ------------------------------------------------------------------------------------------------- the AH buy rows
 
 -- One AH list row (Logic.ahList) at the open AH. live: what the AH said about the item (UI.lua keeps it):
@@ -1349,19 +1639,35 @@ function V.ahRow(row, live, env)
 	return out
 end
 
--- The AH panel: { title, rows, empty }. list: Logic.ahList; live[item]: V.ahRow's live.
-function V.ahPanel(list, live, env)
-	local d = { rows = {} }
+V.AH_ROWS = 5 -- rows the AH list shows at once: it pages, it never scrolls
+
+-- The AH panel: { title, rows, all, empty, pager }. list: Logic.ahList; live[item]: V.ahRow's live. `all` is every
+-- row (the frame keeps SkillupHelperDB.ahSkip in step with them); `rows` is the page shown, V.AH_ROWS at most, and
+-- pager = { text = "1 to 5 of 21", prev, next } (actions `ahPage`) only when the list has more than one page.
+function V.ahPanel(list, live, env, page)
+	local d = { rows = {}, all = {} }
 	local est = 0
 	for _, r in ipairs(list or {}) do
 		est = est + (r.each or 0) * r.count
-		d.rows[#d.rows + 1] = V.ahRow(r, live and live[r.item], env)
+		d.all[#d.all + 1] = V.ahRow(r, live and live[r.item], env)
 	end
-	if #d.rows == 0 then
+	if #d.all == 0 then
 		d.title = "SkillupHelper: your AH list is empty"
-		d.empty = "Add a list from the profession panel's Next card (Add to AH list)."
+		d.empty = "Add a list from the journal's Shopping page (Add to AH list)."
 	else
-		d.title = ("SkillupHelper AH list: %d items, plan %s"):format(#d.rows, env.money(est))
+		d.title = ("SkillupHelper AH list: %s, plan %s"):format(plural(#d.all, "item"), env.money(est))
+	end
+	local pg = V.page(#d.all, V.AH_ROWS, page)
+	for k = pg.from, pg.to do
+		d.rows[#d.rows + 1] = d.all[k]
+	end
+	d.page = pg.page
+	if pg.text then
+		d.pager = {
+			text = pg.text,
+			prev = { id = "ahPage", page = pg.page - 1, enabled = pg.page > 1, label = "Previous" },
+			next = { id = "ahPage", page = pg.page + 1, enabled = pg.page < pg.pages, label = "Next" },
+		}
 	end
 	return d
 end
@@ -1406,33 +1712,48 @@ function V.actions(card, env)
 	return out
 end
 
--- The "Show recipe" control of a plan step row: { id = "open", spell, enabled, label, tip }, or nil when the row
--- gets none. Only craft steps whose recipe is learned (env.craftable answers a count) qualify, and only beside
--- Blizzard's window: TSM's window does not follow C_TradeSkillUI.OpenRecipe, so the control is hidden there.
-function V.rowOpen(st, env)
-	if type(st) ~= "table" or st.kind ~= "craft" or type(st.spell) ~= "number" then
-		return nil
+-- The panel's height: `fixed` (what always shows) plus the optional pieces that fit under `limit` (the docked
+-- window's height). Nothing scrolls and nothing is clipped: a piece that does not fit is left out whole, the last
+-- one in `optional` first (its order is the order of importance), and the journal holds it. optional =
+-- { { key, h } }. Returns { height, limit, content (everything, had it fitted), shown = { key = true }, dropped =
+-- { keys }, overflow }: overflow is true only when even the fixed part is taller than the limit, which the layout
+-- must never reach.
+function V.fit(fixed, optional, limit)
+	local content = fixed
+	for _, o in ipairs(optional or {}) do
+		content = content + o.h
 	end
-	if env.dock ~= "blizzard" or type(env.craftable) ~= "function" then
-		return nil
+	local out = { limit = limit, content = content, shown = {}, dropped = {} }
+	local total, last = content, #(optional or {})
+	while total > limit and last >= 1 do
+		total = total - optional[last].h
+		table.insert(out.dropped, 1, optional[last].key)
+		last = last - 1
 	end
-	if type(env.craftable(st.spell)) ~= "number" then
-		return nil
+	for k = 1, last do
+		out.shown[optional[k].key] = true
 	end
-	return { id = "open", spell = st.spell, enabled = true, label = "Show", tip = "Show this recipe in the window" }
+	out.overflow = total > limit
+	out.height = math.max(math.min(V.MIN_HEIGHT, limit), total)
+	return out
 end
 
--- The panel's height for `content` under `chrome` (header and margins), up to `limit` (the docked window's height):
--- as tall as what it shows, and scrolling only when that does not fit.
-function V.fit(content, chrome, limit)
-	local want = chrome + content
-	if want <= limit then
-		return { height = math.max(V.MIN_HEIGHT, want), scroll = false }
+-- One page of a list that may be longer than its box: { from, to, total, page, pages, text = "1 to 8 of 21" } and
+-- nil for a list that fits on one page (no pager is drawn then).
+function V.page(total, per, page)
+	per = math.max(1, per)
+	local pages = math.max(1, math.ceil(total / per))
+	page = math.max(1, math.min(pages, math.floor(tonumber(page) or 1)))
+	local from = (page - 1) * per + 1
+	local to = math.min(total, page * per)
+	local out = { from = from, to = to, total = total, page = page, pages = pages }
+	if pages > 1 then
+		out.text = ("%d to %d of %d"):format(from, to, total)
 	end
-	return { height = limit, scroll = true }
+	return out
 end
 
------------------------------------------------------------------------------------------------------------- tabs
+------------------------------------------------------------------------------------------------- shopping and alts
 
 -- The Alts tab: the reagents the plan takes from other characters (plan.mail { { who, item, count } }), one group
 -- per character, each row with its queue state and a Queue / Queued button, and "Queue all" while any row is not
@@ -1501,6 +1822,27 @@ function V.altsView(mail, env)
 	return out
 end
 
+-- What the plan pays trainers, as the Shopping tab's own line under the total (the same sum as "/skillup cost"):
+-- "Training 5s 60c: 2 recipes, 1 rank (1 price unknown)". nil when the plan trains nothing.
+function V.trainingLine(p, env)
+	local t = ns.Planner and ns.Planner.trainingOf and ns.Planner.trainingOf(p)
+	if not t or t.recipes + t.ranks == 0 then
+		return nil
+	end
+	local parts = {}
+	if t.recipes > 0 then
+		parts[#parts + 1] = ("%d recipe%s"):format(t.recipes, t.recipes == 1 and "" or "s")
+	end
+	if t.ranks > 0 then
+		parts[#parts + 1] = ("%d rank%s"):format(t.ranks, t.ranks == 1 and "" or "s")
+	end
+	return ("Training %s: %s%s"):format(
+		env.money(t.total),
+		table.concat(parts, ", "),
+		t.unknown > 0 and (" (%d price%s unknown)"):format(t.unknown, t.unknown == 1 and "" or "s") or ""
+	)
+end
+
 -- The Shopping tab's head line: "Total 3g 12s, 2 stops" (+ "N unknown").
 local function shoppingTitle(blocks, env)
 	local total, unknown = 0, 0
@@ -1516,112 +1858,240 @@ local function shoppingTitle(blocks, env)
 	)
 end
 
--- The Next card's link rows: one per off-card tab that holds something for this step, { tab, text, tone, action }.
-local function cardLinks(d)
+-- The card's link lines, one per journal page that holds more for this plan: { page, text, tone, tip, action }.
+-- "Shopping: 1s 88c, 2 stops" opens the journal's Shopping page, "3 reagents on your other characters, not queued"
+-- its Alts and mail page. A click never changes the panel.
+local function cardLinks(d, profession)
 	local out = {}
 	local shop = d.shopping
 	if shop.blocks and #shop.blocks > 0 then
 		out[#out + 1] = {
-			tab = "shopping",
+			page = "shopping",
 			tone = "gold",
 			text = ("Shopping: %s"):format((shop.title:gsub("^Total ", ""))),
+			tip = "Open the shopping list in the journal",
 		}
 	end
 	local alts = d.alts
 	if #alts.groups > 0 then
-		local first, rows, units = alts.groups[1], 0, 0
+		local units = 0
 		for _, g in ipairs(alts.groups) do
 			for _, r in ipairs(g.rows) do
-				rows, units = rows + 1, units + r.count
+				units = units + r.count
 			end
 		end
-		local what = rows == 1 and ("%d %s on %s"):format(first.rows[1].count, first.rows[1].name, first.who)
-			or ("%d reagents on %s"):format(units, #alts.groups == 1 and first.who or (#alts.groups .. " characters"))
 		out[#out + 1] = {
-			tab = "alts",
+			page = "alts",
 			tone = alts.open > 0 and "gold" or "green",
-			text = ("Alts: %s, %s"):format(what, alts.open > 0 and "not queued" or "queued"),
+			text = ("%s on your other characters, %s"):format(
+				plural(units, "reagent"),
+				alts.open > 0 and "not queued" or "queued"
+			),
+			tip = "Open Alts and mail in the journal",
 		}
 	end
 	for k = #out, V.MAX_LINKS + 1, -1 do
 		out[k] = nil
 	end
 	for _, l in ipairs(out) do
-		l.action = { id = "tab", tab = l.tab, enabled = true, label = l.text }
+		l.action =
+			{ id = "journal", page = l.page, profession = profession, enabled = true, label = l.text, tip = l.tip }
 	end
 	return out
 end
 
--- d.tabs: { { id, label, count, warn, empty } } in strip order. count: what the tab lists (stops, alt reagents);
--- warn: the tab holds something to act on; empty: nothing there (the tab stays, dimmed).
-local function tabsOf(d)
-	local s, a, more = d.shopping, d.alts, d.more
-	local stops = s.blocks and #s.blocks or 0
-	local altRows = 0
-	for _, g in ipairs(a.groups) do
-		altRows = altRows + #g.rows
-	end
-	a.count = altRows
-	local list = {
-		{ id = "plan", empty = d.next == nil and #d.later == 0 },
-		{
-			id = "shopping",
-			count = stops > 0 and stops or nil,
-			empty = stops == 0 and #s.stock == 0 and not s.tripLine,
-		},
-		{
-			id = "alts",
-			count = altRows > 0 and altRows or nil,
-			warn = a.open > 0,
-			empty = altRows == 0 and #a.incoming == 0,
-		},
-		-- the settings are always there: More is never dimmed
-		{ id = "more", warn = more.warn, empty = false },
-	}
-	for _, t in ipairs(list) do
-		t.label = V.TAB_LABEL[t.id]
-		t.warn = t.warn or nil
-	end
-	return list
-end
+--------------------------------------------------------------------------------------------- next lines and strip
 
--- Which tab the panel shows: the saved one, or Plan for an unknown id.
-function V.tabOf(saved)
-	for _, id in ipairs(V.TABS) do
-		if saved == id then
-			return id
+-- The plan's lines (Where.lines) as the panel's short list: at most V.MAX_NEXT entries after the step on the card.
+-- An entry is { kind = "line" | "rank" | "gap", n, title, meta, color, tone (of meta), tip, action }: the title
+-- wraps to a second row and is never cut; meta is the range, the cost and "price unknown for 2 items" (names in the
+-- tip). A rank training is its own entry before the line it unlocks. The line whose recipe the card is learning now
+-- stays, as "Craft 43 Copper Dagger". Returns { entries, more (lines not shown), total (lines) }.
+function V.nextLines(lines, p, env, profession)
+	local out = { entries = {}, more = 0, total = #lines }
+	local steps = p.steps or {}
+	for _, line in ipairs(lines) do
+		local rank = line.rank
+		if rank and rank.step ~= 1 and steps[rank.step] and #out.entries < V.MAX_NEXT then
+			out.entries[#out.entries + 1] = {
+				kind = "rank",
+				title = V.rankLine(steps[rank.step], env),
+				color = "gold",
+				action = { id = "journal", page = "path", profession = profession, step = line.step, enabled = true },
+			}
+		end
+		if line.step ~= 1 then
+			if #out.entries >= V.MAX_NEXT then
+				out.more = out.more + 1
+			else
+				local e = { kind = line.kind == "gap" and "gap" or "line", n = line.n, color = line.color }
+				e.title = line.title
+				if line.learn and line.learn.step == 1 then
+					-- the card is that unlock: what is left of the line is the crafting
+					e.title = ("Craft %d %s"):format(line.crafts or 0, tostring(steps[line.step].name))
+				end
+				local meta = {}
+				if line.kind == "gap" then
+					meta[1] = upper1(line.why or "no recipe in the data gives skill here")
+					e.tone = "warn"
+				else
+					if line.kind == "unlock" then
+						meta[1] = ("at %d"):format(line.from or 0)
+					else
+						meta[1] = ("%d to %d"):format(line.from or 0, line.to or 0)
+					end
+					local learning = line.learn and line.learn.step == 1 and line.learn.cost or 0
+					local cost = line.cost and (line.cost - learning) or nil
+					if cost and cost > 0 then
+						meta[#meta + 1] = env.money(cost)
+					end
+					local unpriced, tip = V.unpricedText(line.unpriced)
+					meta[#meta + 1] = unpriced
+					e.tip = tip
+					if line.kind == "world" then
+						meta[#meta + 1] = line.why
+					end
+				end
+				e.meta = table.concat(meta, ", ")
+				e.action = { id = "journal", page = "path", profession = profession, step = line.step, enabled = true }
+				out.entries[#out.entries + 1] = e
+			end
 		end
 	end
-	return "plan"
+	return out
+end
+
+-- The whole path as one strip: skill 1 to V.TOP_SKILL on the panel's width, every x a 0..1 fraction of it. A segment
+-- per plan line in its colour, what is behind the skill as one dimmed segment, a hole as a `gap` segment (hatched in
+-- the frame), anything the plan does not reach as `none`. The segments cover the whole strip in order, edge to edge.
+-- Returns { lo, hi, segments = { { from, to, x0, x1, color, done, gap, none, tip, step } }, caps = { { at, x } },
+-- now = { skill, x }, gaps, caption }.
+function V.strip(lines, skill, env)
+	local lo, hi = 1, V.TOP_SKILL
+	local function x(v)
+		return math.max(0, math.min(1, (v - lo) / (hi - lo)))
+	end
+	skill = math.max(lo, math.min(hi, math.floor(tonumber(skill) or lo)))
+	local s = { lo = lo, hi = hi, segments = {}, caps = {}, now = { skill = skill, x = x(skill) }, gaps = 0 }
+	local at = lo
+	local function push(seg)
+		seg.from, seg.to = math.max(seg.from, at), math.min(seg.to, hi)
+		if seg.to <= seg.from then
+			return
+		end
+		if seg.from > at then
+			push({
+				from = at,
+				to = seg.from,
+				color = "line",
+				none = true,
+				tip = ("No plan from %d to %d"):format(at, seg.from),
+			})
+		end
+		seg.x0, seg.x1 = x(seg.from), x(seg.to)
+		s.segments[#s.segments + 1] = seg
+		at = seg.to
+	end
+	if skill > lo then
+		push({ from = lo, to = skill, color = "ash", done = true, tip = ("Done: %d to %d"):format(lo, skill) })
+	end
+	local count = 0
+	for _, line in ipairs(lines or {}) do
+		if line.kind ~= "unlock" then
+			count = count + 1
+			local tip = ("%d. %s"):format(line.n, line.short or line.title)
+			if line.kind == "gap" then
+				s.gaps = s.gaps + 1
+				tip = tip .. "\n" .. upper1(line.why or "no recipe in the data gives skill here")
+			elseif line.kind == "world" then
+				tip = tip .. "\n" .. upper1(tostring(line.why or "from gathering nodes")) .. ", no gold"
+			else
+				local parts = {}
+				if line.cost and line.cost > 0 then
+					parts[1] = env.money(line.cost)
+				end
+				parts[#parts + 1] = V.unpricedText(line.unpriced)
+				if #parts > 0 then
+					tip = tip .. "\n" .. upper1(table.concat(parts, ", "))
+				end
+			end
+			push({
+				from = line.from,
+				to = line.to,
+				color = line.color,
+				gap = line.kind == "gap" or nil,
+				done = line.to <= skill or nil,
+				tip = tip,
+				step = line.step,
+			})
+		end
+	end
+	if at < hi then
+		local from = at
+		push({ from = from, to = hi, color = "line", none = true, tip = ("No plan from %d to %d"):format(from, hi) })
+	end
+	for _, cap in ipairs(V.RANK_CAPS) do
+		s.caps[#s.caps + 1] = { at = cap, x = x(cap) }
+	end
+	s.caption = ("%s to %d"):format(plural(count, "step"), hi)
+	if s.gaps > 0 then
+		s.caption = ("%s, %s"):format(s.caption, plural(s.gaps, "gap"))
+	end
+	return s
+end
+
+-- The segment of a strip under x (0..1), or nil outside it.
+function V.stripAt(strip, x)
+	if type(strip) ~= "table" or type(x) ~= "number" or x < 0 or x > 1 then
+		return nil
+	end
+	for _, seg in ipairs(strip.segments) do
+		if x >= seg.x0 and x < seg.x1 then
+			return seg
+		end
+	end
+	return strip.segments[#strip.segments]
 end
 
 -- env: nameOf(item, fallback) -> string, money(copper) -> string, have(item) -> count; optional craftable(spell) ->
 -- crafts the client allows now (nil and why when the recipe is not learned) and dock ("blizzard", "tsm", "free").
--- Returns { state, profession, skill, cap, header, runway, next, later, notice, message, tabs, shopping, alts, more }.
--- The Plan tab draws next and later; shopping = { title, blocks, trip, stock, empty }, alts = V.altsView,
--- more = { data, warn, empty }.
-function V.describe(m, env, opts)
+-- Returns { state, profession, skill, cap, header, runway, now, next, strip, journal, notice, message, empty,
+-- shopping, alts, more }. The docked panel draws four things: `now` (the card of the step to do: title, sub, lines,
+-- links, bar), `next` = { entries, more, total, why } (V.nextLines), `strip` (V.strip) and `journal` (the button's
+-- action). shopping = { title, blocks, trip, stock, empty }, alts = V.altsView and more = { data, warn, empty } are
+-- the journal's pages (Journal.lua reads them from the last description); the panel only links to them.
+function V.describe(m, env)
 	m = m or {}
-	opts = opts or {}
 	local listed -- the items on the shopping list: their mat rows say "on the list"
 	if m.why and not m.skill then
 		return {
 			state = "message",
 			message = m.why,
 			tone = m.state == "not now" and "ash" or "warn",
-			later = {},
+			next = { entries = {}, more = 0, total = 0 },
+			journal = { id = "journal", page = "overview", enabled = true, label = "Open the journal" },
 		}
 	end
+	local profession = m.professionID
 	local d = {
 		state = "plan",
 		profession = m.profession,
 		skill = m.skill,
 		cap = m.maxSkill,
 		header = { title = m.profession or "?", skill = ("%d / %d"):format(m.skill or 0, m.maxSkill or 0) },
-		later = {},
+		next = { entries = {}, more = 0, total = 0 },
 		notice = m.why,
 		shopping = { stock = {} },
 		more = { data = {} },
+		journal = {
+			id = "journal",
+			page = "path",
+			profession = profession,
+			step = 1,
+			enabled = true,
+			label = "Open the journal",
+			tip = "The whole path, the shopping list, alts and mail, and the settings",
+		},
 	}
 	local p = m.planner
 	if p then
@@ -1635,7 +2105,7 @@ function V.describe(m, env, opts)
 				end
 			end
 		end
-		d.next = p.steps[1] and nextCard(p.steps[1], env, listed)
+		d.now = p.steps[1] and cardFace(nextCard(p.steps[1], env, listed), p.steps[1], env)
 		local saved = env.savedTrip and env.savedTrip(p.profKey)
 		local cb = V.capBlockLine(p.capBlock)
 		if cb then
@@ -1643,23 +2113,23 @@ function V.describe(m, env, opts)
 			d.notice = d.notice and (cb .. "\n" .. d.notice) or cb
 		end
 		local sh = d.shopping
-		if d.next and shop then
-			-- one block per place in travel order, on the Shopping tab; the AH block is also what "Add to AH list" keeps
+		if d.now and shop then
+			-- one block per place in travel order, on the Shopping page; the AH block is also what "Add to AH list" keeps
 			sh.blocks = shop
 			-- the list "Add to AH list" keeps: plan.trip when the trip starts now (as before), else the AH block
 			if p.trip and p.trip.fromStep == 1 then
-				d.next.trip = V.tripBlock(p.trip, env, saved)
+				d.now.trip = V.tripBlock(p.trip, env, saved)
 			elseif not p.trip then
-				d.next.trip = V.shoppingTrip(p, env, saved)
+				d.now.trip = V.shoppingTrip(p, env, saved)
 			end
-			if d.next.trip then
-				d.next.trip.prof = p.profKey
+			if d.now.trip then
+				d.now.trip.prof = p.profKey
 			end
-		elseif d.next and p.trip and p.trip.fromStep == 1 then
-			d.next.trip = V.tripBlock(p.trip, env, saved)
-			if d.next.trip then
-				d.next.trip.prof = p.profKey
-				sh.blocks = { d.next.trip }
+		elseif d.now and p.trip and p.trip.fromStep == 1 then
+			d.now.trip = V.tripBlock(p.trip, env, saved)
+			if d.now.trip then
+				d.now.trip.prof = p.profKey
+				sh.blocks = { d.now.trip }
 			end
 		elseif p.trip and not shop then
 			sh.tripLine = ("AH trip at step %d: %s, covers to %d"):format(
@@ -1668,18 +2138,20 @@ function V.describe(m, env, opts)
 				math.floor(p.trip.to or 0)
 			)
 		end
-		-- every step: the Plan tab scrolls
-		for i = 2, #p.steps do
-			local row = laterRow(i, p.steps[i], env)
-			row.open = V.rowOpen(p.steps[i], env)
-			row.way = V.wayMenu(p.steps[i], env)
-			d.later[#d.later + 1] = row
+		-- the plan as lines (Where.lines): the next few under the card, all of them on the strip
+		if ns.Where and ns.Where.lines then
+			local lines = ns.Where.lines(p.steps, { nameOf = env.nameOf })
+			d.next = V.nextLines(lines, p, env, profession)
+			d.strip = V.strip(lines, m.skill, env)
+		else
+			d.next.why = "Where.lua is not loaded: the next lines and the path strip are not drawn"
 		end
 		sh.stock = stockLines(p, env)
+		sh.training = V.trainingLine(p, env)
 		local data = d.more.data
 		local cov = p.coverage and p.coverage.to
 		if type(cov) == "number" and (not m.maxSkill or cov < m.maxSkill) then
-			data[#data + 1] = ("Data/Plan.lua covers to %d"):format(cov)
+			data[#data + 1] = ("The recipe data covers to %d"):format(cov)
 		end
 		for _, line in ipairs(V.routeLines(p)) do
 			data[#data + 1] = line
@@ -1687,17 +2159,23 @@ function V.describe(m, env, opts)
 		-- "Visit your trainer once": something to act on
 		d.more.warn = p.unconfirmed ~= nil and p.unconfirmed > 0 or nil
 		d.alts = V.altsView(p.mail, env)
-		if not d.next then
+		if not d.now then
 			d.empty = V.atCapLine(m) or "Nothing gives skill in range: every known recipe is grey."
 		end
 	else
 		d.state = "legacy"
 		d.notice = d.notice or m.plannerWhy or m.planWhy
-		d.next = legacyCard(m, env)
+		d.now = legacyCard(m, env)
 		for _, e in ipairs(m.fromStock or {}) do
 			local crafts = e.crafts == math.huge and "vendor mats" or ("x%d"):format(e.crafts)
-			d.later[#d.later + 1] = { color = e.color, text = ("%s %s, from stock"):format(e.name, crafts) }
+			if #d.next.entries < V.MAX_NEXT then
+				d.next.entries[#d.next.entries + 1] =
+					{ kind = "line", color = e.color, title = ("%s %s, from stock"):format(e.name, crafts) }
+			else
+				d.next.more = d.next.more + 1
+			end
 		end
+		d.next.total = #d.next.entries + d.next.more
 		for _, b in ipairs(m.buyRecipes or {}) do
 			d.shopping.stock[#d.shopping.stock + 1] = ("Worth buying: %s, %s, for %d to %d"):format(
 				b.itemName or env.nameOf(b.item, b.recipe),
@@ -1706,7 +2184,7 @@ function V.describe(m, env, opts)
 				b.to
 			)
 		end
-		if not d.next then
+		if not d.now then
 			d.empty = "No plan step for this skill."
 		end
 	end
@@ -1720,111 +2198,34 @@ function V.describe(m, env, opts)
 	if #d.more.data == 0 then
 		d.more.empty = "Nothing to report about the plan's data."
 	end
-	local nx = d.next
+	local nx = d.now
 	if nx and nx.kind == "craft" and nx.thresholds then
 		d.runway = V.colourTarget(m.skill, nx.thresholds[1], nx.thresholds[2])
 	end
 	if nx then
-		-- actions read every reagent (a buy row past the cut still blocks Craft); only the display is cut
+		-- actions read every reagent, whatever the card's lines show of them
 		nx.actions, nx.actionsWhy = V.actions(nx, env)
-		-- "Add to AH list" sits on the Shopping tab, over the blocks it keeps
+		-- "Add to AH list" sits on the journal's Shopping page, over the blocks it keeps
 		sh.trip = V.tripAction(nx.trip)
 		local ma = V.mailAction(nx)
 		if ma then
 			nx.actions = nx.actions or {}
 			table.insert(nx.actions, 1, ma)
 		end
-		nx.links = cardLinks(d)
-	end
-	d.tabs = tabsOf(d)
-	-- a step row's left click previews it on the card; step 1 is the card itself
-	for _, r in ipairs(d.later) do
-		if r.n then
-			r.preview = { id = "preview", step = r.n, enabled = true, label = "Preview this step" }
-			r.selected = opts.preview == r.n or nil
-		end
-	end
-	local total = p and #p.steps or 0
-	local pi = opts.preview
-	if p and nx and type(pi) == "number" and pi >= 2 and pi <= total then
-		local pc = nextCard(p.steps[pi], env, listed)
-		-- the links count step 1's shopping and alts: a later step gets none
-		pc.actions = V.previewActions(p.steps[pi], env)
-		pc.previewing = true
-		d.now, d.next = nx, pc
-		d.pager = V.pager(pi, total)
-		nx = pc
-	end
-	if nx then
-		V.foldMats(nx, nx.key ~= nil and opts.matsOpen == nx.key)
-		nx.why = V.whyRow(nx, nx.key ~= nil and opts.whyOpen == nx.key)
+		nx.links = cardLinks(d, profession)
 		nx.bar = V.actionBar(nx)
+		-- Journal.lua's minimap tip still reads the card as `next.name` and `next.verb` (the description's old
+		-- shape): these two fields keep it speaking until it reads `now.title` and `now.sub`
+		d.next.name, d.next.verb = nx.name, nx.verb
+	end
+	if d.next.more > 0 then
+		d.journal.label = ("Open the journal: %s"):format(plural(d.next.more, "more step"))
 	end
 	return d
 end
 
-------------------------------------------------------------------------------------------------- Plan tab controls
-
--- Cuts the card's reagent rows to V.MATS_FOLD unless `open`, and sets card.matsToggle (the expander under them):
--- "3 more reagents" folded, "Fewer reagents" open, nil when all fit. card.allMats keeps the full count.
-function V.foldMats(card, open)
-	local n = #card.mats
-	card.allMats = n
-	if n <= V.MATS_FOLD then
-		card.matsToggle = nil
-		return card
-	end
-	local toggle = { id = "mats", key = card.key, enabled = true }
-	if open then
-		toggle.label = "Fewer reagents"
-	else
-		local hidden = n - V.MATS_FOLD
-		for k = n, V.MATS_FOLD + 1, -1 do
-			card.mats[k] = nil
-		end
-		toggle.label = ("%d more reagent%s"):format(hidden, hidden == 1 and "" or "s")
-	end
-	card.matsToggle = toggle
-	return card
-end
-
--- The Why row: the card's notes, its plain "other way" lines (only without the Use-this rows), the stock or skip
--- option and the tags, as { lines = { { text, color } }, more, toggle }. Folded it shows the first line and a "+N"
--- toggle; open it shows them all with "less". nil when the card has nothing to say.
-function V.whyRow(card, open)
-	local all = {}
-	for _, n in ipairs(card.notes or {}) do
-		all[#all + 1] = { text = n, color = "bone" }
-	end
-	-- the other ways sit in the Way menu when the card has one
-	if not card.way then
-		for _, o in ipairs(card.others or {}) do
-			all[#all + 1] = { text = o, color = "ash" }
-		end
-	end
-	-- the stock option sits in the Way menu when the card has one
-	if card.alt and not (card.way and card.way.stock) then
-		all[#all + 1] = { text = card.alt, color = "bone" }
-	end
-	if card.tags then
-		all[#all + 1] = { text = card.tags, color = "ash" }
-	end
-	if #all == 0 then
-		return nil
-	end
-	local row = { lines = all, more = #all - 1, open = open and #all > 1 or false }
-	if #all > 1 then
-		row.toggle = { id = "why", key = card.key, enabled = true, label = open and "less" or ("+%d"):format(#all - 1) }
-		if not open then
-			row.lines = { all[1] }
-		end
-	end
-	return row
-end
-
--- The sticky action bar under the Plan tab's scroll area: rows of the card's actions, { { mail }, { buy },
--- { craft, open } } with the empty rows left out. A preview card's row holds Show recipe and the inert "Step 1
--- comes first". nil when the card has no action.
+-- The action bar under the card: rows of the card's actions, { { mail }, { buy }, { craft, open } } with the empty
+-- rows left out. nil when the card has no action.
 function V.actionBar(card)
 	local by = {}
 	for _, a in ipairs(card.actions or {}) do
@@ -1839,59 +2240,12 @@ function V.actionBar(card)
 		rows[#rows + 1] = { by.buy }
 	end
 	local last = {}
-	last[#last + 1] = by.craft or by.now
+	last[#last + 1] = by.craft
 	last[#last + 1] = by.open
 	if #last > 0 then
 		rows[#rows + 1] = last
 	end
 	return #rows > 0 and rows or nil
-end
-
--- The buttons of a previewed step: Show recipe when the row offers it, and an inert "Step 1 comes first" (nothing
--- for a later step is crafted, bought or mailed from the preview).
-function V.previewActions(st, env)
-	local out = {
-		{
-			id = "now",
-			enabled = false,
-			label = "Step 1 comes first",
-			tip = "This is a later step. Back to now shows what to do first.",
-		},
-	}
-	local open = V.rowOpen(st, env)
-	if open then
-		open.label, open.tip = "Show recipe", nil
-		out[#out + 1] = open
-	end
-	return out
-end
-
--- The pager over a previewed card: "Step 3 of 9" with < and > (step 1 is "now") and "Back to now".
-function V.pager(i, total)
-	return {
-		index = i,
-		total = total,
-		text = ("Step %d of %d"):format(i, total),
-		prev = { id = "preview", step = i - 1, enabled = i > 1, label = "<", tip = "The step before" },
-		next = { id = "preview", step = i + 1, enabled = i < total, label = ">", tip = "The step after" },
-		back = { id = "preview", step = 1, enabled = true, label = "Back to now" },
-	}
-end
-
--- The right-click menu of a step row: { title, items = { action } }, every item an action UI.act runs.
-function V.stepMenu(row, previewing)
-	local items = {}
-	if row.preview then
-		items[#items + 1] = row.preview
-	end
-	if row.open then
-		items[#items + 1] = { id = "open", spell = row.open.spell, enabled = true, label = "Show recipe" }
-	end
-	if previewing then
-		items[#items + 1] = { id = "preview", step = 1, enabled = true, label = "Back to now" }
-	end
-	-- "Ways...": the step's Way menu (View.wayMenu) as a submenu
-	return { title = row.n and ("Step %d"):format(row.n) or row.text, items = items, ways = row.way }
 end
 
 -- A collapsible section head: { kind = "head", key, text, collapsed, action }. The state is saved per account
@@ -1918,6 +2272,9 @@ function V.shoppingItems(s, collapsed)
 	local out = {}
 	if s.title then
 		out[#out + 1] = { kind = "line", text = s.title, color = "bone", size = 12 }
+	end
+	if s.training then
+		out[#out + 1] = { kind = "line", text = s.training }
 	end
 	if s.tripLine then
 		out[#out + 1] = { kind = "line", text = s.tripLine }
@@ -2087,6 +2444,14 @@ function V.moreItems(more, s, env, collapsed)
 			not s.noAlts,
 			"From TSM's inventory of your alts. Off: the plan counts this character's bags and bank only."
 		)
+		check(
+			out,
+			"Count selling what I craft",
+			s.resale == true,
+			"resale",
+			not s.resale,
+			"On: what the products sell for lowers a recipe's cost. Off: recipes are ranked by what you pay."
+		)
 	end
 	out[#out + 1] = { kind = "gap", h = 8 }
 	if not section(out, "more:sources", "Recipe sources", collapsed) then
@@ -2166,44 +2531,37 @@ function V.text(d)
 		return out
 	end
 	add(("%s %s"):format(d.header.title, d.header.skill))
+	if d.strip then
+		add(d.strip.caption)
+	end
 	if d.runway then
 		add(d.runway.label)
 	end
 	add(d.header.stale)
 	add(d.notice)
-	local nx = d.next
-	if d.pager then
-		add(("< %s > [Back to now]"):format(d.pager.text))
-	end
+	local nx = d.now
 	if nx then
-		add(nx.name)
-		add(table.concat({ nx.verb or "", nx.gain or "" }, ", "))
-		add(nx.cost)
-		for _, mt in ipairs(nx.mats) do
-			add(("%s %s"):format(mt.name, mt.right))
+		add(nx.title)
+		add(nx.sub)
+		for _, l in ipairs(nx.lines or {}) do
+			add(l.text)
 		end
 		for _, l in ipairs(nx.links or {}) do
-			add(("[%s >]"):format(l.text))
+			add(("[%s]"):format(l.text))
 		end
-		for _, n in ipairs(nx.notes) do
-			add(n)
-		end
-		for _, o in ipairs(nx.others or {}) do
-			add(o)
-		end
-		add(nx.alt)
-		add(nx.tags)
 		for _, a in ipairs(nx.actions or {}) do
 			add(("[%s]%s"):format(a.label, a.enabled and "" or " (not yet)"))
 		end
 	end
 	add(d.empty)
-	for _, r in ipairs(d.later) do
-		add(
-			((r.n and (r.n .. " ") or "") .. r.text .. (r.right and (" " .. r.right) or ""))
-				.. (r.open and (" [" .. r.open.label .. "]") or "")
-		)
+	if #d.next.entries > 0 then
+		add("-- Next")
 	end
+	for _, e in ipairs(d.next.entries) do
+		add((e.n and (e.n .. ". ") or "") .. e.title .. ((e.meta and e.meta ~= "") and (" (" .. e.meta .. ")") or ""))
+	end
+	add(d.next.why)
+	add(("[%s]"):format(d.journal.label))
 	local sh = d.shopping or {}
 	add("-- Shopping")
 	add(sh.title)

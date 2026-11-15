@@ -1,6 +1,15 @@
 -- Logic, the panel text and the scan against a fake C_TradeSkillUI. Frames are checked in game.
 local function load(ns)
-	for _, f in ipairs({ "Logic.lua", "Planner.lua", "Scan.lua", "TSM.lua", "View.lua", "UI.lua" }) do
+	for _, f in ipairs({
+		"Logic.lua",
+		"Learned.lua",
+		"Planner.lua",
+		"Scan.lua",
+		"TSM.lua",
+		"View.lua",
+		"Where.lua",
+		"UI.lua",
+	}) do
 		assert(loadfile(f))("SkillupHelper", ns)
 	end
 	return ns
@@ -240,7 +249,7 @@ describe("Scan and panel", function()
 
 	it("names a missing plan file and a linked window", function()
 		local m = ns.Scan.build(nil)
-		assert.matches("Plan.lua absent", m.planWhy)
+		assert.matches("Data/Recipes.lua did not load", m.planWhy)
 		_G.C_TradeSkillUI.IsTradeSkillLinked = function()
 			return true
 		end
@@ -251,7 +260,7 @@ describe("Scan and panel", function()
 		local text = table.concat(panelText(ns, ns.Scan.build(plan)), "\n")
 		assert.matches("Cooking 175 / 225", text)
 		assert.matches("Crispy Lizard Tail", text)
-		assert.matches("Thunder Lizard Tail buy 65", text)
+		assert.matches("Buy 65 Thunder Lizard Tail", text)
 		assert.matches("Crispy Lizard Tail x10, from stock", text)
 		assert.matches("Worth buying: Recipe: Rockscale Cod, 27s 92c, for 180 to 215", text)
 		assert.matches("version 1", text)
@@ -274,7 +283,8 @@ describe("Yellow threshold of a recipe the export does not list", function()
 		assert.is_true(S.noteColor(seen, 1, 131, 1)) -- yellow at 131: yellow is at or below
 		assert.equal(128, S.yellowOf(145, seen[1]))
 		assert.equal(131, S.yellowOf(160, seen[1]))
-		assert.is_false(S.noteColor(seen, 1, 131, 3)) -- grey says nothing about yellow
+		S.noteColor(seen, 1, 131, 3) -- grey says nothing about yellow
+		assert.equal(131, S.yellowOf(160, seen[1]))
 	end)
 
 	it("builds an entry from the client, or names what is missing", function()
@@ -352,6 +362,10 @@ describe("Planner in the scan and the panel", function()
 			end,
 		}
 		ns = load({})
+		-- the design note's cooking cases count product sales: "Count selling what I craft" on
+		ns.settings = function()
+			return { resale = true }
+		end
 		ns.Scan.resetCaches()
 	end)
 
@@ -369,12 +383,12 @@ describe("Planner in the scan and the panel", function()
 		local text = table.concat(panelText(ns, m), "\n")
 		assert.matches("Cooking 173 / 225", text, 1, true)
 		assert.matches("17 to grey", text, 1, true)
-		assert.matches("Big Bear Steak\nCraft 1, about +0.4, to 173", text, 1, true)
-		assert.matches("2 7x Hot Lion Chops, from stock", text, 1, true)
-		assert.matches("Rockscale Cod 28s 11c", text, 1, true)
+		assert.matches("Craft 1 Big Bear Steak\n173 to 173, green, 43% a craft", text, 1, true)
+		assert.matches("2. Craft 7 Hot Lion Chops", text, 1, true)
+		assert.matches("3. Buy the recipe and craft 55 Rockscale Cod", text, 1, true)
 		assert.matches("TSM prices are 30 h old", text)
-		assert.matches("prices from the export", text)
-		assert.matches("Train Goldthorn Tea", text)
+		assert.matches("prices not from TSM", text)
+		assert.matches("4. Learn and craft 13 Goldthorn Tea", text, 1, true)
 	end)
 
 	it("takes live TSM prices first and keeps pass 1 cached across bag updates", function()
@@ -649,7 +663,7 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal("0.2.17", ns.CODE_VERSION)
+		assert.equal("0.3.0", ns.CODE_VERSION)
 	end)
 end)
 

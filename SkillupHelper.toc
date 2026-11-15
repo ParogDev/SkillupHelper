@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: Skillup Helper
-## Notes: In the profession window: what you can craft for skill from bags and bank, and the cheapest next step.
+## Notes: Levels every profession to 300 for the least gold: the next craft at the profession window, a journal with costs and routes, and where to farm gathering skills and Lockpicking.
 ## Author: ParogDev
 ## Version: @project-version@
 ## SavedVariables: SkillupHelperDB
@@ -9,17 +9,32 @@
 ## X-Website: https://github.com/ParogDev/SkillupHelper
 ## X-License: MIT
 ## IconTexture: Interface\Icons\Trade_LeatherWorking
+## AddonCompartmentFunc: SkillupHelper_OnCompartmentClick
+## AddonCompartmentFuncOnEnter: SkillupHelper_OnCompartmentEnter
+## AddonCompartmentFuncOnLeave: SkillupHelper_OnCompartmentLeave
 
+Data\Recipes.lua
 Data\Plan.lua
+Data\Custom.lua
 Data\Npcs.lua
+Data\Spots.lua
+Data\Trainers.lua
 Logic.lua
+Learned.lua
 Guide.lua
 Planner.lua
 Scan.lua
 TSM.lua
 Alts.lua
 View.lua
+Skills.lua
+Where.lua
+Widgets.lua
+MapCanvas.lua
+FieldUI.lua
+JournalUI.lua
 UI.lua
 GuideUI.lua
 MailUI.lua
 Core.lua
+Journal.lua
