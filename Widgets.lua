@@ -1,6 +1,6 @@
 -- Shared building blocks of the journal, the field card and the tracker: palette, text, buttons, pools, chips,
--- band bars, the yields block, travel legs, errand stops, a virtualised list, a scroll area and the settings
--- controls. Frames only draw view-models (plain tables); nothing here composes a sentence or computes a plan.
+-- band bars, the yields block, travel legs, errand stops, paged lists and areas (nothing scrolls), pixel snapping
+-- and the settings controls. Frames only draw view-models (plain tables); nothing here composes a sentence or computes a plan.
 -- UI.lua has older copies of text / fill / edges / newButton / newControl: see docs/ui.md ("To de-duplicate").
 local _, ns = ...
 local W = {}
@@ -59,22 +59,30 @@ function W.fill(tex, name, alpha)
 end
 local fill = W.fill
 
+-- Every frame and region made here rounds its own layout to whole screen pixels (see "pixels" below).
+local function roundLayout(obj)
+	if obj.SetRoundLayoutToNearestPixel then
+		obj:SetRoundLayoutToNearestPixel(true)
+	end
+	return obj
+end
+
 function W.frame(kind, name, parent, template)
 	W.stats.frames = W.stats.frames + 1
-	return CreateFrame(kind, name, parent, template)
+	return roundLayout(CreateFrame(kind, name, parent, template))
 end
 local frame = W.frame
 
 function W.tex(parent, layer, sub)
 	W.stats.regions = W.stats.regions + 1
-	return parent:CreateTexture(nil, layer or "ARTWORK", nil, sub)
+	return roundLayout(parent:CreateTexture(nil, layer or "ARTWORK", nil, sub))
 end
 local tex = W.tex
 
 -- A one-line FontString. Fonts go through SetFontObject + SetFontHeight (never SetFont on a FontFamily).
 function W.text(parent, font, height, layer)
 	W.stats.regions = W.stats.regions + 1
-	local fs = parent:CreateFontString(nil, layer or "OVERLAY")
+	local fs = roundLayout(parent:CreateFontString(nil, layer or "OVERLAY"))
 	fs:SetFontObject(font or "GameFontHighlightSmall")
 	if height then
 		fs:SetFontHeight(height)
@@ -245,6 +253,127 @@ function W.tipOf(owner, ...)
 	return out
 end
 
+-------------------------------------------------------------------------------------------------------------- pixels
+
+-- A window that sits on a fraction of a screen pixel draws its text and 1-px rules differently at every position:
+-- the client rounds each region on its own. So every window of the addon is kept on whole physical pixels: its
+-- size and its top-left corner are snapped after a drag, when it is shown and when the UI scale or the display
+-- changes, and its children round their own layout (SetRoundLayoutToNearestPixel, what PixelUtil.SetPoint and
+-- SetSize did by hand). With the origin on a pixel a child lands on the same sub-pixel wherever the window is.
+W.pixel = { snaps = 0, moved = 0, lastWhy = nil }
+local snapped = setmetatable({}, { __mode = "k" }) -- windows to snap again on a scale change
+
+-- Physical pixels per UI unit of this frame (1 when the client cannot say).
+function W.pxPerUnit(f)
+	local scale = f and f.GetEffectiveScale and f:GetEffectiveScale() or 1
+	local _, ph
+	if GetPhysicalScreenSize then
+		_, ph = GetPhysicalScreenSize()
+	end
+	if type(scale) ~= "number" or scale <= 0 then
+		scale = 1
+	end
+	if type(ph) ~= "number" or ph <= 0 then
+		ph = 768
+	end
+	return scale * ph / 768
+end
+
+-- v UI units as the nearest whole number of pixels at k pixels per unit, back in UI units; at least `min` pixels.
+function W.snapValue(v, k, min)
+	local px = math.floor(v * k + 0.5)
+	if min and v >= 0 and px < min then
+		px = min
+	end
+	return px / k
+end
+
+-- v units of frame f on whole pixels.
+function W.px(f, v, min)
+	return W.snapValue(v, W.pxPerUnit(f), min)
+end
+
+-- Turns on pixel rounding for a frame made elsewhere (UI.lua, GuideUI.lua) and everything under it.
+function W.roundAll(f)
+	if not (f and f.SetRoundLayoutToNearestPixel) then
+		return
+	end
+	f:SetRoundLayoutToNearestPixel(true)
+	if f.GetRegions then
+		for _, r in ipairs({ f:GetRegions() }) do
+			roundLayout(r)
+		end
+	end
+	if f.GetChildren then
+		for _, c in ipairs({ f:GetChildren() }) do
+			W.roundAll(c)
+		end
+	end
+end
+
+local watch
+local function watchScale()
+	if watch or not CreateFrame then
+		return
+	end
+	watch = CreateFrame("Frame")
+	for _, e in ipairs({ "UI_SCALE_CHANGED", "DISPLAY_SIZE_CHANGED" }) do
+		pcall(watch.RegisterEvent, watch, e)
+	end
+	watch:SetScript("OnEvent", function()
+		for f in pairs(snapped) do
+			if f.IsShown and f:IsShown() then
+				W.snap(f)
+			end
+		end
+	end)
+end
+
+-- Puts a window on whole pixels: its size, then its top-left corner, by shifting the offsets of its one anchor
+-- (so a frame docked to another keeps following it). Returns true, or false and the broken link. A frame with
+-- several anchors is sized by them and is left alone.
+function W.snap(f)
+	if not (f and f.GetLeft and f.GetPoint) then
+		return false, "no frame"
+	end
+	watchScale()
+	snapped[f] = true
+	local k = W.pxPerUnit(f)
+	local w, h = f:GetWidth(), f:GetHeight()
+	if type(w) == "number" and type(h) == "number" and w > 0 and h > 0 then
+		f:SetSize(W.snapValue(w, k, 1), W.snapValue(h, k, 1))
+	end
+	if f.GetNumPoints and f:GetNumPoints() ~= 1 then
+		W.pixel.lastWhy = "not one anchor"
+		return false, W.pixel.lastWhy
+	end
+	local left, top = f:GetLeft(), f:GetTop()
+	local point, rel, relPoint, x, y = f:GetPoint(1)
+	if type(left) ~= "number" or type(top) ~= "number" or not point then
+		W.pixel.lastWhy = "the frame has no position yet"
+		return false, W.pixel.lastWhy
+	end
+	local dx, dy = W.snapValue(left, k) - left, W.snapValue(top, k) - top
+	W.pixel.snaps = W.pixel.snaps + 1
+	if math.abs(dx) > 0.0001 or math.abs(dy) > 0.0001 then
+		W.pixel.moved = W.pixel.moved + 1
+		f:ClearAllPoints()
+		f:SetPoint(point, rel, relPoint, (x or 0) + dx, (y or 0) + dy)
+	end
+	return true
+end
+
+-- After a drag: stop, snap, and return the anchor to save as { point, x, y } (offsets already on whole pixels).
+function W.dragStop(f)
+	f:StopMovingOrSizing()
+	W.snap(f)
+	local point, _, _, x, y = f:GetPoint(1)
+	if point then
+		return { point, x, y }
+	end
+	return nil
+end
+
 -------------------------------------------------------------------------------------------------------------- pools
 
 -- A pool is an array that only grows: take() by index, finish() hides the tail. Regions are never destroyed.
@@ -318,8 +447,10 @@ function W.paintButton(b)
 		paintEdges(b.edge, "line", 0.6)
 		setColor(b.label, "ash", 0.8)
 	end
-	b.label:SetPoint("LEFT", 8, b.down and -1 or 0)
-	b.label:SetPoint("RIGHT", -8, b.down and -1 or 0)
+	-- labelY lifts the label of a button that carries a second line under it (the Path page's stretch buttons)
+	local dy = (b.labelY or 0) + (b.down and -1 or 0)
+	b.label:SetPoint("LEFT", 8, dy)
+	b.label:SetPoint("RIGHT", -8, dy)
 end
 local paintButton = W.paintButton
 
@@ -951,168 +1082,270 @@ end
 
 -------------------------------------------------------------------------------------------------------------- scroll
 
--- A 4-px scroll thumb on a 1-px track at the right edge of `owner`. owner must give :Range() -> visible, total,
--- offset and :ScrollTo(offset). Dragging runs an OnUpdate only while the mouse button is down.
-local function scrollBar(owner)
-	local bar = frame("Button", nil, owner)
-	bar:SetWidth(8)
-	bar:SetPoint("TOPRIGHT", 0, 0)
-	bar:SetPoint("BOTTOMRIGHT", 0, 0)
-	bar.track = tex(bar, "BACKGROUND")
-	bar.track:SetWidth(1)
-	bar.track:SetPoint("TOP", 0, 0)
-	bar.track:SetPoint("BOTTOM", 0, 0)
-	fill(bar.track, "line")
-	bar.thumb = tex(bar, "ARTWORK")
-	bar.thumb:SetWidth(4)
-	fill(bar.thumb, "ash")
-	function bar:Sync()
-		local visible, total, offset = owner:Range()
-		if total <= visible + 0.5 then
-			self:Hide()
-			return false
-		end
-		local h = math.max(18, visible * visible / total)
-		local y = (visible - h) * offset / (total - visible)
-		self.thumb:ClearAllPoints()
-		self.thumb:SetPoint("TOP", 0, -y)
-		self.thumb:SetHeight(h)
-		self:Show()
-		return true
-	end
-	local function drag(self)
-		local visible, total = owner:Range()
-		local top = self:GetTop()
-		local scale = self:GetEffectiveScale()
-		local _, cy = GetCursorPosition()
-		if not (top and cy and scale and scale > 0) then
-			return
-		end
-		local frac = math.max(0, math.min(1, (top - cy / scale) / math.max(1, visible)))
-		owner:ScrollTo(frac * (total - visible))
-	end
-	bar:SetScript("OnMouseDown", function(self)
-		fill(self.thumb, "bone")
-		self:SetScript("OnUpdate", drag)
-	end)
-	bar:SetScript("OnMouseUp", function(self)
-		fill(self.thumb, "ash")
-		self:SetScript("OnUpdate", nil)
-	end)
-	bar:SetScript("OnHide", function(self)
-		self:SetScript("OnUpdate", nil)
-	end)
-	bar:Hide()
-	return bar
+-- No surface scrolls: nothing here makes a scroll bar, a slider that moves content, or a mouse-wheel handler, and
+-- nothing clips rows it cannot otherwise show. Content that is longer than its box is split into pages at item
+-- boundaries with a pager (Previous / Next and "1 to 8 of 21"); a page layout that has no pager and still does not
+-- fit is counted in W.overflow, which the tests hold at zero.
+W.overflow = { count = 0, last = nil }
+local PAGER_H = 26
+
+function W.noteOverflow(where, need, have)
+	W.overflow.count = W.overflow.count + 1
+	W.overflow.last = ("%s needs %d px, has %d"):format(tostring(where), math.ceil(need or 0), math.floor(have or 0))
 end
 
--- A clipped area with a content frame of any height; the wheel scrolls it by 40 px.
-function W.scroll(parent, w, h)
+-- "Previous  1 to 8 of 21  Next" at the bottom of `owner`. owner gives :Turn(delta).
+local function pager(owner, w)
+	local p = frame("Frame", nil, owner)
+	p:SetSize(w, PAGER_H - 2)
+	p:SetPoint("BOTTOMLEFT", 0, 0)
+	p.rule = tex(p, "BORDER")
+	p.rule:SetHeight(1)
+	p.rule:SetPoint("TOPLEFT")
+	p.rule:SetPoint("TOPRIGHT")
+	fill(p.rule, "line")
+	p.prev = W.button(p, 76, 20)
+	p.prev:SetPoint("BOTTOMLEFT", 0, 0)
+	p.next = W.button(p, 76, 20)
+	p.next:SetPoint("BOTTOMRIGHT", 0, 0)
+	p.label = text(p, "GameFontHighlightSmall", 11)
+	p.label:SetPoint("LEFT", p.prev, "RIGHT", 6, 0)
+	p.label:SetPoint("RIGHT", p.next, "LEFT", -6, 0)
+	p.label:SetJustifyH("CENTER")
+	p.prev.onClick = function()
+		owner:Turn(-1)
+	end
+	p.next.onClick = function()
+		owner:Turn(1)
+	end
+	function p:Set(page, pages, first, last, total, noun)
+		-- what the page shown holds, kept for the selftest and the tests (every item is on exactly one page)
+		self.first, self.last, self.total = first, last, total
+		self:SetShown(pages > 1)
+		if pages <= 1 then
+			return
+		end
+		set(self.label, ("%d to %d of %d%s"):format(first, last, total, noun and (" " .. noun) or ""), "ash")
+		W.setButton(self.prev, { id = "pagePrev", label = "Previous", enabled = page > 1 }, "quiet")
+		W.setButton(self.next, { id = "pageNext", label = "Next", enabled = page < pages }, "quiet")
+	end
+	p:Hide()
+	return p
+end
+
+-- An area of a fixed size for laid-out content. W.items pages into it; a page that draws its own layout calls
+-- :SetContentHeight(total), and a total over the box is an overflow (counted, never scrolled).
+function W.pages(parent, w, h, name)
 	local s = frame("Frame", nil, parent)
 	s:SetSize(w, h)
-	s:SetClipsChildren(true)
-	s.w, s.h, s.offset, s.total = w, h, 0, 0
+	s.w, s.h, s.page, s.pageCount, s.total, s.name = w, h, 1, 1, 0, name or "area"
 	s.content = frame("Frame", nil, s)
-	s.content:SetSize(w - 10, h)
+	s.content:SetSize(w, h)
 	s.content:SetPoint("TOPLEFT", 0, 0)
-	s.bar = scrollBar(s)
-	function s:Range()
-		return self.h, self.total, self.offset
-	end
-	function s:ScrollTo(offset)
-		self.offset = math.max(0, math.min(offset or 0, math.max(0, self.total - self.h)))
-		self.content:ClearAllPoints()
-		self.content:SetPoint("TOPLEFT", 0, self.offset)
-		self.bar:Sync()
+	s.pager = pager(s, w)
+	function s:Turn(delta)
+		local to = math.max(1, math.min(self.pageCount, self.page + delta))
+		if to ~= self.page then
+			self.page = to
+			if self.redraw then
+				self.redraw()
+			end
+		end
 	end
 	function s:SetContentHeight(total)
 		self.total = total or 0
-		self.content:SetHeight(math.max(1, self.total))
-		self:ScrollTo(self.offset)
+		if self.total > self.h + 0.5 then
+			W.noteOverflow(self.name, self.total, self.h)
+		end
 	end
-	s:EnableMouseWheel(true)
-	s:SetScript("OnMouseWheel", function(self, delta)
-		self:ScrollTo(self.offset - delta * 40)
-	end)
 	return s
 end
 
--- A virtualised list: only the rows in view exist. spec = { make(list) -> row frame, draw(row, item, index),
--- height(item) -> px (default spec.rowHeight) }. Rows are w - 10 wide so the thumb never covers them.
+-- A list of rows that always fits: rows are laid top down and, when they are more than the box holds, split into
+-- pages. spec = { make(list) -> row frame, draw(row, item, index), height(item) -> px (default spec.rowHeight),
+-- noun = "spots" }. :Reveal(i) turns to the page that holds item i.
 function W.list(parent, w, h, spec)
 	local l = frame("Frame", nil, parent)
 	l:SetSize(w, h)
-	l:SetClipsChildren(true)
-	l.w, l.h, l.offset, l.total, l.items, l.tops = w, h, 0, 0, {}, {}
+	l.w, l.h, l.page, l.pageCount, l.items, l.pageOf, l.firstOf = w, h, 1, 1, {}, {}, { 1 }
 	l.rows = W.pool(function()
 		local r = spec.make(l)
-		r:SetWidth(w - 10)
+		r:SetWidth(w)
 		return r
 	end)
-	l.bar = scrollBar(l)
-	function l:Range()
-		return self.h, self.total, self.offset
+	l.pager = pager(l, w)
+	local function heightOf(it)
+		return (spec.height and spec.height(it)) or spec.rowHeight or 22
+	end
+	-- pages for a box of `room` px; returns the page count. spec.keep(item) -> true keeps an item (a header) on
+	-- the page of the item after it.
+	local function paginate(self, room)
+		local page, y = 1, 0
+		self.pageOf, self.firstOf = {}, { 1 }
+		for i, it in ipairs(self.items) do
+			local ih = heightOf(it)
+			local nxt = self.items[i + 1]
+			local with = (spec.keep and nxt and spec.keep(it)) and heightOf(nxt) or 0
+			if y > 0 and y + ih + with > room then
+				page, y = page + 1, 0
+				self.firstOf[page] = i
+			end
+			self.pageOf[i] = page
+			y = y + ih
+			if ih > room then
+				W.noteOverflow("list row", ih, room)
+			end
+		end
+		return page
 	end
 	function l:Refresh()
 		W.start(self.rows)
-		local items, tops = self.items, self.tops
-		for i = 1, #items do
-			local top = tops[i]
-			local bottom = tops[i + 1]
-			if bottom > self.offset and top < self.offset + self.h then
+		local y, first, last = 0, nil, 0
+		for i, it in ipairs(self.items) do
+			if self.pageOf[i] == self.page then
 				local r = W.take(self.rows)
+				local ih = heightOf(it)
 				r:ClearAllPoints()
-				r:SetPoint("TOPLEFT", 0, self.offset - top)
-				r:SetHeight(bottom - top)
-				spec.draw(r, items[i], i)
+				r:SetPoint("TOPLEFT", 0, -y)
+				r:SetHeight(ih)
+				spec.draw(r, it, i)
 				r:Show()
-			elseif top >= self.offset + self.h then
-				break
+				y = y + ih
+				first, last = first or i, i
 			end
 		end
 		W.finish(self.rows)
-		self.bar:Sync()
+		self.pager:Set(self.page, self.pageCount, first or 0, last, #self.items, spec.noun)
 	end
-	function l:ScrollTo(offset)
-		self.offset = math.max(0, math.min(offset or 0, math.max(0, self.total - self.h)))
+	function l:Turn(delta)
+		local to = math.max(1, math.min(self.pageCount, self.page + delta))
+		if to ~= self.page then
+			self.page = to
+			self:Refresh()
+		end
+	end
+	function l:SetItems(items, keepPage)
+		self.items = items or {}
+		self.pageCount = paginate(self, self.h)
+		if self.pageCount > 1 then
+			self.pageCount = paginate(self, self.h - PAGER_H)
+		end
+		self.page = keepPage and math.max(1, math.min(self.page, self.pageCount)) or 1
 		self:Refresh()
 	end
-	function l:SetItems(items, keepOffset)
-		self.items = items or {}
-		local y = 0
-		self.tops = {}
-		for i, it in ipairs(self.items) do
-			self.tops[i] = y
-			y = y + ((spec.height and spec.height(it)) or spec.rowHeight or 22)
-		end
-		self.tops[#self.items + 1] = y
-		self.total = y
-		self:ScrollTo(keepOffset and self.offset or 0)
-	end
-	-- Brings item i into view (the selected step).
 	function l:Reveal(i)
-		local top, bottom = self.tops[i], self.tops[i + 1]
-		if not top then
-			return
-		end
-		if top < self.offset then
-			self:ScrollTo(top)
-		elseif bottom > self.offset + self.h then
-			self:ScrollTo(bottom - self.h)
+		local page = self.pageOf[i]
+		if page and page ~= self.page then
+			self.page = page
+			self:Refresh()
 		end
 	end
-	l:EnableMouseWheel(true)
-	l:SetScript("OnMouseWheel", function(self, delta)
-		self:ScrollTo(self.offset - delta * (spec.rowHeight or 40))
-	end)
+	-- A new box height (the room left under a card of varying height); call before SetItems.
+	function l:SetBox(box)
+		self.h = math.max(1, box)
+		self:SetHeight(self.h)
+	end
+	-- every item is on exactly one page (the no-scroll spec reads this)
+	function l:Unplaced()
+		local n = 0
+		for i = 1, #self.items do
+			if not self.pageOf[i] then
+				n = n + 1
+			end
+		end
+		return n
+	end
 	return l
+end
+
+-- Hand-laid content that still pages: a page adds its pieces top down (frames, font strings, anything with
+-- SetPoint and SetShown) and :Finish() splits them at piece boundaries over the pages of a W.pages area, with its
+-- pager. :Add(obj, h, dx, keep) -> entry (keep: stay with the piece after it, for a header); :Gap(h) is space that
+-- is dropped at the top of a page; :With(entry, obj) shows obj only with that entry (a button laid over a row).
+function W.flow(area)
+	local fl = { area = area, list = {}, gap = 0 }
+	function fl:Add(obj, h, dx, keep)
+		local e = { obj = obj, h = h, dx = dx or 0, keep = keep, gap = self.gap }
+		self.gap = 0
+		self.list[#self.list + 1] = e
+		return e
+	end
+	function fl:Gap(h)
+		self.gap = self.gap + (h or 8)
+	end
+	function fl:With(e, obj)
+		e.with = e.with or {}
+		e.with[#e.with + 1] = obj
+	end
+	local function pass(self, room)
+		local page, y = 1, 0
+		for i, e in ipairs(self.list) do
+			local nxt = self.list[i + 1]
+			local need = e.h + ((e.keep and nxt) and (nxt.gap + nxt.h) or 0)
+			if y > 0 and y + e.gap + need > room then
+				page, y = page + 1, 0
+			end
+			if y > 0 then
+				y = y + e.gap
+			end
+			if e.h > room then
+				W.noteOverflow(area.name, e.h, room)
+			end
+			e.page, e.y = page, y
+			y = y + e.h
+		end
+		return page
+	end
+	function fl:Finish(noun)
+		local count = pass(self, area.h)
+		if count > 1 then
+			count = pass(self, area.h - PAGER_H)
+		end
+		area.pageCount = count
+		area.page = math.max(1, math.min(area.page or 1, count))
+		local first, last = nil, 0
+		for i, e in ipairs(self.list) do
+			local on = e.page == area.page
+			e.obj:ClearAllPoints()
+			e.obj:SetPoint("TOPLEFT", area.content, "TOPLEFT", e.dx, -e.y)
+			e.obj:SetShown(on)
+			for _, o in ipairs(e.with or {}) do
+				o:SetShown(on)
+			end
+			if on then
+				first, last = first or i, i
+			end
+		end
+		area.pager:Set(area.page, count, first or 0, last, #self.list, noun or "lines")
+		return count
+	end
+	return fl
+end
+
+-- The window's close button: a quiet 22-px button with an X drawn from two 2-px lines turned 45 degrees (never a
+-- glyph, which the font may lack).
+function W.closeButton(parent)
+	local b = W.button(parent, 22, 22)
+	b.label:Hide()
+	b.cross = {}
+	for i = 1, 2 do
+		local t = tex(b, "OVERLAY")
+		t:SetSize(12, 2)
+		t:SetPoint("CENTER", 0, 0)
+		t:SetTexture(WHITE)
+		t:SetRotation(i == 1 and math.pi / 4 or -math.pi / 4)
+		t:SetVertexColor(rgb("ash"))
+		b.cross[i] = t
+	end
+	b.tip = "Close (Escape)"
+	return b
 end
 
 ---------------------------------------------------------------------------------------------------------- item lists
 
 -- Draws View list items ({ kind = "head"|"line"|"row"|"button"|"gap"|"check", ... }: V.shoppingItems,
--- V.altsItems, V.moreItems) on a W.scroll at the given width. Returns the height. Numbers sit right-aligned in one
--- column; a row with an action carries its button at the far right.
+-- V.altsItems, V.moreItems) on a W.pages area at the given width, paged at item boundaries. Returns the area's
+-- height. Numbers sit right-aligned in one column; a row with an action carries its button at the far right.
 function W.items(scroll, items, width)
 	local c = scroll.content
 	if not scroll.pools then
@@ -1170,78 +1403,110 @@ function W.items(scroll, items, width)
 		}
 	end
 	local p = scroll.pools
-	for _, pool in pairs(p) do
-		W.start(pool)
+	scroll.redraw = function()
+		W.items(scroll, items, width)
 	end
-	local y = 0
-	for _, it in ipairs(items or {}) do
-		if it.kind == "gap" then
-			y = y + (it.h or 8)
-		elseif it.kind == "head" and it.action then
-			local b = W.take(p.heads)
-			b:ClearAllPoints()
-			b:SetPoint("TOPLEFT", 0, -y)
-			b:SetWidth(width)
-			b.action = it.action
-			set(b.label, it.text, it.color or "gold")
-			b.arrow:SetRotation(it.collapsed and 0 or -math.pi / 2)
-			b.arrow:SetVertexColor(rgb(it.color or "gold"))
-			b:Show()
-			y = y + 26
-		elseif it.kind == "head" or it.kind == "line" then
-			local fs = W.take(p.fs)
-			fs:SetFontObject(it.kind == "head" and "GameFontNormalSmall" or "GameFontHighlightSmall")
-			fs:SetFontHeight(it.size or 11)
-			fs:SetWidth(width - (it.indent or 0))
-			fs:ClearAllPoints()
-			fs:SetPoint("TOPLEFT", it.indent or 0, -y)
-			set(fs, it.text, it.color or (it.kind == "head" and "gold" or "ash"))
-			fs:Show()
-			y = y + math.max(it.size or 11, fs:GetStringHeight() or 0) + 5
-		elseif it.kind == "row" then
-			local r = W.take(p.rows)
-			r:ClearAllPoints()
-			r:SetPoint("TOPLEFT", 0, -y)
-			r:SetWidth(width)
-			r.tip = it.tip
-			fill(r.mark, it.mark or it.tone or "ash")
-			r.right:ClearAllPoints()
-			if it.action then
-				W.setButton(r.use, it.action, it.action.id == "mailQueue" and "primary" or "quiet", it.tone or "gold")
-				r.use:SetWidth(math.max(64, (r.use.label:GetStringWidth() or 0) + 18))
-				r.right:SetPoint("RIGHT", r.use, "LEFT", -8, 0)
-			else
-				r.use:Hide()
-				r.right:SetPoint("RIGHT", -4, 0)
-			end
-			set(r.name, it.name, it.color or (it.tone == "green" and "ash") or "bone")
-			set(r.right, it.right, it.tone or "bone")
-			-- a covered row is green and struck through: the line is the second signal
-			r.strike:SetShown(it.tone == "green" or it.covered == true)
-			fill(r.strike, "green", 0.7)
-			r:Show()
-			y = y + 22
-		elseif it.kind == "check" then
-			local ck = W.take(p.checks)
-			ck:ClearAllPoints()
-			ck:SetPoint("TOPLEFT", 0, -y)
-			ck:Set(it.text, it.on, it.action, it.tip)
-			y = y + 24
-		elseif it.kind == "button" and it.action then
-			local b = W.take(p.buttons)
-			y = y + 4
-			b:ClearAllPoints()
-			b:SetPoint("TOPLEFT", 0, -y)
-			b:SetSize(math.min(width, 280), 22)
-			W.setButton(b, it.action, it.quiet and "quiet" or nil, it.accent or "gold")
-			y = y + 28
+	-- One pass lays every item out and hides those that are not on the page shown. `room` is the box, less the
+	-- pager when a first pass found more than one page.
+	local function pass(room)
+		for _, pool in pairs(p) do
+			W.start(pool)
 		end
+		local y, page, shown, first, last, n = 0, 1, scroll.page, nil, 0, 0
+		-- puts obj (ih px high, x px in) at the cursor, on the next page when it does not fit; a head keeps the row
+		-- that follows it
+		local function put(obj, ih, x, isHead)
+			n = n + 1
+			if y > 0 and y + ih + (isHead and 24 or 0) > room then
+				page, y = page + 1, 0
+			end
+			if ih > room then
+				W.noteOverflow(scroll.name or "items", ih, room)
+			end
+			obj:ClearAllPoints()
+			obj:SetPoint("TOPLEFT", x or 0, -y)
+			obj:SetShown(page == shown)
+			if page == shown then
+				first, last = first or n, n
+			end
+			y = y + ih
+		end
+		for _, it in ipairs(items or {}) do
+			if it.kind == "gap" then
+				-- space between blocks, never at the top of a page
+				if y > 0 then
+					y = y + (it.h or 8)
+				end
+			elseif it.kind == "head" and it.action then
+				local b = W.take(p.heads)
+				b:SetWidth(width)
+				b.action = it.action
+				set(b.label, it.text, it.color or "gold")
+				b.arrow:SetRotation(it.collapsed and 0 or -math.pi / 2)
+				b.arrow:SetVertexColor(rgb(it.color or "gold"))
+				put(b, 26, 0, true)
+			elseif it.kind == "head" or it.kind == "line" then
+				local fs = W.take(p.fs)
+				fs:SetFontObject(it.kind == "head" and "GameFontNormalSmall" or "GameFontHighlightSmall")
+				fs:SetFontHeight(it.size or 11)
+				fs:SetWidth(width - (it.indent or 0))
+				set(fs, it.text, it.color or (it.kind == "head" and "gold" or "ash"))
+				put(fs, math.max(it.size or 11, fs:GetStringHeight() or 0) + 5, it.indent or 0, it.kind == "head")
+			elseif it.kind == "row" then
+				local r = W.take(p.rows)
+				r:SetWidth(width)
+				r.tip = it.tip
+				fill(r.mark, it.mark or it.tone or "ash")
+				r.right:ClearAllPoints()
+				if it.action then
+					W.setButton(
+						r.use,
+						it.action,
+						it.action.id == "mailQueue" and "primary" or "quiet",
+						it.tone or "gold"
+					)
+					r.use:SetWidth(math.max(64, (r.use.label:GetStringWidth() or 0) + 18))
+					r.right:SetPoint("RIGHT", r.use, "LEFT", -8, 0)
+				else
+					r.use:Hide()
+					r.right:SetPoint("RIGHT", -4, 0)
+				end
+				set(r.name, it.name, it.color or (it.tone == "green" and "ash") or "bone")
+				set(r.right, it.right, it.tone or "bone")
+				-- a covered row is green and struck through: the line is the second signal
+				r.strike:SetShown(it.tone == "green" or it.covered == true)
+				fill(r.strike, "green", 0.7)
+				put(r, 22, 0)
+			elseif it.kind == "check" then
+				local ck = W.take(p.checks)
+				ck:Set(it.text, it.on, it.action, it.tip)
+				put(ck, 24, 0)
+			elseif it.kind == "button" and it.action then
+				local b = W.take(p.buttons)
+				b:SetSize(math.min(width, 280), 22)
+				W.setButton(b, it.action, it.quiet and "quiet" or nil, it.accent or "gold")
+				if y > 0 then
+					y = y + 4
+				end
+				put(b, 28, 0)
+			end
+		end
+		for _, pool in pairs(p) do
+			W.finish(pool)
+		end
+		return page, first or 0, last, n
 	end
-	for _, pool in pairs(p) do
-		W.finish(pool)
+	local count, first, last, n = pass(scroll.h)
+	if count > 1 then
+		count = pass(scroll.h - PAGER_H)
+		scroll.page = math.max(1, math.min(scroll.page, count))
+		count, first, last, n = pass(scroll.h - PAGER_H)
+	else
+		scroll.page = 1
 	end
-	scroll:SetContentHeight(y + 4)
-	return y + 4
+	scroll.pageCount = count
+	scroll.pager:Set(scroll.page, count, first, last, n, "lines")
+	return scroll.h
 end
 
 ----------------------------------------------------------------------------------------------------------- controls
@@ -1526,7 +1791,11 @@ function W.header(parent, w)
 	fs.line:SetPoint("TOPLEFT", fs, "BOTTOMLEFT", 0, -3)
 	fs.line:SetWidth(w)
 	fill(fs.line, "line")
-	local hide, show = fs.Hide, fs.Show
+	local hide, show, setShown = fs.Hide, fs.Show, fs.SetShown
+	function fs:SetShown(on)
+		setShown(self, on)
+		self.line:SetShown(on and true or false)
+	end
 	function fs:Hide()
 		hide(self)
 		self.line:Hide()

@@ -1504,6 +1504,42 @@ describe("Where", function()
 			}, out)
 		end)
 
+		it("words the two lines of each card: the cost to the top and the state of the path", function()
+			local by = byName(W.overview(ctx()))
+			local function card(r)
+				return { r.costText, r.costTone, r.coverText, r.coverTone }
+			end
+			-- priced, with one price TSM lacks: the cost stands and is marked
+			assert.same({ "To 300: 25g 0s 0c + unpriced", "warn", "Path complete", "green" }, card(by.Leatherworking))
+			assert.same({ "1 gap: 225 to 240", "warn" }, { by.Cooking.coverText, by.Cooking.coverTone })
+			-- no plan: the reason takes the cost's place, in sentence case
+			assert.same({ "No recipes priced from 1 to 300", "ash", "No plan yet", "ash" }, card(by.Alchemy))
+			-- a gathering skill costs its training only; its holes are counted with the first one named
+			assert.same({ "To 300: 5s 0c for training", "bone", "2 gaps, first 165 to 225", "warn" }, card(by.Mining))
+			-- a skill the class cannot have: no cost, the reason once
+			assert.same({ "", "ash", "Rogues only", "ash" }, card(by.Lockpicking))
+			local c = ctx()
+			c.skills[165] = { rank = 300, cap = 300, learned = true }
+			assert.same(
+				{ "At 300: nothing left to level", "ash", "Path complete", "green" },
+				card(byName(W.overview(c)).Leatherworking)
+			)
+			-- the plan's own unpriced items are named for the tooltip
+			c = ctx()
+			local cost = c.costFn
+			c.costFn = function(line, ...)
+				local r, why = cost(line, ...)
+				if type(r) == "table" and line == 165 then
+					r.unpriced =
+						{ count = 2, items = { { item = 7, name = "Odd Hide", count = 3 }, { item = 8, count = 1 } } }
+				end
+				return r, why
+			end
+			local lw = byName(W.overview(c)).Leatherworking
+			assert.same({ "Odd Hide", "Item8" }, lw.unpriced)
+			assert.equal("To 300: 25g 0s 0c + unpriced", lw.costText)
+		end)
+
 		it("calls a skill at 300 done", function()
 			local c = ctx()
 			c.skills[165] = { rank = 300, cap = 300, learned = true }
@@ -1537,26 +1573,44 @@ describe("Where", function()
 			local path = W2.path({ profession = "Cooking", skill = 173, plan = p, ranks = RANKS, money = L.money })
 			assert.same({ at = 150, label = "Journeyman 150" }, path.caps[2])
 			assert.same({ 50, 125 }, path.gates)
-			assert.same({ step = 0, from = 1, to = 173, name = "Done", done = true }, path.segments[1])
-			assert.same({ "fold", "Done: 1 to 173" }, { path.rows[1].kind, path.rows[1].title })
-			assert.equal(#p.steps + 1, #path.rows)
+			assert.same({ from = 1, to = 173, name = "Done", done = true }, path.segments[1])
+			-- one row per line of W.lines, numbered without a hole; no "done" fold row
+			local lines = W2.lines(p.steps)
+			assert.equal(#lines, #path.rows)
+			assert.equal(#lines, #path.lines)
 			local crafts, unlocks = 0, 0
-			for i, st in ipairs(p.steps) do
-				local row = path.rows[i + 1]
-				if st.kind == "craft" then
-					crafts = crafts + 1
+			for _, st in ipairs(p.steps) do
+				crafts = crafts + (st.kind == "craft" and 1 or 0)
+				unlocks = unlocks + ((st.kind ~= "craft" and st.kind ~= "gap") and 1 or 0)
+			end
+			for i, row in ipairs(path.rows) do
+				local line, st = lines[i], p.steps[lines[i].step]
+				assert.same({ i, line.step, line.title }, { row.n, row.step, row.title })
+				assert.same({ "selectStep", line.step }, { row.action.id, row.action.step })
+				if line.kind == "craft" then
 					assert.equal("step", row.kind)
-					assert.equal(("Craft %d %s"):format(st.crafts, st.name), row.title)
 					assert.equal(st.color, row.rangeTone)
-					assert.is_true(row.ways >= 1)
-				elseif st.kind ~= "gap" then
-					unlocks = unlocks + 1
-					assert.equal("unlock", row.kind)
-					assert.matches("^at %d+$", row.range)
+					assert.equal(("%d to %d"):format(line.from, line.to), row.range)
+					assert.is_true(#row.sub <= W2.PATH_SUB + 12, row.sub)
+					assert.is_nil(row.sub:find("...", 1, true))
 				end
+				assert.is_nil(row.ways) -- no "N ways" on a row: the alternatives are in the detail
 			end
 			assert.is_true(crafts >= 1)
 			assert.equal(unlocks, #path.markers)
+			-- every row is in exactly one stretch, no stretch is longer than the page holds, one is shown
+			local count = 0
+			for _, s in ipairs(path.stretches) do
+				assert.is_true(#s.rows >= 1 and #s.rows <= W2.PATH_MAX)
+				assert.same({ "selectStretch", s.index }, { s.action.id, s.action.index })
+				count = count + #s.rows
+			end
+			assert.equal(#path.rows, count)
+			assert.is_true(path.stretches[path.stretch].selected)
+			assert.same({ path.stretches[path.stretch].from, path.stretches[path.stretch].to }, {
+				path.shade.from,
+				path.shade.to,
+			})
 			assert.equal(crafts + 1, #path.segments)
 			for _, seg in ipairs(path.segments) do
 				if not seg.done then
@@ -1565,7 +1619,12 @@ describe("Where", function()
 					assert.equal(seg.to, seg.bands[#seg.bands].to)
 				end
 			end
-			assert.equal(1, path.selected)
+			-- the default selection: the first line that is not done
+			local first
+			for _, row in ipairs(path.rows) do
+				first = first or (not row.done and row or nil)
+			end
+			assert.same({ first.step, true, first.title }, { path.selected, first.selected, path.crumb })
 			assert.is_truthy(path.detail.title)
 		end)
 
@@ -1632,74 +1691,264 @@ describe("Where", function()
 					return { kind = "errand", key = "e:" .. st.spell }
 				end,
 			})
+			-- three lines: the recipe is folded into its craft, the rank training hangs on it, the lone trainer
+			-- recipe and the hole stay lines of their own
 			local r = path.rows
-			assert.same(
-				{ "unlock", "Train Expert", "raises the cap to 225", "at 150", "gold", "50s 0c" },
-				{ r[2].kind, r[2].title, r[2].sub, r[2].range, r[2].rangeTone, r[2].cost }
-			)
-			assert.same(
-				{ "Buy Recipe: Rockscale Cod", "on the auction house", "at 175", "28s 11c" },
-				{ r[3].title, r[3].sub, r[3].range, r[3].cost }
-			)
+			assert.equal(3, #r)
 			assert.same({
-				"step",
-				"Craft 14 Rockscale Cod",
-				"usually 10. buy 14 Raw Rockscale Cod",
-				"175-195",
-				"orange",
-				"2s 10c",
+				1,
 				3,
-			}, { r[4].kind, r[4].title, r[4].sub, r[4].range, r[4].rangeTone, r[4].cost, r[4].ways })
+				"step",
+				"Buy the recipe and craft 14 Rockscale Cod",
+				"Usually 10 crafts. Buy 14 Raw Rockscale Cod",
+				"175 to 195",
+				"orange",
+				"30s 21c",
+				true,
+			}, {
+				r[1].n,
+				r[1].step,
+				r[1].kind,
+				r[1].title,
+				r[1].sub,
+				r[1].range,
+				r[1].rangeTone,
+				r[1].cost,
+				r[1].selected,
+			})
+			assert.is_nil(r[1].costNote)
 			assert.same(
-				{ "Learn Goldthorn Tea", "not checked at a trainer yet", "at 195" },
-				{ r[5].title, r[5].sub, r[5].range }
+				{ "unlock", 4, "Learn Goldthorn Tea", "Not checked at a trainer yet.", "at 195", "9s 0c" },
+				{ r[2].kind, r[2].step, r[2].title, r[2].sub, r[2].range, r[2].cost }
 			)
 			assert.same(
-				{ "gap", "Nothing priced from 195 to 215", "warn", "fillGap", false },
-				{ r[6].kind, r[6].title, r[6].rangeTone, r[6].action.id, r[6].action.enabled }
+				{ "gap", "No recipe from 195 to 215", "No known or buyable recipe gives skill here.", "warn" },
+				{ r[3].kind, r[3].title, r[3].sub, r[3].rangeTone }
 			)
-			local kinds = {}
+			-- the stretch: Expert's range, with the training that the plan asks for inside it
+			assert.equal(1, #path.stretches)
+			local s = path.stretches[1]
+			assert.same({ "175 to 215", "Expert, 175 to 215", "you are here", true }, {
+				s.label,
+				s.head.title,
+				s.state,
+				s.selected,
+			})
+			assert.same({ "Train Expert at 150, 50s 0c: needed to pass 150" }, s.head.lines)
+			assert.same({ 3, "Buy the recipe and craft 14 Rockscale Cod" }, { path.selected, path.crumb })
+			local kinds, selects = {}, {}
 			for i, m in ipairs(path.markers) do
 				kinds[i] = m.kind .. "@" .. m.at
+				selects[i] = m.step
 			end
 			assert.same({ "train@150", "ah@175", "bop@175", "train@195" }, kinds)
+			-- a marker selects the line it belongs to
+			assert.same({ 3, 3, 3, 4 }, selects)
 			assert.same({ reason = "no known or buyable recipe gives skill here" }, path.segments[3].gap)
 			assert.same(
 				{ { from = 175, to = 190, color = "orange" }, { from = 190, to = 195, color = "yellow" } },
 				path.segments[2].bands
 			)
 			local d = path.detail
-			assert.same(
-				{ "Rockscale Cod", "orange", "Craft 14, usually 10. Bought for a bad-luck run." },
-				{ d.title, d.color, d.lines[1].text }
-			)
-			assert.same({ skill = 190, known = false, text = "Learn it first", confidence = "confirmed" }, d.learn)
-			assert.same(
-				{ name = "Spring Water", need = 2, have = 5, source = "your bags", tone = "green" },
-				d.reagents[1]
-			)
+			assert.same({ "Rockscale Cod", "orange", 1 }, { d.title, d.color, d.n })
+			assert.same({
+				{ text = "Craft up to 14. Usually 10 are enough.", tone = "bone" },
+				{ text = "Skill 175 to 195, orange at the start.", tone = "orange" },
+			}, d.dothis)
+			assert.same({ text = "Buy the recipe on the auction house, 28s 11c.", tone = "bone" }, d.recipe)
+			assert.is_nil(d.note)
+			assert.same({
+				name = "Spring Water",
+				need = 2,
+				have = 5,
+				source = "your bags",
+				right = "from your bags",
+				tone = "green",
+			}, d.materials[1])
 			assert.same({
 				name = "Raw Rockscale Cod",
 				need = 14,
 				have = 0,
-				source = "auction house",
+				source = "auction",
 				price = "15c",
+				right = "auction, 15c each",
 				tone = "bone",
-			}, d.reagents[2])
-			assert.equal("Ways from 175 to 195", d.ways.title)
+			}, d.materials[2])
+			assert.equal("Other ways from 175 to 195", d.ways.title)
+			assert.same({ label = "Rockscale Cod", right = "the plan's pick", picked = true }, d.ways.rows[1])
 			assert.same(
 				{ "Hot Lion Chops", "+4s 20c", false, "swap" },
 				{ d.ways.rows[2].label, d.ways.rows[2].right, d.ways.rows[2].picked, d.ways.rows[2].action.id }
 			)
-			assert.equal("saves 3s 0c", d.ways.rows[3].right)
+			-- "shortcut" is said only of an alternative that is not in the plan
+			assert.same(
+				{ "Secret Stew", "shortcut, saves 3s 0c", "allow" },
+				{ d.ways.rows[3].label, d.ways.rows[3].right, d.ways.rows[3].action.id }
+			)
+			assert.same({ "Secret Stew", "its recipe binds when picked up" }, d.ways.rows[3].tip)
+			for _, row in ipairs(r) do
+				assert.is_nil((row.title .. row.sub):lower():find("shortcut", 1, true))
+			end
 			assert.equal("e:7828", d.where.key)
 			assert.same({ "Open in Where", true }, { d.actions[1].label, d.actions[1].enabled })
+		end)
+
+		it("selects by any step of a line, shows the stretch a button chose, and words the other kinds", function()
+			local steps = {
+				{ kind = "train", spell = 1, name = "Spice Bread", at = 1, cost = 10 },
+				{
+					kind = "craft",
+					spell = 1,
+					name = "Spice Bread",
+					crafts = 40,
+					expected = 40,
+					from = 1,
+					to = 40,
+					color = "orange",
+					buy = {
+						{ item = 1, count = 40, where = "vendor", each = 10 },
+						{ item = 2, count = 40, where = "ah", unpriced = true },
+						{ item = 3, count = 5, where = "ah", each = 3 },
+						{ item = 4, count = 5, where = "ah", each = 3 },
+						{ item = 5, count = 5, where = "ah", each = 3 },
+					},
+					unpriced = { { item = 2, name = "Mild Spices", count = 40 } },
+				},
+				{ kind = "trainRank", name = "Journeyman", cap = 150, at = 50, cost = 500, level = 10, have = 8 },
+				{
+					kind = "craft",
+					spell = 2,
+					name = "Smoked Bear Meat",
+					crafts = 50,
+					from = 40,
+					to = 80,
+					color = "yellow",
+				},
+				{
+					kind = "gap",
+					from = 80,
+					to = 100,
+					reason = "norecipe",
+					why = "no recipe in the data gives skill here",
+				},
+			}
+			local names = { "Simple Flour", "Mild Spices", "Refreshing Spring Water", "Holiday Spices", "Small Egg" }
+			local function build(extra)
+				local ctx = {
+					profession = "Cooking",
+					skill = 20,
+					plan = { steps = steps },
+					ranks = RANKS,
+					money = ns.Logic.money,
+					nameOf = function(item)
+						return names[item]
+					end,
+					have = function()
+						error("the bag scan failed")
+					end,
+				}
+				for k, v in pairs(extra or {}) do
+					ctx[k] = v
+				end
+				return W.path(ctx)
+			end
+			-- the docked panel's step 1 (the training) selects the line it is folded into
+			local path = build({ selected = 1 })
+			assert.same({ 2, "Learn and craft 40 Spice Bread" }, { path.selected, path.rows[1].title })
+			-- line 2: the materials are fitted to the row with "and N more", the whole list is in the tooltip
+			local row = path.rows[1]
+			assert.equal("Buy 40 Simple Flour, 40 Mild Spices and 3 more", row.sub)
+			assert.is_true(#row.sub <= W.PATH_SUB)
+			assert.matches("5 Holiday Spices, 5 Small Egg$", row.subFull)
+			assert.equal(row.subFull, row.tip[2])
+			-- an unpriced item is never a hole: the cost stands, marked, and the names are said
+			assert.same({ "4s 55c", "+ unpriced" }, { row.cost, row.costNote })
+			assert.same({ "Price unknown for 1 item: Mild Spices. Not in the cost.", "warn" }, row.tip[3])
+			assert.equal("Price unknown for 1 item: Mild Spices. Not in the cost.", path.detail.note)
+			assert.same({ text = "From the trainer at 1, 10c.", tone = "bone" }, path.detail.recipe)
+			-- a failing bag scan does not break the page: nothing is held
+			assert.same({ 0, "vendor, 10c each", "bone" }, {
+				path.detail.materials[1].have,
+				path.detail.materials[1].right,
+				path.detail.materials[1].tone,
+			})
+			assert.same({ "auction, price unknown", "warn" }, {
+				path.detail.materials[2].right,
+				path.detail.materials[2].tone,
+			})
+			-- two stretches (cut at 75); the rank training with the level only because it is too low
+			assert.same({ "1 to 80", "80 to 100" }, { path.stretches[1].label, path.stretches[2].label })
+			assert.same(
+				{ "Train Journeyman at 50, 5s 0c, needs level 10, you are 8: needed to pass 75" },
+				path.stretches[1].head.lines
+			)
+			assert.same({ 1, 1, 80 }, { path.stretch, path.shade.from, path.shade.to })
+			-- a stretch button: the list shows that stretch, the selection and its detail stay
+			local other = build({ selected = 1, stretch = 2 })
+			assert.same({ 2, 2, true, false }, {
+				other.stretch,
+				other.selected,
+				other.stretches[2].selected,
+				other.stretches[1].selected,
+			})
+			assert.equal("Spice Bread", other.detail.title)
+			-- a stretch that does not exist falls back to the selected line's
+			assert.equal(1, build({ selected = 1, stretch = 9 }).stretch)
+			-- the hole: a line with its reason, no cost, and a detail that says so
+			local hole = build({ selected = 5 })
+			assert.same(
+				{ "gap", "No recipe from 80 to 100", "No recipe in the data gives skill here.", "warn" },
+				{ hole.rows[3].kind, hole.rows[3].title, hole.rows[3].sub, hole.rows[3].rangeTone }
+			)
+			assert.same(
+				{ "No recipe from 80 to 100", "warn", 2 },
+				{ hole.detail.title, hole.detail.color, hole.stretch }
+			)
+			assert.is_nil(hole.detail.ways)
+			-- a line without a recipe step is known
+			local known = build({ selected = 4 })
+			assert.same(
+				{ text = "Known, or learned earlier on this path.", tone = "green", known = true },
+				known.detail.recipe
+			)
+			assert.equal("From your bags.", known.rows[2].sub)
+			-- done lines: at 80 the first two are behind, the selection moves to the first that is not
+			local later = build({ skill = 80 })
+			assert.same({ true, true, false, 5 }, {
+				later.rows[1].done,
+				later.rows[2].done,
+				later.rows[3].done,
+				later.selected,
+			})
+			assert.same({ true, "done" }, { later.stretches[1].done, later.stretches[1].state })
+		end)
+
+		it("pathSelect serves any rows with from and to (the world skills' path)", function()
+			local rows = {}
+			for i = 1, 20 do
+				rows[i] =
+					{ n = i, step = i, title = "Leg " .. i, from = (i - 1) * 15, to = i * 15, done = i * 15 <= 100 }
+			end
+			local p = W.pathSelect({ rows = rows, skill = 100 }, {})
+			-- no ranks given: the default caps cut it (75, 150, 225, 300), five legs each
+			assert.same({ 4, 5, 5 }, { #p.stretches, #p.stretches[1].rows, #p.stretches[4].rows })
+			assert.same({ "Apprentice, 0 to 75", "Skill 300 to 300" }, {
+				p.stretches[1].head.title,
+				W.pathSelect({ rows = { { n = 1, step = 1, from = 300, to = 300 } }, skill = 1 }, {}).stretches[1].head.title,
+			})
+			assert.same({ 7, "Leg 7", 2 }, { p.selected, p.crumb, p.stretch })
+			assert.same({ id = "selectStretch", index = 2, enabled = true }, p.stretches[2].action)
+			assert.same(
+				{ 0, 0 },
+				{ #W.pathSelect({ rows = {} }, {}).stretches, W.pathSelect({ rows = {} }, {}).stretch }
+			)
 		end)
 
 		it("says why there is no plan", function()
 			local path = W.path({ profession = "Cooking", skill = 1 })
 			assert.matches("No plan yet", path.empty, 1, true)
-			assert.same({ 0, 0 }, { #path.rows, path.selected })
+			assert.same({ 0, 0, 0 }, { #path.rows, #path.stretches, path.stretch })
+			assert.is_nil(path.selected)
 			assert.is_nil(path.detail)
 		end)
 	end)
@@ -1720,7 +1969,21 @@ describe("Where", function()
 				},
 			})
 			assert.same({ "where", true }, { j.page, j.showProfession })
-			assert.same({ id = "shopping", label = "Shopping", count = 3, tone = "ash", pip = false }, j.tabs[4])
+			-- a count comes with its noun (the tab's tooltip); Overview never carries one; no noun, no count
+			assert.same({
+				id = "shopping",
+				label = "Shopping",
+				count = 3,
+				tip = "3 things to buy",
+				tone = "ash",
+				pip = false,
+			}, j.tabs[4])
+			local counted =
+				W.journal({ counts = { overview = 4, shopping = 1, where = 2 }, tips = { where = "2 spots" } })
+			assert.same({ nil, nil }, { counted.tabs[1].count, counted.tabs[1].tip })
+			assert.same({ 1, "1 thing to buy" }, { counted.tabs[4].count, counted.tabs[4].tip })
+			assert.same({ 2, "2 spots" }, { counted.tabs[3].count, counted.tabs[3].tip })
+			assert.is_nil(W.journal({ counts = { path = 5 } }).tabs[2].count)
 			assert.same({ "bone", true }, { j.tabs[3].tone, j.tabs[6].pip })
 			assert.same(
 				{ { key = 2, name = "C", learned = true }, { key = 1, name = "B", learned = false } },
@@ -1885,5 +2148,313 @@ describe("Where over the shipped Data/Spots.lua", function()
 			end
 			print(("OVERVIEW %s: %s. %s"):format(r.name, r.statusText, tostring(r.line)))
 		end
+	end)
+end)
+
+describe("Where: plan lines and stretches", function()
+	local W
+	before_each(function()
+		W = load().Where
+	end)
+
+	local function craft(over)
+		local st = {
+			kind = "craft",
+			spell = 2,
+			name = "Copper Dagger",
+			crafts = 43,
+			expected = 30.2,
+			from = 30,
+			to = 65,
+			color = "orange",
+			buy = { { item = 1, count = 10, each = 5 } },
+			cash = { out = 50 },
+			others = {},
+			shortcuts = {},
+			unpriced = {},
+		}
+		for k, v in pairs(over or {}) do
+			st[k] = v
+		end
+		return st
+	end
+	local function train(over)
+		local st = { kind = "train", spell = 2, name = "Copper Dagger", at = 30, cost = 100 }
+		for k, v in pairs(over or {}) do
+			st[k] = v
+		end
+		return st
+	end
+	local function recipe(over)
+		local st = {
+			kind = "buyRecipe",
+			spell = 2,
+			name = "Copper Dagger",
+			learn = 30,
+			price = 500,
+			where = "vendor",
+			owned = false,
+		}
+		for k, v in pairs(over or {}) do
+			st[k] = v
+		end
+		return st
+	end
+
+	describe("fitList", function()
+		it("joins everything with commas when it fits", function()
+			assert.equal("A, B, C", W.fitList({ "A", "B", "C" }, 100))
+		end)
+
+		it("says 'and N more' instead of an ellipsis on overflow", function()
+			local s = W.fitList({ "Alpha", "Bravo", "Charlie", "Delta" }, 25)
+			assert.equal("Alpha, Bravo and 2 more", s)
+			assert.is_nil(s:find("...", 1, true))
+			assert.is_nil(s:find("\226\128\166", 1, true))
+		end)
+
+		it("always shows the first part, even over budget", function()
+			assert.equal("A very long first part and 1 more", W.fitList({ "A very long first part", "B" }, 3))
+		end)
+
+		it("returns a single part as is", function()
+			assert.equal("Only", W.fitList({ "Only" }, 1))
+		end)
+
+		it("returns an empty string for an empty list", function()
+			assert.equal("", W.fitList({}, 50))
+		end)
+	end)
+
+	describe("lines", function()
+		it("folds a train and its craft into one 'Learn and craft' line", function()
+			local ls = W.lines({ train(), craft() })
+			assert.equal(1, #ls)
+			local l = ls[1]
+			assert.equal("craft", l.kind)
+			assert.equal("Learn and craft 43 Copper Dagger", l.title)
+			assert.equal("train", l.learn.kind)
+			assert.equal(100, l.learn.cost)
+			assert.same({ 1, 2 }, l.steps)
+			assert.equal(2, l.step)
+			assert.equal(1, l.n)
+		end)
+
+		it("titles a bought recipe 'Buy the recipe and craft'", function()
+			local ls = W.lines({ recipe(), craft() })
+			assert.equal("Buy the recipe and craft 43 Copper Dagger", ls[1].title)
+			assert.equal("buyRecipe", ls[1].learn.kind)
+			assert.equal(550, ls[1].cost)
+		end)
+
+		it("titles an owned recipe 'Learn the recipe and craft'", function()
+			local ls = W.lines({ recipe({ owned = true, price = false }), craft() })
+			assert.equal("Learn the recipe and craft 43 Copper Dagger", ls[1].title)
+			assert.same({}, ls[1].unpriced)
+		end)
+
+		it("lists an unpriced, unowned recipe as 'the recipe'", function()
+			local ls = W.lines({ recipe({ price = false }), craft() })
+			assert.same({ "the recipe" }, ls[1].unpriced)
+		end)
+
+		it("does not fold a train of another spell into the craft", function()
+			local ls = W.lines({ train({ spell = 7, name = "Other" }), craft() })
+			assert.equal(2, #ls)
+			assert.equal("unlock", ls[1].kind)
+			assert.equal("Learn Other", ls[1].title)
+			assert.equal(1, ls[1].step)
+			assert.equal("craft", ls[2].kind)
+			assert.equal("Craft 43 Copper Dagger", ls[2].title)
+			assert.is_nil(ls[2].learn)
+		end)
+
+		it("keeps a train whose craft never comes as an unlock line", function()
+			local ls = W.lines({ craft({ spell = 3 }), train() })
+			assert.equal(2, #ls)
+			assert.equal("unlock", ls[2].kind)
+			assert.equal("Learn Copper Dagger", ls[2].title)
+			assert.equal(100, ls[2].cost)
+			assert.equal(2, ls[2].step)
+		end)
+
+		it("hangs a trainRank step on the next line instead of making a line", function()
+			local ls = W.lines({
+				craft({ spell = 3 }),
+				{ kind = "trainRank", name = "Journeyman", skill = 50, cap = 150, cost = 500 },
+				craft({ spell = 4, name = "Next" }),
+			})
+			assert.equal(2, #ls)
+			assert.is_nil(ls[1].rank)
+			assert.same({ name = "Journeyman", skill = 50, cap = 150, cost = 500, step = 2, at = 50 }, ls[2].rank)
+		end)
+
+		it("makes a gap line with a title and the reason", function()
+			local ls =
+				W.lines({ { kind = "gap", from = 185, to = 215, reason = "norecipe", why = "nothing teaches it" } })
+			assert.equal("gap", ls[1].kind)
+			assert.equal("No recipe from 185 to 215", ls[1].title)
+			assert.equal("norecipe", ls[1].reason)
+			assert.equal("nothing teaches it", ls[1].why)
+		end)
+
+		it("numbers lines continuously from 1", function()
+			local ls = W.lines({
+				train({ spell = 7, name = "Other" }),
+				craft(),
+				{ kind = "gap", from = 65, to = 80 },
+				craft({ spell = 5 }),
+			})
+			assert.equal(4, #ls)
+			for i, l in ipairs(ls) do
+				assert.equal(i, l.n)
+			end
+		end)
+
+		it("sums the cash out and the learn cost", function()
+			assert.equal(150, W.lines({ train(), craft() })[1].cost)
+		end)
+
+		it("falls back to buy each times count when there is no cash", function()
+			local l = W.lines({
+				craft({ cash = false, buy = { { item = 1, count = 10, each = 5 }, { item = 2, count = 2, each = 3 } } }),
+			})[1]
+			assert.equal(56, l.cost)
+		end)
+
+		it("has no cost when nothing is priced", function()
+			local l = W.lines({ craft({ cash = false, buy = { { item = 1, count = 10 } } }) })[1]
+			assert.is_nil(l.cost)
+		end)
+
+		it("names unpriced items from the step or from ctx.nameOf", function()
+			local l = W.lines(
+				{ craft({ unpriced = { { item = 9, name = "Odd Ore", count = 2 }, { item = 11, count = 1 } } }) },
+				{
+					nameOf = function(item)
+						return "Item#" .. item
+					end,
+				}
+			)[1]
+			assert.same({ "Odd Ore", "Item#11" }, l.unpriced)
+		end)
+
+		it("counts ways as other recipes plus shortcuts", function()
+			local l = W.lines({ craft({ others = { {}, {} }, shortcuts = { {} } }) })[1]
+			assert.equal(3, l.ways)
+		end)
+
+		it("builds the short title with the skill range", function()
+			local l = W.lines({ craft() })[1]
+			assert.equal("Craft 43 Copper Dagger, 30 to 65", l.short)
+			assert.equal(30, l.from)
+			assert.equal(65, l.to)
+		end)
+
+		it("rounds the expected crafts up", function()
+			assert.equal(31, W.lines({ craft({ expected = 30.2 }) })[1].expected)
+			assert.equal(30, W.lines({ craft({ expected = 30 }) })[1].expected)
+		end)
+	end)
+
+	describe("stretches", function()
+		local CAPS = {
+			{ at = 75, label = "Apprentice 75" },
+			{ at = 150, label = "Journeyman 150" },
+			{ at = 225, label = "Expert 225" },
+		}
+		local function row(from, to, rank)
+			return { from = from, to = to, rank = rank }
+		end
+
+		it("cuts rows at the rank caps and names stretches from the cap label", function()
+			local ss = W.stretches({ row(28, 50), row(50, 75), row(75, 100), row(100, 150), row(150, 160) }, CAPS, 1, 8)
+			assert.equal(3, #ss)
+			assert.equal("28 to 75", ss[1].label)
+			assert.equal("Apprentice", ss[1].name)
+			assert.equal("75 to 150", ss[2].label)
+			assert.equal("Journeyman", ss[2].name)
+			assert.equal("150 to 160", ss[3].label)
+			assert.equal("Expert", ss[3].name)
+		end)
+
+		it("leaves the name nil past the last cap", function()
+			local ss = W.stretches({ row(230, 250) }, CAPS, 1, 8)
+			assert.is_nil(ss[1].name)
+		end)
+
+		it("splits a long group into equal parts of at most max", function()
+			local rows = {}
+			for i = 1, 10 do
+				rows[i] = row(i, i + 1)
+			end
+			local ss = W.stretches(rows, CAPS, 1, 4)
+			assert.equal(3, #ss)
+			for _, s in ipairs(ss) do
+				assert.is_true(#s.rows <= 4)
+			end
+			assert.same({ 4, 4, 2 }, { #ss[1].rows, #ss[2].rows, #ss[3].rows })
+		end)
+
+		it("puts every row in exactly one stretch, in order", function()
+			local rows = {}
+			for i = 1, 40 do
+				rows[i] = row(i * 5 - 4, i * 5)
+			end
+			local ss = W.stretches(rows, CAPS, 1, 7)
+			local seen = {}
+			for i, s in ipairs(ss) do
+				assert.equal(i, s.index)
+				assert.is_true(#s.rows >= 1 and #s.rows <= 7)
+				for _, r in ipairs(s.rows) do
+					seen[#seen + 1] = r
+				end
+			end
+			assert.equal(40, #seen)
+			for i = 1, 40 do
+				assert.equal(rows[i], seen[i])
+			end
+		end)
+
+		it("collects the rank trainings hung on its rows", function()
+			local r1, r2 = { name = "Journeyman" }, { name = "Expert" }
+			local ss = W.stretches({ row(28, 50), row(75, 100, r1), row(150, 170, r2) }, CAPS, 1, 8)
+			assert.same({}, ss[1].ranks)
+			assert.same({ r1 }, ss[2].ranks)
+			assert.same({ r2 }, ss[3].ranks)
+		end)
+
+		it("marks stretches that end at or below the skill as done", function()
+			local ss = W.stretches({ row(28, 75), row(75, 150), row(150, 160) }, CAPS, 75, 8)
+			assert.is_true(ss[1].done)
+			assert.is_false(ss[2].done)
+			assert.is_false(ss[3].done)
+		end)
+
+		it("flags exactly one current stretch, the first not done", function()
+			local ss, cur = W.stretches({ row(28, 75), row(75, 150), row(150, 160) }, CAPS, 75, 8)
+			assert.equal(2, cur)
+			local n = 0
+			for i, s in ipairs(ss) do
+				if s.current then
+					n = n + 1
+					assert.equal(cur, i)
+				end
+			end
+			assert.equal(1, n)
+		end)
+
+		it("makes the last stretch current when all are done", function()
+			local ss, cur = W.stretches({ row(28, 75), row(75, 150) }, CAPS, 300, 8)
+			assert.equal(2, cur)
+			assert.is_true(ss[2].current)
+			assert.is_nil(ss[1].current)
+		end)
+
+		it("returns an empty list and index 0 for no rows", function()
+			local ss, cur = W.stretches({}, CAPS, 1, 8)
+			assert.same({}, ss)
+			assert.equal(0, cur)
+		end)
 	end)
 end)

@@ -157,13 +157,8 @@ local function refreshSelftest()
 	local ui = ns.UI.stats
 	st.ui = {
 		layout = ui.layout,
-		-- the shown tab and each tab's content height (scroll: the shown one overflows)
-		tab = ui.tab,
+		-- what the docked panel shows (the card, the next lines, why some are not shown)
 		views = ui.views,
-		-- Phase 2 of the redesign: the pieces, the action bar's rows and buttons, the previewed step, what is open
-		phase2 = ui.phase2,
-		-- Phase 3: settings controls, the Way menu, covered Shopping blocks folding, the tab pips
-		phase3 = ui.phase3,
 		animations = ui.animations,
 		played = ui.played,
 		lastDock = ui.lastDock,

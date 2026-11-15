@@ -26,6 +26,11 @@ P.TEXT = {
 		.. "Lockpicking in the list at the top to see where to go.",
 	noProfession = "This character has no profession yet. Any trainer in a capital teaches one; the Overview "
 		.. "shows what each costs to level to 300.",
+	minimapHidden = "SkillupHelper: minimap button hidden. /skillup minimap brings it back, and so does "
+		.. "the journal's Settings page (Show the minimap button).",
+	minimapNothing = "Nothing tracked. Left-click opens the journal.",
+	minimapHint = "Left-click: journal. Right-click: menu. Drag: move.",
+	minimapSecret = "The current step's text is hidden here (protected by the game).",
 }
 
 P.diag = { errors = {}, firstError = nil, costRuns = 0, costMs = 0, costMaxMs = 0, costQueued = 0 }
@@ -339,6 +344,7 @@ end
 local function worldPathPage(line, s)
 	local wp = ns.Where.worldPath(query(line, s))
 	local sk = s.skills[line] or {}
+	local prof = s.plan and s.plan.professions and s.plan.professions[line]
 	local p = {
 		profession = wp.profession,
 		skill = sk.rank or 1,
@@ -348,27 +354,79 @@ local function worldPathPage(line, s)
 		markers = {},
 		rows = {},
 	}
+	for _, rk in ipairs(prof and prof.ranks or {}) do
+		if type(rk.cap) == "number" then
+			p.caps[#p.caps + 1] = { at = rk.cap, label = ("%s %d"):format(tostring(rk.name or "Rank"), rk.cap) }
+		end
+	end
+	local spots = {}
 	for i, r in ipairs(wp.rows) do
-		p.segments[#p.segments + 1] =
-			{ step = i, from = r.from, to = r.to, name = r.title, done = r.state == "done", gap = r.state == "gap" }
-		local spot = r.action and r.action.spot or nil
+		local gap = r.state == "gap"
+		p.segments[#p.segments + 1] = {
+			step = i,
+			from = r.from,
+			to = r.to,
+			name = r.title,
+			done = r.state == "done",
+			gap = gap and { reason = r.sub } or nil,
+		}
+		spots[i] = r.action and r.action.spot or nil
+		local sub = r.sub or ""
 		p.rows[#p.rows + 1] = {
 			n = i,
+			step = i,
+			kind = gap and "gap" or "step",
 			title = r.title,
-			sub = r.sub or "",
-			range = ("%d-%d"):format(r.from, r.to),
-			rangeTone = r.state == "gap" and "warn" or (r.state == "now" and "bone" or "ash"),
-			ways = 0,
-			gap = r.state == "gap" or nil,
-			action = spot
-					and { id = "selectSpot", key = spot, page = "where", label = "Open in Where", enabled = true }
-				or nil,
+			sub = sub,
+			subFull = sub,
+			from = r.from,
+			to = r.to,
+			range = ("%d to %d"):format(r.from, r.to),
+			rangeTone = gap and "warn" or (r.state == "now" and "bone" or "ash"),
+			done = r.state == "done",
+			tip = { r.title, sub ~= "" and sub or nil },
+			action = { id = "selectStep", step = i, enabled = true },
 		}
 	end
 	if #p.rows == 0 then
 		p.empty = { title = "No route", text = wp.text or ("No %s spot in the data."):format(wp.profession) }
+		return p
+	end
+	ns.Where.pathSelect(p, { selected = P.selectedStep, stretch = P.selectedStretch })
+	for _, row in ipairs(p.rows) do
+		if row.selected then
+			local spot = spots[row.n]
+			local d = { title = row.title, n = row.n, color = row.rangeTone, dothis = {}, materials = {}, actions = {} }
+			d.dothis[1] = { text = ("Skill %s."):format(row.range), tone = row.rangeTone }
+			if row.sub ~= "" then
+				d.dothis[2] = { text = row.sub, tone = row.kind == "gap" and "warn" or "ash" }
+			end
+			d.actions[1] = {
+				id = "selectSpot",
+				key = spot,
+				page = "where",
+				label = "Open in Where",
+				enabled = spot ~= nil,
+				tip = spot == nil and "No spot is mapped for this part." or nil,
+			}
+			p.detail = d
+		end
 	end
 	return p
+end
+
+-- What the bags hold of an item, for the Path page's materials. The scan can fail (no item data yet): the count is
+-- then nil and the first failure is kept for the selftest.
+function P.have(item)
+	if not (ns.Scan and ns.Scan.have) then
+		return nil
+	end
+	local ok, n = pcall(ns.Scan.have, item)
+	if not ok then
+		P.diag.haveWhy = P.diag.haveWhy or tostring(n):match("^[^\n]*")
+		return nil
+	end
+	return n
 end
 
 local function craftPathPage(line, s)
@@ -400,8 +458,10 @@ local function craftPathPage(line, s)
 		ranks = prof.ranks,
 		money = money,
 		nameOf = itemName,
-		have = ns.Scan and ns.Scan.have or nil,
+		have = P.have,
 		selected = P.selectedStep,
+		stretch = P.selectedStretch,
+		level = s.level,
 	})
 end
 
@@ -545,6 +605,13 @@ function P.settingsPage(s)
 			key = "closeInCombat",
 			label = "Close the journal when a fight starts",
 			value = (P.ui().journal or {}).closeInCombat ~= false,
+		},
+		{
+			kind = "check",
+			key = "minimap",
+			label = "Show the minimap button",
+			value = not P.minimapHidden(),
+			tip = "The round button on the minimap's edge. /skillup minimap does the same.",
 		},
 		{ kind = "list", key = "allow", label = "Shortcuts in use", rows = spellRows(v.allow, "allow", "Stop using") },
 		{
@@ -735,17 +802,15 @@ function provider.journal(c)
 	local ov = P.overview(s)
 	s.overview = ov
 	local prof = c and c.profession or P.defaultProfession(s)
-	local holes = #ov.holes
-	local j = ns.Where.journal({
+	-- no count on a tab: the Overview's cards say which paths have gaps, and the breadcrumb comes from the page
+	-- (its selected line or spot), never the profession's name a second time
+	return ns.Where.journal({
 		page = c and c.page,
 		profession = prof,
 		overview = ov,
 		status = ov.notice or (s.prices.ok and "Prices: TradeSkillMaster, live." or s.prices.text),
-		counts = { overview = holes > 0 and holes or nil },
 		pips = { settings = s.prices.ok ~= true },
 	})
-	j.crumb = prof and nameOf(prof, s) or nil
-	return j
 end
 
 function provider.page(name, c)
@@ -803,12 +868,18 @@ function provider.trackerLive()
 end
 
 function provider.selectProfession(key)
-	P.selectedStep = nil
+	P.selectedStep, P.selectedStretch = nil, nil
 	return key
 end
 
+-- A line picked in the list or on the timeline: the page shows the stretch that holds it.
 function provider.selectStep(step)
-	P.selectedStep = step
+	P.selectedStep, P.selectedStretch = step, nil
+end
+
+-- A stretch button: the list shows that stretch; the selected line and its detail stay.
+function provider.selectStretch(index)
+	P.selectedStretch = index
 end
 
 function provider.selectSpot(key)
@@ -895,6 +966,8 @@ function provider.setting(key, value, a)
 		return true
 	elseif key == "listMissing" then
 		return true
+	elseif key == "minimap" then
+		return P.setMinimap(value and true or false)
 	end
 	local map = P.SETTING[key]
 	if not map then
@@ -1021,7 +1094,163 @@ function P.command(msg)
 		P.run("journal", ns.JournalUI.Toggle)
 		return true
 	end
+	if cmd == "minimap" then
+		-- "/skillup minimap" toggles the button; "on" and "off" say which
+		local word = arg:lower()
+		local show = P.minimapHidden()
+		if word == "on" or word == "off" then
+			show = word == "on"
+		end
+		local ok, why = P.setMinimap(show)
+		if not ok then
+			print("SkillupHelper: no minimap button: " .. tostring(why or "FieldUI did not load") .. ".")
+		elseif show then
+			print("SkillupHelper: minimap button shown.")
+		else
+			print("SkillupHelper: minimap button hidden. /skillup minimap shows it again.")
+		end
+		return true
+	end
 	return false
+end
+
+------------------------------------------------------------------------------------------------- minimap button
+
+-- The view-models of FieldUI's minimap button: what its menu offers and what its tooltip says.
+
+function P.minimapHidden()
+	local m = P.ui().minimap
+	return type(m) == "table" and m.hide == true
+end
+
+-- Shows or hides the button (the Settings checkbox, /skillup minimap, the button's own menu). `tell`: one chat line
+-- on how to get it back.
+function P.setMinimap(show, tell)
+	if not (ns.FieldUI and ns.FieldUI.minimapSetShown) then
+		return false, "FieldUI did not load"
+	end
+	local ok, why = ns.FieldUI.minimapSetShown(show)
+	if tell and not show then
+		print(P.TEXT.minimapHidden)
+	end
+	P.run("refresh", ns.JournalUI.refresh) -- an open Settings page shows the new state
+	return ok, why
+end
+
+-- The spot the menu's "Track this spot" would track: the one selected in the journal, else the best spot of the
+-- journal's world skill. nil and why when there is none.
+local function trackable()
+	local st = ns.Widgets and ns.Widgets.state
+	local line = (type(st) == "table" and type(st.journal) == "table" and st.journal.profession)
+		or P.defaultProfession()
+	if not WORLD[line] then
+		return nil, "pick a gathering skill or Lockpicking in the journal"
+	end
+	local key = ns.JournalUI.ctx and ns.JournalUI.ctx.spot
+	if key == nil and ns.Data.spots then
+		local where = P.whereOf(line, nil)
+		key = where and where.key
+	end
+	if key == nil then
+		return nil, "no place is known for this skill"
+	end
+	return key
+end
+
+-- The right-click menu, for Widgets.menu.
+function P.minimapMenu()
+	local items = {
+		{
+			label = "Open the journal",
+			func = function()
+				P.run("journal", function()
+					ns.JournalUI.open()
+				end)
+			end,
+		},
+	}
+	if not ns.tradeSkillOpen then
+		items[#items + 1] = { label = "Show the panel (open a profession window first)", enabled = false }
+	else
+		local shown = ns.UI and ns.UI.frame and ns.UI.frame:IsShown() and true or false
+		items[#items + 1] = {
+			label = shown and "Hide the panel" or "Show the panel",
+			func = function()
+				P.run("panel", ns.setShown, not shown, true)
+			end,
+		}
+	end
+	local t = P.tracked()
+	if t then
+		items[#items + 1] = {
+			label = "Stop tracking",
+			func = function()
+				provider.trackSpot(t.spot)
+			end,
+		}
+	else
+		local key, why = P.run("trackable", trackable)
+		if key ~= nil then
+			items[#items + 1] = {
+				label = "Track this spot",
+				func = function()
+					provider.trackSpot(key)
+				end,
+			}
+		else
+			items[#items + 1] = {
+				label = "Track this spot (" .. (why or "nothing to track") .. ")",
+				enabled = false,
+			}
+		end
+	end
+	items[#items + 1] = {
+		label = "Settings",
+		func = function()
+			P.run("journal", function()
+				ns.JournalUI.open("settings")
+			end)
+		end,
+	}
+	items[#items + 1] = {
+		label = "Hide this button",
+		func = function()
+			P.setMinimap(false, true)
+		end,
+	}
+	return { title = "SkillupHelper", items = items }
+end
+
+-- The tooltip: the title, the current step in one or two lines (the tracked spot's tracker, else the docked plan's
+-- next step, else that nothing is tracked), then the clicks. A secret text is never joined or shown: one plain line
+-- says it is hidden.
+function P.minimapTip()
+	local lines = { "SkillupHelper" }
+	local hidden = false
+	local function add(v, tone)
+		if secret(v) then
+			if not hidden then
+				hidden = true
+				lines[#lines + 1] = { P.TEXT.minimapSecret, "ash" }
+			end
+		elseif type(v) == "string" and v ~= "" then
+			lines[#lines + 1] = { v, tone }
+		end
+	end
+	local vm = P.tracked() and ns.FieldUI and ns.FieldUI.trackerVM or nil
+	local card = ns.UI and ns.UI.model and ns.UI.last and ns.UI.last.now or nil
+	if type(vm) == "table" then
+		add(vm.title, "bone")
+		add(vm.sub, "ash")
+	elseif type(card) == "table" then
+		add(card.title, "bone")
+		add(card.sub, "ash")
+	end
+	if #lines == 1 then
+		lines[2] = { P.TEXT.minimapNothing, "ash" }
+	end
+	lines[#lines + 1] = { P.TEXT.minimapHint, "ash" }
+	return lines
 end
 
 -- What the selftest records: the journal's own diag, the wiring's errors, skills and where counts, and the evidence
@@ -1077,6 +1306,10 @@ function P.selftest(st)
 		tileFailures = ns.MapCanvas and ns.MapCanvas.diag and ns.MapCanvas.diag.tileFailures or nil,
 		prices = P.snap and P.snap.prices and P.snap.prices.ok or false,
 	}
+	-- the minimap button: { created, shown, angle, hide, shape, ldb, clicks, why }
+	st.minimap = ns.FieldUI and ns.FieldUI.minimapDiag and P.run("minimap diag", ns.FieldUI.minimapDiag)
+		or "FieldUI did not load: no minimap button"
+	st.pixels = ns.Widgets and ns.Widgets.pixel or nil
 	return st
 end
 
@@ -1093,6 +1326,20 @@ local function wire()
 		end
 		return core(msg)
 	end
+	-- the minimap button (FieldUI draws it): what a left click does, its menu and its tooltip
+	ns.FieldUI.minimapProvider = {
+		toggle = function()
+			P.run("journal", function()
+				ns.JournalUI.Toggle()
+			end)
+		end,
+		menu = function()
+			return P.run("minimap menu", P.minimapMenu)
+		end,
+		tip = function()
+			return P.run("minimap tip", P.minimapTip)
+		end,
+	}
 end
 P.run("wire", wire)
 
@@ -1367,6 +1614,8 @@ ev:SetScript("OnEvent", function(_, event, unit, _, spell)
 		P.run("state", function()
 			ns.JournalUI.setState(P.ui())
 		end)
+		-- one button on the minimap, after the saved state is attached (its angle and hidden flag live there)
+		P.run("minimap", ns.FieldUI.minimapInit)
 		P.run("first run", function()
 			local ui = P.ui()
 			if ui.seen ~= ns.CODE_VERSION then

@@ -2108,6 +2108,11 @@ local function moneyOf(ctx)
 	return ctx.money or (ns.Logic and ns.Logic.money) or tostring
 end
 
+local function sentenceCase(s)
+	s = tostring(s or "")
+	return s:sub(1, 1):upper() .. s:sub(2)
+end
+
 local function sortedLines(set)
 	local list = {}
 	for line in pairs(set) do
@@ -2199,6 +2204,14 @@ function W.overview(ctx)
 					lacks[#lacks + 1] = ctx.nameOf and ctx.nameOf(item) or ("item " .. tostring(item))
 				end
 				row.tsmMissing = num(r.unknownPrices) or #lacks
+				-- items the plan uses that have no price (they never make a hole): named on the card's tooltip
+				row.unpriced = {}
+				for _, u in ipairs(type(r.unpriced) == "table" and r.unpriced.items or {}) do
+					local item = type(u) == "table" and u.item or u
+					row.unpriced[#row.unpriced + 1] = type(u) == "table" and u.name
+						or (ctx.nameOf and ctx.nameOf(item))
+						or ("item " .. tostring(item))
+				end
 				for _, g in ipairs(r.gaps or {}) do
 					row.coverage.gaps[#row.coverage.gaps + 1] =
 						{ from = g.from, to = g.to, reason = g.why or "no recipe gives skill", lacks = lacks }
@@ -2240,6 +2253,39 @@ function W.overview(ctx)
 			local g = row.coverage.gaps[1]
 			row.statusText = "no data"
 			row.line, row.lineTone = g and ("%d to %d: %s"):format(g.from, g.to, g.reason) or "no data", "warn"
+		end
+		-- the card's two lines: what it costs and whether the path is whole
+		local gaps = row.coverage.gaps
+		row.unpriced = row.unpriced or {}
+		local unknown = math.max(#row.unpriced, row.tsmMissing or 0)
+		if not row.usable then
+			row.costText, row.costTone = "", "ash"
+			row.coverText, row.coverTone = sentenceCase(row.why or "not available"), "ash"
+		elseif from >= top then
+			row.costText, row.costTone = ("At %d: nothing left to level"):format(from), "ash"
+			row.coverText, row.coverTone = "Path complete", "green"
+		else
+			if def then
+				row.costText = row.cost.copper > 0 and ("To %d: %s for training"):format(top, row.cost.total)
+					or "No cost: gathering"
+				row.costTone = "bone"
+			elseif row.cost.total then
+				row.costText = ("To %d: %s%s"):format(top, row.cost.total, unknown > 0 and " + unpriced" or "")
+				row.costTone = unknown > 0 and "warn" or "bone"
+			elseif unknown > 0 then
+				row.costText, row.costTone = ("Price unknown for %s"):format(plural(unknown, "item")), "warn"
+			else
+				row.costText, row.costTone = sentenceCase(gaps[1] and gaps[1].reason or "no cost yet"), "ash"
+			end
+			if row.status == "complete" then
+				row.coverText, row.coverTone = "Path complete", "green"
+			elseif row.status == "gaps" then
+				row.coverText = #gaps == 1 and ("1 gap: %d to %d"):format(gaps[1].from, gaps[1].to)
+					or ("%d gaps, first %d to %d"):format(#gaps, gaps[1].from, gaps[1].to)
+				row.coverTone = "warn"
+			else
+				row.coverText, row.coverTone = "No plan yet", "ash"
+			end
 		end
 		row.state = row.state
 			or (
@@ -2301,9 +2347,462 @@ local function buyCost(st)
 	return any and sum or nil
 end
 
+-- Joins names with commas inside a budget of characters: what does not fit becomes "and N more", so a line never
+-- ends in an ellipsis. Always shows at least the first part.
+function W.fitList(parts, budget)
+	local out, used = {}, 0
+	for i, s in ipairs(parts) do
+		local rest = #parts - i
+		local tail = rest > 0 and (#(" and %d more"):format(rest)) or 0
+		if i > 1 and used + 2 + #s + tail > budget then
+			return table.concat(out, ", ") .. (" and %d more"):format(#parts - i + 1)
+		end
+		out[#out + 1] = s
+		used = used + #s + (i > 1 and 2 or 0)
+	end
+	return table.concat(out, ", ")
+end
+
+-- The plan as the lines a person reads: one line per stretch of crafting. "Train X" or "Buy recipe X" directly
+-- before "Craft X" is folded into it ("Learn and craft 43 Copper Dagger"); a rank training is not a line, it hangs
+-- on the line it comes before (`rank`), so the page can show it with the stretch it unlocks. Numbers are continuous.
+-- steps = the planner's steps. Returns lines = { { n, kind = "craft"|"gap"|"unlock", step (index of the craft, the
+-- gap or the lone unlock: what a click selects), steps = { indices folded in }, verb, title, short, from, to,
+-- color, crafts, expected, learn = { kind = "train"|"buyRecipe", at, cost, where, owned, unchecked } | nil,
+-- rank = { name, skill, cap, cost, step, at, by, level, have } | nil, cost (copper, priced parts only) | nil,
+-- unpriced = { names },
+-- ways } }.
+function W.lines(steps, ctx)
+	ctx = ctx or {}
+	local nameOf = ctx.nameOf or function(item)
+		return "item " .. tostring(item)
+	end
+	local lines, pending, rank = {}, {}, nil
+	local function push(line)
+		line.n = #lines + 1
+		line.rank, rank = rank, nil
+		lines[line.n] = line
+	end
+	-- an unlock whose craft never came: it stays a line of its own
+	local function flush()
+		for _, u in ipairs(pending) do
+			local st = steps[u]
+			local at = math.floor(num(st.at) or num(st.learn) or 0)
+			push({
+				kind = "unlock",
+				step = u,
+				steps = { u },
+				verb = st.kind == "buyRecipe" and "Buy the recipe for" or "Learn",
+				title = ("%s %s"):format(st.kind == "buyRecipe" and "Buy the recipe for" or "Learn", tostring(st.name)),
+				from = at,
+				to = at,
+				color = "gold",
+				cost = num(st.cost) or num(st.price),
+				unpriced = {},
+				ways = 0,
+			})
+			lines[#lines].short = lines[#lines].title
+		end
+		pending = {}
+	end
+	for i, st in ipairs(steps or {}) do
+		if st.kind == "trainRank" then
+			rank = {
+				name = tostring(st.name or "the next rank"),
+				skill = math.floor(num(st.skill) or num(st.at) or num(st.by) or 0),
+				cap = num(st.cap),
+				cost = num(st.cost),
+				step = i,
+				at = num(st.at) or num(st.skill),
+				by = num(st.by),
+				level = num(st.level),
+				have = num(st.have),
+			}
+		elseif st.kind == "train" or st.kind == "buyRecipe" then
+			pending[#pending + 1] = i
+		elseif st.kind == "craft" then
+			local learn, folded, keep = nil, { i }, {}
+			for _, u in ipairs(pending) do
+				local us = steps[u]
+				if us.spell ~= nil and us.spell == st.spell and not learn then
+					learn = {
+						kind = us.kind,
+						at = math.floor(num(us.at) or num(us.learn) or 0),
+						cost = num(us.cost) or num(us.price),
+						where = us.where,
+						owned = us.owned,
+						unchecked = us.unchecked,
+						step = u,
+					}
+					table.insert(folded, 1, u)
+				else
+					keep[#keep + 1] = u
+				end
+			end
+			pending = keep
+			flush()
+			local verb = "Craft"
+			if learn then
+				verb = learn.kind == "buyRecipe"
+						and (learn.owned and "Learn the recipe and craft" or "Buy the recipe and craft")
+					or "Learn and craft"
+			end
+			local from, to = math.floor(st.from), math.floor(st.to + 0.5)
+			local cost, unpriced = buyCost(st), {}
+			if learn and learn.cost then
+				cost = (cost or 0) + learn.cost
+			end
+			for _, u in ipairs(st.unpriced or {}) do
+				unpriced[#unpriced + 1] = tostring(u.name or nameOf(u.item))
+			end
+			if learn and learn.kind == "buyRecipe" and not learn.cost and not learn.owned then
+				unpriced[#unpriced + 1] = "the recipe"
+			end
+			local title = ("%s %d %s"):format(verb, st.crafts or 0, tostring(st.name))
+			push({
+				kind = "craft",
+				step = i,
+				steps = folded,
+				verb = verb,
+				title = title,
+				short = ("%s, %d to %d"):format(title, from, to),
+				from = from,
+				to = to,
+				color = st.color or "bone",
+				crafts = st.crafts or 0,
+				expected = num(st.expected) and math.ceil(st.expected) or nil,
+				learn = learn,
+				cost = cost,
+				unpriced = unpriced,
+				ways = #(st.others or {}) + #(st.shortcuts or {}),
+			})
+		elseif st.kind == "gap" then
+			flush()
+			local from, to = math.floor(st.from), math.floor(st.to)
+			local title = ("No recipe from %d to %d"):format(from, to)
+			push({
+				kind = "gap",
+				step = i,
+				steps = { i },
+				verb = "No recipe",
+				title = title,
+				short = title,
+				from = from,
+				to = to,
+				color = "warn",
+				reason = st.reason,
+				why = st.why or "no recipe in the data gives skill here",
+				unpriced = {},
+				ways = #(st.shortcuts or {}),
+			})
+		end
+	end
+	flush()
+	return lines
+end
+
+-- Cuts rows that carry `from` and `to` into stretches that each fit a list of `max` rows: first at the rank caps
+-- (1-75, 75-150, ...), then a stretch that is still too long is cut into equal parts. Every row is in exactly one
+-- stretch, in order. Returns stretches = { { index, from, to, label = "75 to 150", name = "Journeyman" | nil,
+-- rows, ranks = { the rank trainings hung on its rows }, done, current } } and the index of the current one (the
+-- first that ends above `skill`; the last when all are behind).
+function W.stretches(rows, caps, skill, max)
+	max = math.max(1, max or 8)
+	skill = num(skill) or 1
+	local bounds = {}
+	for _, c in ipairs(caps or {}) do
+		if num(c.at) then
+			bounds[#bounds + 1] = { at = c.at, name = c.label and tostring(c.label):match("^(%a[%a ]-)%s+%d+$") or nil }
+		end
+	end
+	table.sort(bounds, function(a, b)
+		return a.at < b.at
+	end)
+	local groups, cur = {}, nil
+	local function capOf(from)
+		for _, b in ipairs(bounds) do
+			if from < b.at then
+				return b
+			end
+		end
+		return nil
+	end
+	for _, r in ipairs(rows or {}) do
+		local b = capOf(num(r.from) or 0)
+		if not cur or cur.cap ~= b then
+			cur = { cap = b, rows = {} }
+			groups[#groups + 1] = cur
+		end
+		cur.rows[#cur.rows + 1] = r
+	end
+	local out = {}
+	for _, g in ipairs(groups) do
+		local parts = math.ceil(#g.rows / max)
+		local per = math.ceil(#g.rows / parts)
+		for p = 1, parts do
+			local s = { rows = {}, ranks = {}, name = g.cap and g.cap.name or nil }
+			for k = (p - 1) * per + 1, math.min(#g.rows, p * per) do
+				local r = g.rows[k]
+				s.rows[#s.rows + 1] = r
+				if r.rank then
+					s.ranks[#s.ranks + 1] = r.rank
+				end
+			end
+			if #s.rows > 0 then
+				s.from, s.to = s.rows[1].from, s.rows[#s.rows].to
+				for _, r in ipairs(s.rows) do
+					s.to = math.max(s.to or 0, num(r.to) or 0)
+				end
+				s.label = ("%d to %d"):format(s.from or 0, s.to or 0)
+				s.index = #out + 1
+				s.done = (s.to or 0) <= skill
+				out[s.index] = s
+			end
+		end
+	end
+	local current = #out
+	for i, s in ipairs(out) do
+		if not s.done then
+			current = i
+			break
+		end
+	end
+	if out[current] then
+		out[current].current = true
+	end
+	return out, current
+end
+
+W.PATH_MAX = 6 -- lines in one stretch of the Path page: JournalUI lays 6 rows of 46 px under the stretch header
+W.PATH_SUB = 54 -- characters of a row's second line (about 280 px of 10-px text)
+W.CAPS = {
+	{ at = 75, label = "Apprentice 75" },
+	{ at = 150, label = "Journeyman 150" },
+	{ at = 225, label = "Expert 225" },
+	{ at = 300, label = "Artisan 300" },
+}
+local BAND_WORD = { orange = "orange", yellow = "yellow", green = "green", grey = "grey" }
+
+local function sentence(s)
+	s = tostring(s or "")
+	if s == "" then
+		return s
+	end
+	s = s:sub(1, 1):upper() .. s:sub(2)
+	return s:match("[%.%?!]$") and s or (s .. ".")
+end
+
+-- "Price unknown for 2 items: A, B. Not in the cost."
+local function unpricedText(names)
+	return ("Price unknown for %s: %s. Not in the cost."):format(plural(#names, "item"), table.concat(names, ", "))
+end
+
+-- A material count the bags hold, or nil when the client cannot say (a failing lookup never breaks the page).
+local function haveOf(ctx, item)
+	if type(ctx.have) ~= "function" then
+		return nil
+	end
+	local ok, n = pcall(ctx.have, item)
+	return ok and num(n) or nil
+end
+
+-- "Train Journeyman at 50, 5s: needed to pass 75". The character level is said only when it is too low, or when
+-- the rank asks for one and the level is not known (then without "unknown": "needs level 10").
+local function rankText(rank, ctx, money)
+	local parts = {}
+	if rank.at then
+		parts[#parts + 1] = ("at %d"):format(rank.at)
+	elseif rank.by then
+		parts[#parts + 1] = ("by %d"):format(rank.by)
+	end
+	parts[#parts + 1] = rank.cost and money(rank.cost) or "price not known yet"
+	local need, have = rank.level, rank.have or num(ctx.level)
+	if need and have and have < need then
+		parts[#parts + 1] = ("needs level %d, you are %d"):format(need, have)
+	elseif need and need > 1 and not have then
+		parts[#parts + 1] = ("needs level %d"):format(need)
+	end
+	local pass
+	for _, rk in ipairs(ctx.ranks or {}) do
+		if num(rk.cap) and rank.cap and rk.cap < rank.cap and (not pass or rk.cap > pass) then
+			pass = rk.cap
+		end
+	end
+	return ("Train %s %s%s"):format(
+		rank.name,
+		table.concat(parts, ", "),
+		pass and (": needed to pass %d"):format(pass) or ""
+	)
+end
+
+-- "Get the recipe" of a craft line: { text, tone, known }.
+local function recipeText(line, st, ctx, money)
+	local learn = line.learn
+	if not learn then
+		local known = ctx.known and ctx.known[st.spell] == true
+		return { text = known and "Known." or "Known, or learned earlier on this path.", tone = "green", known = true }
+	end
+	if learn.kind == "train" then
+		local text = ("From the trainer at %d, %s."):format(
+			learn.at,
+			learn.cost and money(learn.cost) or "price not known yet"
+		)
+		if learn.unchecked then
+			return { text = text .. " Not checked at a trainer yet.", tone = "parch" }
+		end
+		return { text = text, tone = "bone" }
+	end
+	if learn.owned then
+		return { text = "The recipe is in your bags: learn it.", tone = "bone" }
+	end
+	return {
+		text = ("Buy the recipe %s, %s."):format(
+			learn.where == "vendor" and "from a vendor" or "on the auction house",
+			learn.cost and money(learn.cost) or "price unknown"
+		),
+		tone = learn.cost and "bone" or "warn",
+	}
+end
+
+-- A not-in-plan alternative of "Other ways": the only place the word shortcut is used.
+local function shortcutWay(cut, money)
+	return {
+		label = tostring(cut.name),
+		right = num(cut.saves) and ("shortcut, saves " .. money(cut.saves)) or "shortcut",
+		picked = false,
+		tip = (cut.needs or cut.why) and { tostring(cut.name), tostring(cut.needs or cut.why) } or nil,
+		action = { id = "allow", label = "Use this shortcut", enabled = true, spell = cut.spell },
+	}
+end
+
+-- The list row of one line: line 1 is the title (never cut), line 2 the usual count and the materials to buy,
+-- fitted to W.PATH_SUB characters with "and N more" (the full list is `subFull`, in the tooltip).
+local function lineRow(line, st, money, nameOf, skill)
+	local row = {
+		n = line.n,
+		step = line.step,
+		kind = line.kind == "craft" and "step" or line.kind,
+		icon = st and st.icon or nil,
+		title = line.title,
+		from = line.from,
+		to = line.to,
+		rank = line.rank,
+		rangeTone = line.color,
+		done = line.kind ~= "unlock" and line.to <= skill,
+		action = { id = "selectStep", step = line.step, enabled = true },
+	}
+	row.range = line.kind == "unlock" and ("at %d"):format(line.from) or ("%d to %d"):format(line.from, line.to)
+	local tip = { line.title }
+	if line.kind == "craft" then
+		local lead = {}
+		if line.expected and line.expected < line.crafts then
+			lead[#lead + 1] = ("Usually %s."):format(plural(line.expected, "craft"))
+		end
+		local mats = {}
+		for _, b in ipairs(st.buy or {}) do
+			mats[#mats + 1] = ("%d %s"):format(b.count, nameOf(b.item))
+		end
+		local head = table.concat(lead, " ")
+		if #mats > 0 then
+			local pre = (head ~= "" and (head .. " ") or "") .. "Buy "
+			row.sub = pre .. W.fitList(mats, W.PATH_SUB - #pre)
+			row.subFull = pre .. table.concat(mats, ", ")
+		else
+			local tail = st.source ~= "buy" and "From your bags." or ""
+			row.sub = head .. ((head ~= "" and tail ~= "") and " " or "") .. tail
+			row.subFull = row.sub
+		end
+		tip[#tip + 1] = row.subFull
+		row.cost = line.cost and money(line.cost) or nil
+		if #line.unpriced > 0 then
+			row.costNote = row.cost and "+ unpriced" or "price unknown"
+			tip[#tip + 1] = { unpricedText(line.unpriced), "warn" }
+		end
+	elseif line.kind == "gap" then
+		row.sub = sentence(line.why)
+		row.subFull = row.sub
+		tip[#tip + 1] = { row.sub, "warn" }
+	else
+		local learn = st or {}
+		row.sub = learn.kind == "buyRecipe"
+				and (learn.owned and "In your bags: learn it." or (learn.where == "vendor" and "From a vendor." or "On the auction house."))
+			or (learn.unchecked and "Not checked at a trainer yet." or "At the trainer.")
+		row.subFull = row.sub
+		row.cost = line.cost and money(line.cost) or nil
+		tip[#tip + 1] = row.sub
+	end
+	row.tip = tip
+	return row
+end
+
+-- Picks the selected row and the stretch shown, for a path whose `rows` carry from / to / step / done (W.path's and
+-- the world skills' alike). ctx = { selected (a row's step), stretch (index a stretch button chose), max }. Sets
+-- p.stretches (W.stretches' plus action, selected, head = { title, lines }), p.stretch, p.selected, p.shade (the
+-- skill range the timeline shades) and p.crumb. The default selection is the first row that is not done.
+function W.pathSelect(p, ctx)
+	ctx = ctx or {}
+	local rows = p.rows or {}
+	local sel
+	for _, r in ipairs(rows) do
+		r.selected = false
+		if ctx.selected ~= nil and r.step == ctx.selected then
+			sel = r
+		end
+	end
+	if not sel then
+		for _, r in ipairs(rows) do
+			if not r.done then
+				sel = r
+				break
+			end
+		end
+	end
+	sel = sel or rows[1]
+	local caps = (p.caps and #p.caps > 0) and p.caps or W.CAPS
+	local stretches, current = W.stretches(rows, caps, p.skill, ctx.max or W.PATH_MAX)
+	local shown = num(ctx.stretch)
+	if not (shown and stretches[shown]) then
+		shown = nil
+		for i, s in ipairs(stretches) do
+			for _, r in ipairs(s.rows) do
+				if r == sel then
+					shown = i
+				end
+			end
+		end
+		shown = shown or current
+	end
+	for i, s in ipairs(stretches) do
+		s.selected = i == shown
+		s.action = { id = "selectStretch", index = i, enabled = true }
+		s.state = s.current and "you are here" or (s.done and "done" or nil)
+		s.head = { title = s.name and ("%s, %s"):format(s.name, s.label) or ("Skill " .. s.label), lines = {} }
+		for _, rank in ipairs(s.ranks) do
+			s.head.lines[#s.head.lines + 1] = rank.text or ("Train %s"):format(tostring(rank.name))
+		end
+		s.tip = { s.head.title, plural(#s.rows, "line") }
+		for _, l in ipairs(s.head.lines) do
+			s.tip[#s.tip + 1] = l
+		end
+	end
+	p.stretches, p.stretch = stretches, stretches[shown] and shown or 0
+	if sel then
+		sel.selected = true
+		p.selected = sel.step
+		p.crumb = sel.title
+	end
+	local s = stretches[shown]
+	p.shade = s and { from = s.from, to = s.to } or nil
+	return p
+end
+
 -- The journal's Path page of a crafting profession, from the planner's plan (Planner.finish's or costToCap's
 -- `steps`). ctx = { profession, skill, plan = { steps }, ranks (Data/Recipes.lua's), money, nameOf = fn(item),
--- have = fn(item), known = { [spell] = true }, selected (step index), errand = fn(step) -> where | nil }.
+-- have = fn(item), known = { [spell] = true }, selected (step index), stretch (index a stretch button chose),
+-- level, errand = fn(step, line) -> where | nil }. Returns { profession, skill, caps, gates, segments, markers
+-- (the timeline), lines (W.lines), rows (one per line, all of them), stretches, stretch, selected (the selected
+-- line's step), shade, crumb, detail = { title, n, color, dothis = { { text, tone } }, recipe = { text, tone },
+-- note, materials = { { name, need, have, right, tone } }, ways = { title, rows }, where, actions } }.
 function W.path(ctx)
 	ctx = ctx or {}
 	local money = moneyOf(ctx)
@@ -2323,23 +2822,14 @@ function W.path(ctx)
 		end
 	end
 	if skill > 1 then
-		p.segments[1] = { step = 0, from = 1, to = skill, name = "Done", done = true }
-		p.rows[1] = {
-			kind = "fold",
-			n = 0,
-			title = ("Done: 1 to %d"):format(math.floor(skill)),
-			sub = "",
-			range = "",
-			rangeTone = "ash",
-			ways = 0,
-		}
+		p.segments[1] = { from = 1, to = skill, name = "Done", done = true }
 	end
 	for i, st in ipairs(steps) do
 		local at = math.floor(stepStart(steps, i, skill) or skill)
-		local row = { n = i, ways = 0, action = { id = "selectStep", label = "Show", enabled = true, step = i } }
+		-- `row` only words the markers' tooltips here; the list's rows are made from W.lines below
+		local row = { n = i, ways = 0 }
 		if st.kind == "craft" then
 			local y, g = st.thresholds and st.thresholds[1], st.thresholds and st.thresholds[2]
-			local from, to = math.floor(st.from), math.floor(st.to + 0.5)
 			p.segments[#p.segments + 1] = {
 				step = i,
 				from = st.from,
@@ -2348,31 +2838,6 @@ function W.path(ctx)
 				bands = W.recipeBands(st.from, st.to, y, g),
 				done = false,
 			}
-			row.kind = "step"
-			row.title = ("Craft %d %s"):format(st.crafts or 0, tostring(st.name))
-			local sub = {}
-			if num(st.expected) and math.ceil(st.expected) < (st.crafts or 0) then
-				sub[#sub + 1] = ("usually %d"):format(math.ceil(st.expected))
-			end
-			local mats = {}
-			for k, b in ipairs(st.buy or {}) do
-				if k <= 2 then
-					mats[#mats + 1] = ("%d %s"):format(b.count, nameOf(b.item))
-				end
-			end
-			if #(st.buy or {}) > 2 then
-				mats[#mats + 1] = ("%d more"):format(#st.buy - 2)
-			end
-			if #mats > 0 then
-				sub[#sub + 1] = "buy " .. table.concat(mats, ", ")
-			elseif st.source ~= "buy" then
-				sub[#sub + 1] = "from your bags"
-			end
-			row.sub = table.concat(sub, ". ")
-			row.range, row.rangeTone = ("%d-%d"):format(from, to), st.color or "bone"
-			local cost = buyCost(st)
-			row.cost = cost and money(cost) or nil
-			row.ways = 1 + #(st.others or {}) + #(st.shortcuts or {})
 			for _, cut in ipairs(st.shortcuts or {}) do
 				if cut.bop then
 					p.markers[#p.markers + 1] = {
@@ -2396,21 +2861,12 @@ function W.path(ctx)
 				gap = { reason = st.why or "no recipe gives skill here" },
 				done = false,
 			}
-			row.kind = "gap"
-			row.title = ("Nothing priced from %d to %d"):format(math.floor(st.from), math.floor(st.to))
-			row.sub = st.why or "no recipe gives skill here"
-			row.range, row.rangeTone = ("%d-%d"):format(math.floor(st.from), math.floor(st.to)), "warn"
-			row.ways = #(st.shortcuts or {})
-			row.action = { id = "fillGap", label = "Fill this gap", enabled = row.ways > 0, step = i }
-			row.action.tip = row.ways == 0 and "No recipe in the data gives skill here." or nil
 		else
-			row.kind = "unlock"
-			row.rangeTone = "gold"
 			local m = { step = i, confidence = "confirmed" }
 			if st.kind == "buyRecipe" then
 				m.at = num(st.learn) or at
 				m.kind = st.where == "vendor" and "vendor" or "ah"
-				row.title = ("Buy %s"):format(tostring(st.name))
+				row.title = ("Buy the recipe for %s"):format(tostring(st.name))
 				row.sub = st.owned and "in your bags: learn it"
 					or (m.kind == "vendor" and "from a vendor" or "on the auction house")
 				row.cost = num(st.price) and money(st.price) or nil
@@ -2431,10 +2887,8 @@ function W.path(ctx)
 				row.cost = num(st.cost) and money(st.cost) or nil
 				m.tip = ("%s %s%s"):format(row.title, row.sub, row.cost and (", " .. row.cost) or "")
 			end
-			row.range = ("at %d"):format(m.at)
 			p.markers[#p.markers + 1] = m
 		end
-		p.rows[#p.rows + 1] = row
 	end
 	table.sort(p.markers, function(a, b)
 		if a.at ~= b.at then
@@ -2445,50 +2899,77 @@ function W.path(ctx)
 	if #steps == 0 then
 		p.empty = ctx.why or "No plan yet: open the profession window once so the recipes can be read."
 	end
-	local sel = num(ctx.selected)
-	if not sel or not steps[sel] then
-		sel = steps[1] and 1 or 0
+	-- the list: one row per line of W.lines; a marker or a folded step selects the line it belongs to
+	local lines = W.lines(steps, { nameOf = nameOf })
+	p.lines = lines
+	local lineOf = {}
+	for _, line in ipairs(lines) do
+		for _, s in ipairs(line.steps) do
+			lineOf[s] = line
+		end
+		if line.rank then
+			lineOf[line.rank.step] = line
+			line.rank.text = rankText(line.rank, ctx, money)
+		end
+		p.rows[line.n] = lineRow(line, steps[line.step], money, nameOf, skill)
 	end
-	p.selected = sel
-	local st = steps[sel]
+	for _, m in ipairs(p.markers) do
+		m.step = lineOf[m.step] and lineOf[m.step].step or nil
+	end
+	local wanted = num(ctx.selected)
+	W.pathSelect(p, {
+		selected = wanted and lineOf[wanted] and lineOf[wanted].step or nil,
+		stretch = ctx.stretch,
+		max = ctx.max,
+	})
+	local line = p.selected and lineOf[p.selected] or nil
+	local st = line and steps[line.step] or nil
 	if st then
-		local d = { title = tostring(st.name or "Step"), lines = {}, reagents = {}, actions = {} }
-		d.color = st.kind == "craft" and (st.color or "bone") or (st.kind == "gap" and "warn" or "gold")
-		if st.kind == "craft" then
-			local line = ("Craft %d"):format(st.crafts or 0)
-			if num(st.expected) and math.ceil(st.expected) < (st.crafts or 0) then
-				line = line .. (", usually %d. Bought for a bad-luck run."):format(math.ceil(st.expected))
+		local d = { title = tostring(st.name or "Step"), n = line.n, dothis = {}, materials = {}, actions = {} }
+		d.color = line.kind == "craft" and (st.color or "bone") or (line.kind == "gap" and "warn" or "gold")
+		if #line.unpriced > 0 then
+			d.note = unpricedText(line.unpriced)
+		end
+		if line.kind == "craft" then
+			local text = ("Craft %d."):format(st.crafts or 0)
+			if line.expected and line.expected < (st.crafts or 0) then
+				text = ("Craft up to %d. Usually %d are enough."):format(st.crafts or 0, line.expected)
 			end
-			d.lines[1] = { text = line, tone = "bone" }
-			d.lines[2] = {
-				text = ("Skill %d to %d"):format(math.floor(st.from), math.floor(st.to + 0.5)),
+			d.dothis[1] = { text = text, tone = "bone" }
+			local letter = BAND_WORD[st.color]
+			d.dothis[2] = {
+				text = ("Skill %d to %d%s"):format(
+					line.from,
+					line.to,
+					letter and (", " .. letter .. " at the start.") or "."
+				),
 				tone = st.color or "bone",
 			}
-			local known = ctx.known and ctx.known[st.spell]
-			d.learn = { skill = st.thresholds and st.thresholds[1], known = known == true }
-			d.learn.text = known and "Known" or (st.unchecked and "Not checked at a trainer yet" or "Learn it first")
-			d.learn.confidence = st.unchecked and "classic" or "confirmed"
+			d.recipe = recipeText(line, st, ctx, money)
 			for _, u in ipairs(st.used or {}) do
-				d.reagents[#d.reagents + 1] = {
+				d.materials[#d.materials + 1] = {
 					name = nameOf(u.item),
 					need = u.count,
-					have = ctx.have and ctx.have(u.item) or u.count,
+					have = haveOf(ctx, u.item) or u.count,
 					source = "your bags",
+					right = "from your bags",
 					tone = "green",
 				}
 			end
 			for _, b in ipairs(st.buy or {}) do
-				d.reagents[#d.reagents + 1] = {
+				local source = b.where == "vendor" and "vendor" or (b.where == "ah" and "auction" or nil)
+				local each = num(b.each) and not b.unpriced and (money(b.each) .. " each") or "price unknown"
+				d.materials[#d.materials + 1] = {
 					name = nameOf(b.item),
 					need = b.count,
-					have = ctx.have and ctx.have(b.item) or 0,
-					source = b.where == "vendor" and "vendor"
-						or (b.where == "ah" and "auction house" or "unknown source"),
+					have = haveOf(ctx, b.item) or 0,
+					source = source or "unknown source",
 					price = num(b.each) and money(b.each) or nil,
-					tone = num(b.each) and "bone" or "warn",
+					right = source and (source .. ", " .. each) or each,
+					tone = (num(b.each) and not b.unpriced) and "bone" or "warn",
 				}
 			end
-			local rows = { { label = ("%s (the plan's pick)"):format(tostring(st.name)), right = "", picked = true } }
+			local rows = { { label = tostring(st.name), right = "the plan's pick", picked = true } }
 			for _, o in ipairs(st.others or {}) do
 				rows[#rows + 1] = {
 					label = tostring(o.name or o.spell),
@@ -2504,24 +2985,27 @@ function W.path(ctx)
 				}
 			end
 			for _, cut in ipairs(st.shortcuts or {}) do
-				rows[#rows + 1] = {
-					label = ("%s (%s)"):format(tostring(cut.name), tostring(cut.needs or cut.why or "shortcut")),
-					right = num(cut.saves) and ("saves " .. money(cut.saves)) or "",
-					picked = false,
-					action = { id = "allow", label = "Use this shortcut", enabled = true, spell = cut.spell },
-				}
+				rows[#rows + 1] = shortcutWay(cut, money)
 			end
-			d.ways =
-				{ title = ("Ways from %d to %d"):format(math.floor(st.from), math.floor(st.to + 0.5)), rows = rows }
-		elseif st.kind == "gap" then
-			d.title = ("No recipe from %d to %d"):format(math.floor(st.from), math.floor(st.to))
-			d.lines[1] = { text = st.why or "no recipe gives skill here", tone = "warn" }
+			d.ways = { title = ("Other ways from %d to %d"):format(line.from, line.to), rows = rows }
+		elseif line.kind == "gap" then
+			d.title = line.title
+			d.dothis[1] = { text = sentence(line.why), tone = "warn" }
+			local rows = {}
+			for _, cut in ipairs(st.shortcuts or {}) do
+				rows[#rows + 1] = shortcutWay(cut, money)
+			end
+			if #rows > 0 then
+				d.ways = { title = "Ways to fill it", rows = rows }
+			end
 		else
-			d.lines[1] = { text = p.rows[#p.rows - #steps + sel].sub, tone = "ash" }
+			d.title = line.title
+			d.dothis[1] = { text = sentence(p.rows[line.n].sub), tone = "ash" }
 		end
-		d.where = ctx.errand and ctx.errand(st) or nil
-		d.actions[1] = { id = "page", label = "Open in Where", enabled = d.where ~= nil, page = "where", step = sel }
-		d.actions[1].tip = d.where == nil and "This step needs no trip." or nil
+		d.where = ctx.errand and ctx.errand(st, line) or nil
+		d.actions[1] =
+			{ id = "page", label = "Open in Where", enabled = d.where ~= nil, page = "where", step = line.step }
+		d.actions[1].tip = d.where == nil and "This line needs no trip." or nil
 		if st.spell then
 			d.actions[2] = { id = "showRecipe", label = "Show recipe", enabled = true, spell = st.spell }
 		end
@@ -2542,18 +3026,27 @@ W.PAGE_LABEL = {
 	settings = "Settings and data",
 }
 
--- The journal's shell (design 7.3 `journal`). ctx = { page, profession (key), counts = { [page] = n }, pips = {
--- [page] = true }, overview (W.overview's result, for the dropdown), status }.
+W.TAB_NOUN = { shopping = { "thing to buy", "things to buy" }, alts = { "mail to send", "mails to send" } }
+
+-- The journal's shell (design 7.3 `journal`). ctx = { page, profession (key), counts = { [page] = n }, tips = {
+-- [page] = text }, pips = { [page] = true }, overview (W.overview's result, for the dropdown), status }.
 function W.journal(ctx)
 	ctx = ctx or {}
 	local page = W.PAGE_LABEL[ctx.page] and ctx.page or "overview"
 	local j = { page = page, profession = ctx.profession, tabs = {}, professions = {}, status = ctx.status or "" }
 	for _, id in ipairs(W.PAGES) do
-		local count = ctx.counts and ctx.counts[id] or nil
+		-- a count shows only with the noun that says what is counted (the tab's tooltip), and never on Overview
+		local count = id ~= "overview" and ctx.counts and num(ctx.counts[id]) or nil
+		local noun = W.TAB_NOUN[id]
+		local tip = ctx.tips and ctx.tips[id] or nil
+		if count and count > 0 and noun and not tip then
+			tip = plural(count, noun[1], noun[2])
+		end
 		j.tabs[#j.tabs + 1] = {
 			id = id,
 			label = W.PAGE_LABEL[id],
-			count = count,
+			count = (count and count > 0 and tip) and count or nil,
+			tip = tip,
 			tone = id == page and "bone" or "ash",
 			pip = (ctx.pips and ctx.pips[id]) == true,
 		}

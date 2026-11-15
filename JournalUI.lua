@@ -32,7 +32,7 @@ local GATHERING = { herbalism = true, mining = true, skinning = true, fishing = 
 --   context()               -> { profession, step }: what the docked panel shows now (for the open-journal button)
 --   live(where, live)       -> strings for the tick ({ dist, line2, line3, ... }); may set live.nextIndex / floor / visited
 --   trackerLive(trackerVM)  -> { title, right, rightTone, angle, ticks }
---   selectProfession(key), selectStep(step, action), selectSpot(key), trackSpot(key)
+--   selectProfession(key), selectStep(step, action), selectStretch(index), selectSpot(key), trackSpot(key)
 --   chooseWay(action, owner), shortcut(action), setting(key, value, action)
 --   waypoint(where, pin) -> ok, why      (default: J.setWaypoint)
 --   openMap(map, where) -> ok, why       (default: OpenWorldMap)
@@ -179,6 +179,8 @@ function J.act(a, owner)
 	elseif id == "selectStep" then
 		J.ctx.step = a.step
 		call("selectStep", a.step, a)
+	elseif id == "selectStretch" then
+		call("selectStretch", a.index, a)
 	elseif id == "selectSpot" then
 		J.ctx.spot = a.key
 		call("selectSpot", a.key)
@@ -277,7 +279,8 @@ local function paintTabs(vm)
 		local t = by[b.id] or {}
 		local on = b.id == page
 		local label = t.label or PAGE[b.id].label
-		if t.count and t.count ~= 0 then
+		-- a count shows only when the tab's tooltip names what is counted, and never on Overview
+		if t.count and t.count ~= 0 and t.tip and b.id ~= "overview" then
 			label = label .. " " .. tostring(t.count)
 		end
 		W.set(b.label, label, on and "bone" or (t.tone or "ash"))
@@ -321,15 +324,22 @@ local function drawShell(vm)
 			name = p.name
 		end
 	end
-	-- the breadcrumb: profession (a dropdown) > step. Hidden on the pages that are not about one profession.
+	-- the breadcrumb: the profession (a dropdown), then only what the dropdown does not already say: the selected
+	-- line on Path, the spot on Where. Hidden on the pages that are not about one profession.
 	local scoped = page ~= "overview" and page ~= "settings"
 	shell.prof:SetShown(scoped)
 	shell.crumb:SetShown(scoped)
 	if scoped then
-		W.set(shell.prof.label, name or vm.profession or "Pick a profession")
+		local shown = name or vm.profession or "Pick a profession"
+		W.set(shell.prof.label, shown)
 		shell.prof:SetWidth(math.max(120, math.min(220, (shell.prof.label:GetStringWidth() or 0) + 40)))
 		W.paintButton(shell.prof)
-		W.set(shell.crumb, vm.crumb and ("> " .. vm.crumb) or "", "ash")
+		local crumb = pages[page] and pages[page].crumb or vm.crumb
+		if W.secret(crumb) or type(crumb) ~= "string" or crumb == "" or crumb == shown then
+			crumb = nil
+		end
+		shell.crumbText = crumb
+		W.set(shell.crumb, crumb or "", "ash")
 	end
 	W.set(shell.status, shell.flash or vm.status or "", shell.flash and "warn" or "ash")
 	local key
@@ -337,7 +347,14 @@ local function drawShell(vm)
 		local ok, k = pcall(GetBindingKey, BINDING)
 		key = ok and k or nil
 	end
-	W.set(shell.hint, key and ("Key: " .. tostring(key)) or "No key set. Settings and data has one.", "ash")
+	if key and not W.secret(key) then
+		W.set(shell.hint.label, "Journal key: " .. tostring(key), "ash")
+		shell.hint.tip = "Change it under Settings and data."
+	else
+		W.set(shell.hint.label, "No key opens the journal yet. Set one under Settings and data.", "ash")
+		shell.hint.tip = "Click to open Settings and data."
+	end
+	shell.hint:SetWidth(math.ceil((shell.hint.label:GetStringWidth() or 0) + 4))
 end
 
 -- One line in the status bar for a refused action (which link broke); cleared by the next page change.
@@ -360,16 +377,15 @@ local function create()
 	frame:SetBackdrop({ bgFile = W.WHITE, edgeFile = W.WHITE, edgeSize = 1 })
 	frame:SetBackdropColor(W.rgb("ink"))
 	frame:SetBackdropBorderColor(W.rgb("line"))
-	local uiH = UIParent and UIParent.GetHeight and UIParent:GetHeight()
-	if type(uiH) == "number" and uiH > 0 and uiH < 680 then
-		frame:SetScale(math.max(0.8, (uiH - 40) / HEIGHT))
-	end
+	-- No scale of its own: a fractional scale breaks the fonts' hinting. The window stays at scale 1 and on whole
+	-- pixels (W.snap: after the saved point is restored, on every show and after a drag).
 	local s = jstate()
 	if type(s.point) == "table" and s.point[1] then
 		frame:SetPoint(s.point[1], UIParent, s.point[1], s.point[2] or 0, s.point[3] or 0)
 	else
 		frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 	end
+	W.snap(frame)
 	local special = _G.UISpecialFrames
 	if type(special) == "table" then
 		table.insert(special, "SkillupHelperJournal") -- Escape closes it
@@ -386,10 +402,9 @@ local function create()
 		frame:StartMoving()
 	end)
 	band:SetScript("OnDragStop", function()
-		frame:StopMovingOrSizing()
-		local point, _, _, x, y = frame:GetPoint(1)
+		local point = W.dragStop(frame)
 		if point then
-			jstate().point = { point, x, y }
+			jstate().point = point
 		end
 	end)
 	shell.title = W.text(band, "GameFontNormalLarge", 15)
@@ -408,14 +423,28 @@ local function create()
 	shell.crumb = W.text(band, "GameFontHighlight", 12)
 	shell.crumb:SetPoint("LEFT", shell.prof, "RIGHT", 10, 0)
 	shell.crumb:SetPoint("RIGHT", band, "RIGHT", -44, 0)
-	shell.close = W.button(band, 22, 22)
-	shell.close:SetPoint("TOPRIGHT", -9, -9)
-	W.set(shell.close.label, "x")
-	shell.close.tip = "Close (Escape)"
-	shell.close.onClick = function()
-		J.close()
+	-- a long line title can be cut here: the band's tooltip has it whole
+	band:SetScript("OnEnter", function(self)
+		W.showTip(self, W.tipOf(self, shell.crumb))
+	end)
+	band:SetScript("OnLeave", W.hideTip)
+	-- the client's own close button (UIPanelCloseButton, SharedUIPanelTemplates.xml); where the template is
+	-- refused, an X drawn from two lines. Never a letter: the font may lack the glyph.
+	local okClose, closeButton = pcall(W.frame, "Button", nil, band, "UIPanelCloseButton")
+	if okClose and closeButton then
+		shell.close, shell.closeKind = closeButton, "template"
+		closeButton:SetSize(24, 24)
+		closeButton:SetPoint("TOPRIGHT", -8, -8)
+		closeButton:SetScript("OnClick", function()
+			J.close()
+		end)
+	else
+		shell.close, shell.closeKind = W.closeButton(band), "drawn"
+		shell.close:SetPoint("TOPRIGHT", -9, -9)
+		shell.close.onClick = function()
+			J.close()
+		end
 	end
-	W.paintButton(shell.close)
 
 	shell.tabs = {}
 	for i, def in ipairs(PAGES) do
@@ -437,12 +466,36 @@ local function create()
 	shell.footLine:SetPoint("BOTTOMLEFT", 12, 28)
 	shell.footLine:SetPoint("BOTTOMRIGHT", -12, 28)
 	W.fill(shell.footLine, "line")
-	shell.hint = W.text(frame, "GameFontHighlightSmall", 10)
-	shell.hint:SetPoint("BOTTOMRIGHT", -14, 9)
-	shell.hint:SetJustifyH("RIGHT")
-	shell.status = W.text(frame, "GameFontHighlightSmall", 10)
-	shell.status:SetPoint("BOTTOMLEFT", 14, 9)
-	shell.status:SetPoint("RIGHT", shell.hint, "LEFT", -12, 0)
+	-- the key hint is a click target: it opens the page that sets the key
+	shell.hint = W.frame("Button", nil, frame)
+	shell.hint:SetSize(120, 18)
+	shell.hint:SetPoint("BOTTOMRIGHT", -14, 5)
+	shell.hint.label = W.text(shell.hint, "GameFontHighlightSmall", 10)
+	shell.hint.label:SetPoint("RIGHT", 0, 0)
+	shell.hint.label:SetJustifyH("RIGHT")
+	shell.hint:SetScript("OnEnter", function(self)
+		W.setColor(self.label, "bone")
+		W.showTip(self, self.tip)
+	end)
+	shell.hint:SetScript("OnLeave", function(self)
+		W.setColor(self.label, "ash")
+		W.hideTip(self)
+	end)
+	shell.hint:SetScript("OnClick", function()
+		J.open("settings")
+	end)
+	-- the status is secondary text: when it is cut short its full text is in the tooltip
+	shell.statusBox = W.frame("Frame", nil, frame)
+	shell.statusBox:SetHeight(18)
+	shell.statusBox:SetPoint("BOTTOMLEFT", 14, 5)
+	shell.statusBox:SetPoint("RIGHT", shell.hint, "LEFT", -12, 0)
+	shell.statusBox:EnableMouse(true)
+	shell.status = W.text(shell.statusBox, "GameFontHighlightSmall", 10)
+	shell.status:SetAllPoints(shell.statusBox)
+	shell.statusBox:SetScript("OnEnter", function(self)
+		W.showTip(self, W.tipOf(self, shell.status))
+	end)
+	shell.statusBox:SetScript("OnLeave", W.hideTip)
 	shell.empty = W.empty(shell.body, 520)
 	shell.empty:SetPoint("TOPLEFT", 24, -40)
 	shell.empty:Hide()
@@ -456,8 +509,9 @@ local function create()
 			end
 		end
 	end)
-	frame:SetScript("OnShow", function()
+	frame:SetScript("OnShow", function(self)
 		J.stats.opened = J.stats.opened + 1
+		W.snap(self)
 	end)
 	frame:SetScript("OnHide", function()
 		-- hidden: the map views' OnUpdate stops with their frames; only a pending key capture needs ending
@@ -549,102 +603,93 @@ local function coverageTip(r)
 			tip[#tip + 1] = "   no price: " .. tostring(item)
 		end
 	end
-	if r.tsmMissing and r.tsmMissing > 0 then
+	if r.unpriced and #r.unpriced > 0 then
+		tip[#tip + 1] = { ("Price unknown, not in the cost: %s"):format(table.concat(r.unpriced, ", ")), "warn" }
+	elseif r.tsmMissing and r.tsmMissing > 0 then
 		tip[#tip + 1] = ("Prices missing: %d"):format(r.tsmMissing)
+	end
+	-- the cost breakdown lives here, not on the card
+	local c = r.cost or {}
+	for _, part in ipairs({ { "Materials", c.mats }, { "Recipes", c.recipes }, { "Training", c.training } }) do
+		if part[2] and part[2] ~= "" then
+			tip[#tip + 1] = ("%s: %s"):format(part[1], tostring(part[2]))
+		end
 	end
 	if r.why then
 		tip[#tip + 1] = r.why
 	end
+	if r.usable ~= false then
+		tip[#tip + 1] = "Click to open its path."
+	end
 	return tip
 end
 
-local function overviewRow(list)
-	local r = W.rowButton(list, 37)
+-- The Overview is a grid of cards, never a list: 3 columns by 6 rows hold the 18 professions the data can ship
+-- inside the body, under the 22-px filter row. 30 + 6 * 75 + 5 * 6 = 510 of 512 px.
+local OV_COLS, OV_ROWS, OV_W, OV_H, OV_GAP_X, OV_GAP_Y, OV_TOP = 3, 6, 306, 75, 9, 6, 30
+assert(OV_COLS * OV_W + (OV_COLS - 1) * OV_GAP_X <= BODY_W, "overview: the columns are wider than the body")
+assert(OV_TOP + OV_ROWS * OV_H + (OV_ROWS - 1) * OV_GAP_Y <= BODY_H, "overview: the rows are taller than the body")
+
+-- One profession: icon, name and skill on line 1, the rank bar with cap ticks, the cost to the top, the state of
+-- the path. Every text has the card's full width to itself or shares it with a short right-aligned one.
+local function overviewCard(parent)
+	local r = W.rowButton(parent, OV_H)
+	r:SetWidth(OV_W)
+	r.ground = W.tex(r, "BACKGROUND", -1)
+	r.ground:SetAllPoints()
+	W.fill(r.ground, "surface")
 	r.icon = W.tex(r, "ARTWORK")
-	r.icon:SetSize(18, 18)
-	r.icon:SetPoint("TOPLEFT", 8, -5)
-	r.name = W.text(r, "GameFontHighlight", 12)
-	r.name:SetPoint("TOPLEFT", 34, -7)
-	r.name:SetWidth(120)
-	r.rank = W.band(r, 110, 6)
-	r.rank:Place("TOPLEFT", r, "TOPLEFT", 160, -11)
+	r.icon:SetSize(24, 24)
+	r.icon:SetPoint("TOPLEFT", 12, -8)
 	r.skill = W.text(r, "GameFontHighlightSmall", 11)
-	r.skill:SetPoint("TOPLEFT", 278, -8)
-	r.skill:SetWidth(64)
-	local function right(x, font, size)
-		local fs = W.text(r, font, size)
-		fs:SetPoint("TOPRIGHT", r, "TOPLEFT", x, size == 13 and -6 or -8)
-		fs:SetWidth(72)
-		fs:SetJustifyH("RIGHT")
-		return fs
-	end
-	r.total = right(420, "GameFontHighlight", 13)
-	r.mats = right(496, "GameFontHighlightSmall", 11)
-	r.recipes = right(566, "GameFontHighlightSmall", 11)
-	r.training = right(636, "GameFontHighlightSmall", 11)
-	r.cover = W.band(r, 150, 6)
-	r.cover:Place("TOPLEFT", r, "TOPLEFT", 664, -11)
-	r.state = W.text(r, "GameFontHighlightSmall", 11)
-	r.state:SetPoint("TOPLEFT", 822, -8)
-	r.state:SetWidth(100)
-	r.line = W.text(r, "GameFontHighlightSmall", 10)
-	r.line:SetPoint("TOPLEFT", 664, -22)
-	r.line:SetWidth(258)
-	r.rowLine = W.tex(r, "BORDER")
-	r.rowLine:SetHeight(1)
-	r.rowLine:SetPoint("BOTTOMLEFT")
-	r.rowLine:SetPoint("BOTTOMRIGHT")
-	W.fill(r.rowLine, "line", 0.6)
-	r.labels = { r.name, r.line }
+	r.skill:SetPoint("TOPRIGHT", -10, -9)
+	r.skill:SetJustifyH("RIGHT")
+	r.name = W.text(r, "GameFontHighlight", 13)
+	r.name:SetPoint("TOPLEFT", 44, -8)
+	r.name:SetPoint("RIGHT", r.skill, "LEFT", -8, 0)
+	r.rank = W.band(r, OV_W - 44 - 10, 6)
+	r.rank:Place("TOPLEFT", r, "TOPLEFT", 44, -28)
+	r.cost = W.text(r, "GameFontHighlightSmall", 11)
+	r.cost:SetPoint("TOPLEFT", 12, -41)
+	r.cost:SetPoint("RIGHT", -10, 0)
+	r.cover = W.text(r, "GameFontHighlightSmall", 11)
+	r.cover:SetPoint("TOPLEFT", 12, -57)
+	r.cover:SetPoint("RIGHT", -10, 0)
+	r.labels = { r.name, r.cost, r.cover }
 	return r
 end
 
-local function drawOverviewRow(r, row)
+local function drawOverviewCard(r, row)
 	local dim = row.usable == false
-	r:SetAlpha(dim and 0.5 or 1)
+	r:SetAlpha(dim and 0.55 or 1)
 	r.action = { id = "selectProfession", key = row.key, page = "path", enabled = not dim }
 	r.tip = coverageTip(row)
 	W.icon(r.icon, row.icon)
 	W.set(r.name, row.name, row.learned and "bone" or "ash")
-	local cap = row.cap or 300
 	r.rank:Set(
 		{ { from = 0, to = row.skill or 0, color = "gold" } },
 		{ lo = 0, hi = 300 },
 		nil,
 		{ ticks = CAPS, track = 0.9 }
 	)
-	if dim then
+	if row.skillText then
+		W.set(r.skill, row.skillText, (row.learned and not dim) and "bone" or "ash")
+	elseif dim then
 		W.set(r.skill, row.why or "not available", "ash")
 	elseif row.learned and row.skill then
-		W.set(r.skill, ("%d / %d"):format(row.skill, cap), "bone")
+		W.set(r.skill, ("%d / %d"):format(row.skill, row.cap or 300), "bone")
 	else
 		W.set(r.skill, "not learned", "ash")
 	end
 	local c = row.cost or {}
-	W.set(r.total, c.total or (dim and "" or "no price"), c.total and "bone" or "warn")
-	W.set(r.mats, c.mats or "", "ash")
-	W.set(r.recipes, c.recipes or "", "ash")
-	W.set(r.training, c.training or "", "ash")
-	local cov = row.coverage or {}
-	local done = cov.done or row.skill or 0
-	local segs = {
-		{ from = 0, to = done, color = "ash", alpha = 0.45 },
-		{ from = done, to = 300, color = "bone", alpha = 0.75 },
-	}
-	if row.status == "nodata" then
-		segs = {}
-	end
-	for _, g in ipairs(cov.gaps or {}) do
-		segs[#segs + 1] = { from = g.from, to = g.to, color = "warn", hatch = true }
-	end
-	r.cover:Set(segs, { lo = 0, hi = 300 }, nil, { raise = 1, track = 0.5 })
-	W.set(
-		r.state,
-		row.statusText or row.status or "",
-		row.status == "complete" and "green" or (row.status == "gaps" and "warn" or "ash")
-	)
-	W.set(r.line, row.line or "", row.lineTone or "ash")
-	W.selectRow(r, row.key == (shell.vm and shell.vm.profession or jstate().profession), "gold")
+	local cost = row.costText or (c.total and ("To 300: " .. tostring(c.total))) or (dim and "" or "Price unknown")
+	W.set(r.cost, cost, row.costTone or (c.total and "bone" or "warn"))
+	local state = row.status == "complete" and "green" or (row.status == "gaps" and "warn" or "ash")
+	W.set(r.cover, row.coverText or row.statusText or row.status or "", row.coverTone or state)
+	-- the card's left rule says the state of the path a second time; the selected profession wears gold
+	local selected = row.key == (shell.vm and shell.vm.profession or jstate().profession)
+	r.rule:SetShown(true)
+	W.fill(r.rule, selected and "gold" or (row.status == "gaps" and "warn" or "line"))
 end
 
 built.overview = function()
@@ -656,37 +701,45 @@ built.overview = function()
 	p.sorts = W.segments(p, 22)
 	p.sorts:SetPoint("TOPRIGHT", 0, 0)
 	p.sortLabel:SetPoint("RIGHT", p.sorts, "LEFT", -8, 0)
-	p.heads = {}
-	local function head(label, x, rightEdge)
-		local fs = W.text(p, "GameFontNormalSmall", 11)
-		if rightEdge then
-			fs:SetPoint("TOPRIGHT", p, "TOPLEFT", x, -34)
-			fs:SetJustifyH("RIGHT")
-		else
-			fs:SetPoint("TOPLEFT", x, -34)
-		end
-		W.set(fs, label, "gold")
-		p.heads[#p.heads + 1] = fs
+	-- the grid: a paged area, so more professions than 18 (no data ships that many) would turn pages, not scroll
+	p.grid = W.pages(p, BODY_W, BODY_H - OV_TOP, "overview")
+	p.grid:SetPoint("TOPLEFT", 0, -OV_TOP)
+	p.cards = W.pool(function()
+		return overviewCard(p.grid.content)
+	end)
+	p.grid.redraw = function()
+		p:Draw(p.vm)
 	end
-	head("Profession", 34)
-	head("Skill", 160)
-	head("Cost to 300", 420, true)
-	head("Materials", 496, true)
-	head("Recipes", 566, true)
-	head("Training", 636, true)
-	head("Path known, 1 to 300", 664)
-	p.headLine = W.tex(p, "BORDER")
-	p.headLine:SetHeight(1)
-	p.headLine:SetPoint("TOPLEFT", 0, -51)
-	p.headLine:SetPoint("TOPRIGHT", 0, -51)
-	W.fill(p.headLine, "line")
-	p.list = W.list(p, BODY_W, BODY_H - 54, { make = overviewRow, draw = drawOverviewRow, rowHeight = 37 })
-	p.list:SetPoint("TOPLEFT", 0, -54)
 	p.none = W.empty(p, 520)
 	p.none:SetPoint("TOPLEFT", 34, -80)
-	p.parts = { p.filters, p.sorts, p.sortLabel, p.list, p.headLine }
-	for _, h in ipairs(p.heads) do
-		p.parts[#p.parts + 1] = h
+	p.parts = { p.filters, p.sorts, p.sortLabel, p.grid }
+	-- lays the cards of the page shown; with more than one page the last row gives way to the pager
+	function p:Lay(rows)
+		local g = self.grid
+		local per = OV_COLS * OV_ROWS
+		if #rows > per then
+			per = OV_COLS * (OV_ROWS - 1)
+		end
+		g.pageCount = math.max(1, math.ceil(#rows / per))
+		g.page = math.max(1, math.min(g.page, g.pageCount))
+		local first = (g.page - 1) * per + 1
+		local last = math.min(#rows, first + per - 1)
+		W.start(self.cards)
+		for i = first, last do
+			local k = i - first
+			local card = W.take(self.cards)
+			card:ClearAllPoints()
+			card:SetPoint("TOPLEFT", (k % OV_COLS) * (OV_W + OV_GAP_X), -math.floor(k / OV_COLS) * (OV_H + OV_GAP_Y))
+			drawOverviewCard(card, rows[i])
+			card:Show()
+		end
+		W.finish(self.cards)
+		g.pager:Set(g.page, g.pageCount, first, last, #rows, "professions")
+		local shown = last - first + 1
+		local lines = math.ceil(shown / OV_COLS)
+		g:SetContentHeight(lines * OV_H + math.max(0, lines - 1) * OV_GAP_Y + (g.pageCount > 1 and 26 or 0))
+		self.rows, self.first, self.last = rows, first, last
+		return shown
 	end
 	function p:Draw(vm)
 		if
@@ -713,7 +766,7 @@ built.overview = function()
 			redraw()
 		end)
 		local rows = overviewRows(vm)
-		self.list:SetItems(rows)
+		local shown = self:Lay(rows)
 		if #rows == 0 then
 			self.none:Set({
 				title = "No profession matches this filter",
@@ -731,19 +784,34 @@ built.overview = function()
 		for _, r in ipairs(rows) do
 			gaps = gaps + #(r.coverage and r.coverage.gaps or {})
 		end
-		return { rows = #rows, gaps = gaps, shown = self.list.rows.n }
+		return { rows = #rows, gaps = gaps, shown = shown, pages = self.grid.pageCount }
 	end
 	return p
 end
 
 ---------------------------------------------------------------------------------------------------------------- path
 
-local TL_X, TL_PX = 18, 3
-local LEGEND = "Diamond: trainer.  Gold square: recipe from the auction house.  Bone square: recipe from a vendor.  "
-	.. "Broken square: Bind on Pickup shortcut.  Hatched: nothing priced."
+-- The Path page, top to bottom: the timeline card (128), the stretch bar (34), then the lines of one stretch (568
+-- wide) beside the detail of the selected line (356 wide). Nothing scrolls: the timeline and the stretch bar are
+-- the navigation, and a stretch never holds more lines than its box.
+local TL_X, TL_PX, TL_H = 18, 3, 128
+local BAR_Y, BAR_H = TL_H + 6, 34
+local LIST_Y = BAR_Y + BAR_H + 6
+local LIST_W, LIST_H, DETAIL_X, DETAIL_W = 568, BODY_H - LIST_Y, 580, 356
+local ROW_H, HEAD_H, HEAD_LINE, HEAD_LINES = 46, 22, 16, 2
+local PATH_MAX = ns.Where and ns.Where.PATH_MAX or 6
+-- the longest stretch (its header with two rank lines, then PATH_MAX rows) fits the box: 54 + 6 * 46 = 330 of 338
+assert(HEAD_H + HEAD_LINES * HEAD_LINE + PATH_MAX * ROW_H <= LIST_H, "path: a full stretch does not fit its list")
+local LEGEND = {
+	{ kind = "train", label = "Trainer" },
+	{ kind = "ah", label = "Auction recipe" },
+	{ kind = "vendor", label = "Vendor recipe" },
+	{ kind = "bop", label = "Shortcut" },
+	{ kind = "gap", label = "No recipe" },
+}
 
 local function timeline(parent)
-	local t = W.card(parent, BODY_W, 128)
+	local t = W.card(parent, BODY_W, TL_H)
 	t:EnableMouse(true)
 	t.quads = W.pool(function()
 		return W.tex(t, "ARTWORK")
@@ -751,11 +819,36 @@ local function timeline(parent)
 	t.labels = W.pool(function()
 		return W.text(t, "GameFontHighlightSmall", 10)
 	end)
+	-- Every edge is a whole physical pixel: both sides of a quad are snapped and its size is their difference, so
+	-- two segments that meet at a skill value share that edge exactly. `edges` keeps every x for the tests.
+	t.edges = {}
+	local function px(v)
+		return W.px(t, v)
+	end
 	local function quad(x, y, wd, ht, tone, alpha, sub, rot)
 		local q = W.take(t.quads)
 		q:ClearAllPoints()
-		q:SetPoint("CENTER", t, "TOPLEFT", x + wd / 2, -(y + ht / 2))
-		q:SetSize(wd, ht)
+		if rot then
+			-- a turned square (the trainer's diamond): its centre sits on a pixel
+			local cx, cy = px(x + wd / 2), px(y + ht / 2)
+			q:SetPoint("CENTER", t, "TOPLEFT", cx, -cy)
+			q:SetSize(px(wd), px(ht))
+			t.edges[#t.edges + 1] = cx
+		else
+			local x1, x2, y1, y2 = px(x), px(x + wd), px(y), px(y + ht)
+			-- a 1-px rule is one physical pixel at every scale, and nothing collapses to zero
+			local one = W.px(t, 1, 1)
+			if wd == 1 or x2 <= x1 then
+				x2 = x1 + one
+			end
+			if ht == 1 or y2 <= y1 then
+				y2 = y1 + one
+			end
+			q:SetPoint("TOPLEFT", t, "TOPLEFT", x1, -y1)
+			q:SetSize(x2 - x1, y2 - y1)
+			t.edges[#t.edges + 1] = x1
+			t.edges[#t.edges + 1] = x2
+		end
 		q:SetDrawLayer("ARTWORK", sub or 0)
 		local r, g, b = W.rgb(tone)
 		q:SetColorTexture(r, g, b, alpha or 1)
@@ -788,13 +881,38 @@ local function timeline(parent)
 			quad(x - size / 2, y + size / 2 - 1.5, size, 3, "surface", 1, 5)
 		end
 	end
+	-- a marker's shape at x (its centre), top y: the same drawing on the lane and in the legend
+	local function mark(kind, x, y, alpha)
+		if kind == "train" then
+			quad(x - 4, y + 1.5, 8, 8, "gold", alpha or 1, 2, math.pi / 4)
+		elseif kind == "ah" then
+			box(x, y, 11, "gold", "gold", 0.25)
+		elseif kind == "vendor" then
+			box(x, y, 11, "bone")
+		elseif kind == "gap" then
+			quad(x - 6, y, 12, 11, "warn", 0.18, 1)
+			for sx = x - 5, x + 5, 4 do
+				quad(sx, y, 1, 11, "warn", 0.9, 2)
+			end
+		else
+			box(x, y, 11, "parch", nil, nil, true)
+		end
+	end
 	function t:Set(vm)
 		W.start(self.quads)
 		W.start(self.labels)
 		self.vm = vm
+		self.edges = {}
+		t.edges = self.edges
 		local skill = vm.skill
 		if W.secret(skill) or type(skill) ~= "number" then
 			skill = nil
+		end
+		-- the stretch the list shows: a quiet ground over its skill range, behind everything
+		local shade = vm.shade
+		if shade and type(shade.from) == "number" and type(shade.to) == "number" then
+			quad(X(shade.from), 44, X(shade.to) - X(shade.from), 36, "bone", 0.1, -1)
+			quad(X(shade.from), 80, X(shade.to) - X(shade.from), 2, "bone", 0.8, 0)
 		end
 		for _, c in ipairs(vm.caps or {}) do
 			quad(X(c.at), 4, 1, 92, "ash", 0.7, 0)
@@ -806,31 +924,23 @@ local function timeline(parent)
 		end
 		local marked = {}
 		for _, m in ipairs(vm.markers or {}) do
-			local x = X(m.at)
 			marked[m.at] = true
-			if m.kind == "train" then
-				quad(x - 4, 29.5, 8, 8, "gold", 1, 2, math.pi / 4)
-			elseif m.kind == "ah" then
-				box(x, 28, 11, "gold", "gold", 0.25)
-			elseif m.kind == "vendor" then
-				box(x, 28, 11, "bone")
-			else
-				box(x, 28, 11, "parch", nil, nil, true)
-			end
+			mark(m.kind, X(m.at), 28)
 		end
 		for _, at in ipairs(vm.gates or {}) do
 			if not marked[at] then
-				quad(X(at) - 4, 29.5, 8, 8, "gold", 0.6, 2, math.pi / 4)
+				mark("train", X(at), 28, 0.6)
 			end
 		end
 		for _, s in ipairs(vm.segments or {}) do
-			local x1, x2 = X(s.from), X(s.to) - 1
-			local wd = math.max(1, x2 - x1)
+			-- left and right come from the skill values; the width is their difference, never rounded on its own
+			local x1, x2 = X(s.from), X(s.to)
+			local wd = x2 - x1
 			if s.gap then
 				quad(x1, 50, wd, 24, "warn", 0.18, 1)
 				quad(x1, 50, wd, 1, "warn", 1, 2)
 				quad(x1, 73, wd, 1, "warn", 1, 2)
-				for sx = x1 + 2, x2 - 1, 4 do
+				for sx = x1 + 2, x2 - 2, 4 do
 					quad(sx, 50, 1, 24, "warn", 0.9, 2)
 				end
 			else
@@ -841,10 +951,14 @@ local function timeline(parent)
 						quad(bx1, 50, bx2 - bx1, 24, b.color, s.done and 0.32 or 1, 1)
 					end
 				end
+				-- a 1-px ink joint on the shared edge tells two lines of one colour apart
+				if not s.done and wd > 2 then
+					quad(x1, 50, 1, 24, "ink", 1, 3)
+				end
 				if s.name and wd >= 24 then
 					local fs = label(x1 + 4, 56, s.name, s.done and "bone" or "ink", 11, "TOPLEFT", s.done and 0.7 or 1)
 					if (fs:GetStringWidth() or 0) > wd - 6 then
-						fs:Hide() -- it does not fit: the name is in the tooltip
+						fs:Hide() -- it does not fit: the name is in the tooltip and in the list
 					end
 				end
 			end
@@ -857,9 +971,20 @@ local function timeline(parent)
 		end
 		if skill then
 			quad(X(skill), 18, 1, 64, "bone", 1, 7)
-			label(X(skill), 98, vm.nowLabel or ("you, %d"):format(skill), "bone", 11, "TOP")
+			label(X(skill), 98, vm.nowLabel or ("You, %d"):format(skill), "bone", 11, "TOP")
 		end
-		label(BODY_W - 12, 112, vm.legend or LEGEND, "ash", 10, "TOPRIGHT")
+		-- the legend: the real marker shapes with one-word labels, in one row at the right
+		local lx = BODY_W - 12
+		for i = #LEGEND, 1, -1 do
+			local e = LEGEND[i]
+			local fs = label(lx, 111, e.label, "ash", 10, "TOPRIGHT")
+			lx = lx - math.ceil(fs:GetStringWidth() or 0) - 12
+			mark(e.kind, lx, 110)
+			lx = lx - 22
+		end
+		if lx < TL_X then
+			W.noteOverflow("timeline legend", BODY_W - 12 - lx, BODY_W - 12 - TL_X)
+		end
 		W.finish(self.quads)
 		W.finish(self.labels)
 	end
@@ -913,8 +1038,8 @@ local function timeline(parent)
 					W.showTip(self, hit.tip or ("At " .. tostring(hit.at)))
 				else
 					W.showTip(self, {
-						hit.name or "Gap",
-						("%s to %s"):format(tostring(hit.from), tostring(hit.to)),
+						hit.name or "No recipe",
+						("Skill %d to %d"):format(math.floor(hit.from or 0), math.floor((hit.to or 0) + 0.5)),
 						hit.gap and { hit.gap.reason or "", "warn" } or nil,
 					})
 				end
@@ -929,31 +1054,33 @@ local function timeline(parent)
 	return t
 end
 
-local function stepRow(list)
-	local r = W.rowButton(list, 46)
+-- One line of the path, 46 px. Line 1 is the title with the row's whole width, so it is never cut. Line 2: what
+-- to buy at the left (worded to fit in Where.lua, whole in the tooltip), the skill range with its band letter and
+-- the cost at the right. No button in a row: the other ways are in the detail.
+local function pathRow(list)
+	local r = W.rowButton(list, ROW_H)
 	r.n = W.text(r, "GameFontHighlightSmall", 11)
-	r.n:SetPoint("LEFT", 4, 0)
-	r.n:SetWidth(22)
+	r.n:SetPoint("TOPLEFT", 6, -9)
+	r.n:SetWidth(20)
 	r.n:SetJustifyH("RIGHT")
 	r.icon = W.tex(r, "ARTWORK")
 	r.icon:SetSize(24, 24)
 	r.icon:SetPoint("LEFT", 32, 0)
-	r.btn = W.button(r, 78, 22)
-	r.btn:SetPoint("RIGHT", -4, 0)
-	r.cost = W.text(r, "GameFontHighlight", 12)
-	r.cost:SetPoint("RIGHT", r, "LEFT", 472, 0)
-	r.cost:SetWidth(70)
+	r.title = W.text(r, "GameFontHighlight", 12)
+	r.title:SetPoint("TOPLEFT", 64, -7)
+	r.title:SetPoint("RIGHT", -8, 0)
+	r.note = W.text(r, "GameFontHighlightSmall", 11)
+	r.note:SetPoint("TOPRIGHT", -8, -26)
+	r.note:SetJustifyH("RIGHT")
+	r.cost = W.text(r, "GameFontHighlightSmall", 11)
+	r.cost:SetPoint("RIGHT", r.note, "LEFT", -4, 0)
 	r.cost:SetJustifyH("RIGHT")
 	r.range = W.text(r, "GameFontHighlightSmall", 11)
-	r.range:SetPoint("RIGHT", r, "LEFT", 398, 0)
-	r.range:SetWidth(84)
+	r.range:SetPoint("TOPRIGHT", r, "TOPLEFT", LIST_W - 140, -26)
 	r.range:SetJustifyH("RIGHT")
-	r.title = W.text(r, "GameFontHighlight", 12)
-	r.title:SetPoint("TOPLEFT", 64, -8)
-	r.title:SetPoint("RIGHT", r.range, "LEFT", -8, 0)
 	r.sub = W.text(r, "GameFontHighlightSmall", 10)
-	r.sub:SetPoint("TOPLEFT", 64, -25)
-	r.sub:SetPoint("RIGHT", r.range, "LEFT", -8, 0)
+	r.sub:SetPoint("TOPLEFT", 64, -26)
+	r.sub:SetPoint("RIGHT", r, "LEFT", LIST_W - 226, 0)
 	r.rowLine = W.tex(r, "BORDER")
 	r.rowLine:SetHeight(1)
 	r.rowLine:SetPoint("BOTTOMLEFT")
@@ -963,106 +1090,252 @@ local function stepRow(list)
 	return r
 end
 
-local function drawStepRow(r, row)
-	local fold = row.kind == "fold"
+local function drawPathRow(r, row)
 	r.tip = row.tip
-	r.action = row.action or (not fold and row.n and { id = "selectStep", step = row.n, enabled = true }) or nil
-	r.icon:SetShown(not fold)
-	if not fold then
-		W.icon(r.icon, row.icon)
-	end
-	W.set(r.n, fold and "" or row.n or "", "ash")
-	r.title:ClearAllPoints()
-	r.title:SetPoint(fold and "LEFT" or "TOPLEFT", fold and 32 or 64, fold and 0 or -8)
-	r.title:SetPoint("RIGHT", r.range, "LEFT", -8, 0)
-	W.set(
-		r.title,
-		row.title,
-		(fold and "ash") or (row.kind == "gap" and "warn") or (row.kind == "unlock" and "gold") or "bone"
-	)
-	W.set(r.sub, fold and "" or row.sub or "", row.kind == "gap" and "warn" or "ash")
-	-- the range wears the band colour and its letter
+	r.action = row.action or (row.step and { id = "selectStep", step = row.step, enabled = true }) or nil
+	local hasIcon = row.icon ~= nil
+	W.icon(r.icon, row.icon)
+	W.set(r.n, row.n or "", "ash")
+	-- without an icon the text starts where the icon would
+	local tx = hasIcon and 64 or 34
+	r.title:SetPoint("TOPLEFT", tx, -7)
+	r.sub:SetPoint("TOPLEFT", tx, -26)
+	local tone = (row.kind == "gap" and "warn") or (row.kind == "unlock" and "gold") or "bone"
+	W.set(r.title, row.title, tone, row.done and 0.6 or 1)
+	W.set(r.sub, row.sub or "", row.kind == "gap" and "warn" or "ash")
+	-- the range wears the band colour and its letter: colour is never the only signal
 	local letter = W.BAND_LETTER[row.rangeTone]
 	W.set(
 		r.range,
 		row.range and ((letter and letter ~= "-" and (letter .. " ") or "") .. row.range) or "",
 		row.rangeTone or "ash"
 	)
+	W.set(r.note, row.costNote or "", "warn")
+	r.note:SetWidth(row.costNote and math.ceil(r.note:GetStringWidth() or 0) or 1)
 	W.set(r.cost, row.cost or "", "bone")
-	local selected = row.selected or (J.pathSelected ~= nil and row.n == J.pathSelected and not fold)
-	W.selectRow(r, selected, row.rangeTone or "bone")
-	if row.kind == "gap" and row.action then
-		W.setButton(r.btn, row.action, "quiet")
-		r.action = nil
-	elseif row.ways and row.ways > 1 then
-		W.setButton(r.btn, {
-			id = "wayMenu",
-			step = row.n,
-			row = row,
-			label = row.waysLabel or ("%d ways"):format(row.ways),
-			enabled = true,
-		}, "quiet")
-		r.btn.onClick = function(self)
-			J.act(self.action, self)
+	W.selectRow(r, row.selected == true, row.rangeTone or "bone")
+end
+
+-- The header of the stretch shown: its name and range, then the rank trainings that fall in it (two lines; more
+-- are counted on the second line and listed in the tooltip).
+local function stretchHead(parent)
+	local h = W.frame("Frame", nil, parent)
+	h:SetSize(LIST_W, HEAD_H)
+	h.title = W.text(h, "GameFontNormalSmall", 12)
+	h.title:SetPoint("TOPLEFT", 6, -4)
+	h.count = W.text(h, "GameFontHighlightSmall", 11)
+	h.count:SetPoint("TOPRIGHT", -8, -5)
+	h.count:SetJustifyH("RIGHT")
+	h.title:SetPoint("RIGHT", h.count, "LEFT", -8, 0)
+	h.lines = {}
+	for i = 1, HEAD_LINES do
+		local fs = W.text(h, "GameFontHighlightSmall", 11)
+		fs:SetPoint("TOPLEFT", 6, -(HEAD_H + (i - 1) * HEAD_LINE))
+		fs:SetPoint("RIGHT", -8, 0)
+		h.lines[i] = fs
+	end
+	h.rule = W.tex(h, "BORDER")
+	h.rule:SetPoint("BOTTOMLEFT")
+	h.rule:SetPoint("BOTTOMRIGHT")
+	W.fill(h.rule, "line")
+	h:EnableMouse(true)
+	h:SetScript("OnEnter", function(self)
+		W.showTip(self, self.tip or W.tipOf(self, self.title, self.lines[1], self.lines[2]))
+	end)
+	h:SetScript("OnLeave", W.hideTip)
+	function h:Set(s)
+		h.rule:SetHeight(W.px(h, 1, 1))
+		local head = s and s.head or {}
+		local lines = head.lines or {}
+		W.set(self.title, head.title or (s and s.label) or "", "gold")
+		W.set(self.count, s and ("%d to %d of the path"):format(s.rows[1].n or 0, s.rows[#s.rows].n or 0) or "", "ash")
+		local n = math.min(#lines, HEAD_LINES)
+		for i = 1, HEAD_LINES do
+			local text = lines[i]
+			if i == HEAD_LINES and #lines > HEAD_LINES then
+				text = ("%s, and %d more"):format(lines[i], #lines - HEAD_LINES)
+			end
+			W.set(self.lines[i], i <= n and text or "", "bone")
+			self.lines[i]:SetShown(i <= n)
 		end
+		self.tip = #lines > HEAD_LINES and { head.title or "", unpack(lines) } or nil
+		local height = HEAD_H + n * HEAD_LINE
+		self:SetHeight(height)
+		return height
+	end
+	return h
+end
+
+-- The stretch bar: Previous, one button per stretch (its skill range, with "you are here" or "done" under it), Next.
+-- With more stretches than fit, the buttons shown are the ones around the selected stretch.
+local STRETCH_NAV, STRETCH_MIN = 78, 78
+local function stretchBar(parent)
+	local bar = W.frame("Frame", nil, parent)
+	bar:SetSize(BODY_W, BAR_H)
+	bar.prev = W.button(bar, STRETCH_NAV, BAR_H)
+	bar.prev:SetPoint("TOPLEFT", 0, 0)
+	bar.next = W.button(bar, STRETCH_NAV, BAR_H)
+	bar.next:SetPoint("TOPRIGHT", 0, 0)
+	bar.pool = W.pool(function()
+		local b = W.button(bar, STRETCH_MIN, BAR_H)
+		b.state = W.text(b, "GameFontHighlightSmall", 9)
+		b.state:SetPoint("BOTTOM", 0, 4)
+		b.state:SetJustifyH("CENTER")
+		return b
+	end)
+	function bar:Set(stretches, shown)
+		stretches = stretches or {}
+		local n = #stretches
+		local room = BODY_W - 2 * (STRETCH_NAV + 6)
+		local fit = math.max(1, math.floor((room + 4) / (STRETCH_MIN + 4)))
+		local count = math.min(n, fit)
+		-- the window of buttons: centred on the stretch shown, clamped to the ends
+		local first = math.max(1, math.min(n - count + 1, (shown or 1) - math.floor(count / 2)))
+		local bw = count > 0 and math.floor((room - (count - 1) * 4) / count) or 0
+		W.start(self.pool)
+		for k = 1, count do
+			local s = stretches[first + k - 1]
+			local b = W.take(self.pool)
+			b:ClearAllPoints()
+			b:SetPoint("TOPLEFT", STRETCH_NAV + 6 + (k - 1) * (bw + 4), 0)
+			b:SetSize(bw, BAR_H)
+			b.onClick = nil
+			b.selected = s.selected == true
+			W.setButton(
+				b,
+				{ id = "selectStretch", index = s.index, label = s.label, enabled = true, tip = s.tip },
+				"quiet"
+			)
+			-- the label sits high when a state line is under it; done stretches are dimmed
+			local state = s.state
+			b.labelY = state and 6 or 0
+			W.paintButton(b)
+			W.set(b.state, state or "", s.current and "gold" or "ash")
+			b:SetAlpha((s.done and not b.selected) and 0.6 or 1)
+			if b.selected then
+				W.fill(b.bg, "line", 0.8)
+			end
+		end
+		W.finish(self.pool)
+		local at = shown or 1
+		W.setButton(self.prev, {
+			id = "selectStretch",
+			index = at - 1,
+			label = "Previous",
+			enabled = at > 1,
+			tip = at > 1 and stretches[at - 1].head and stretches[at - 1].head.title or nil,
+		}, "quiet")
+		W.setButton(self.next, {
+			id = "selectStretch",
+			index = at + 1,
+			label = "Next",
+			enabled = at < n,
+			tip = at < n and stretches[at + 1].head and stretches[at + 1].head.title or nil,
+		}, "quiet")
+		self.first, self.count = first, count
+		return count
+	end
+	return bar
+end
+
+-- The detail of the selected line, 356 wide and as tall as the list. Top down: the title; "Do this" and "Get the
+-- recipe" as labelled paragraphs; then one paged list (W.list) that holds the Materials and the Other ways, each
+-- under its header; the small map when the line needs a trip and there is room for it; the buttons. The list takes
+-- whatever height is left, so the card never needs more than its box: more rows than fit turn pages.
+local DETAIL_PAD, DETAIL_INNER, LABEL_W, MAP_H = 12, DETAIL_W - 3 - 24, 92, 72
+local MAT_H, WAY_H, SECTION_H = 18, 22, 22
+
+-- One row of the detail's list: a section header, a material (name, have / need, source and unit price) or a
+-- way (a radio row; the plan's pick is filled).
+local function detailRow(list)
+	local r = W.rowButton(list, WAY_H)
+	r.head = W.text(r, "GameFontNormalSmall", 11)
+	r.head:SetPoint("BOTTOMLEFT", 0, 5)
+	r.headLine = W.tex(r, "BORDER")
+	r.headLine:SetHeight(1)
+	r.headLine:SetPoint("BOTTOMLEFT")
+	r.headLine:SetPoint("BOTTOMRIGHT")
+	W.fill(r.headLine, "line")
+	r.outer = W.disc(r, 12, "ARTWORK", 1)
+	r.outer:SetPoint("LEFT", 2, 0)
+	r.mid = W.disc(r, 10, "ARTWORK", 2)
+	r.mid:SetPoint("CENTER", r.outer, "CENTER")
+	r.dot = W.disc(r, 6, "ARTWORK", 3)
+	r.dot:SetPoint("CENTER", r.outer, "CENTER")
+	r.right = W.text(r, "GameFontHighlightSmall", 11)
+	r.right:SetPoint("RIGHT", -2, 0)
+	r.right:SetJustifyH("RIGHT")
+	r.count = W.text(r, "GameFontHighlightSmall", 11)
+	r.count:SetPoint("RIGHT", r, "LEFT", DETAIL_INNER - 126, 0)
+	r.count:SetJustifyH("RIGHT")
+	r.label = W.text(r, "GameFontHighlightSmall", 11)
+	r.labels = { r.label, r.right }
+	return r
+end
+
+local function drawDetailRow(r, it)
+	local head, way = it.kind == "head", it.kind == "way"
+	r.action, r.tip = way and it.action or nil, it.tip
+	r.head:SetShown(head)
+	r.headLine:SetShown(head)
+	r.outer:SetShown(way)
+	r.mid:SetShown(way)
+	r.dot:SetShown(way and it.picked == true)
+	r.label:SetShown(not head)
+	r.right:SetShown(not head)
+	r.count:SetShown(it.kind == "material")
+	if head then
+		W.set(r.head, it.text, "gold")
+		return
+	end
+	r.label:ClearAllPoints()
+	r.label:SetPoint("LEFT", way and 22 or 0, 0)
+	if way then
+		r.outer:SetVertexColor(W.rgb(it.picked and "gold" or "ash"))
+		r.mid:SetVertexColor(W.rgb("surface"))
+		r.dot:SetVertexColor(W.rgb("gold"))
+		r.label:SetPoint("RIGHT", r.right, "LEFT", -8, 0)
+		W.set(r.label, it.label, it.picked and "bone" or "ash")
+		W.set(r.right, it.right or "", it.picked and "gold" or "ash")
 	else
-		r.btn:Hide()
+		-- "13 / 24": what the bags hold of what the line needs; green and a full count when there is enough
+		local have, need = it.have or 0, it.need or 0
+		r.label:SetPoint("RIGHT", r.count, "LEFT", -8, 0)
+		W.set(r.label, it.name, "bone")
+		W.set(
+			r.count,
+			it.need and ("%s / %s"):format(tostring(have), tostring(need)) or "",
+			have >= need and "green" or "bone"
+		)
+		W.set(r.right, it.right or it.price or it.source or "", it.tone == "warn" and "warn" or "ash")
 	end
 end
 
 local function detail(parent)
-	local d = W.card(parent, 356, 376)
-	local inner = 356 - 3 - 24
-	d.scroll = W.scroll(d, 356 - 3 - 12, 200)
-	d.scroll:SetPoint("TOPLEFT", 15, -12)
-	local c = d.scroll.content
+	local d = W.card(parent, DETAIL_W, LIST_H)
+	local inner = DETAIL_INNER
+	d.area = W.pages(d, inner, LIST_H - 2 * DETAIL_PAD, "path detail")
+	d.area:SetPoint("TOPLEFT", 15, -DETAIL_PAD)
+	local c = d.area.content
 	d.title = W.para(c, "GameFontHighlightLarge", 15, inner)
+	d.labels = W.pool(function()
+		return W.text(c, "GameFontNormalSmall", 11)
+	end)
 	d.paras = W.pool(function()
-		return W.para(c, "GameFontHighlightSmall", 11, inner)
+		return W.para(c, "GameFontHighlightSmall", 11, inner - LABEL_W)
 	end)
-	d.heads = W.pool(function()
-		return W.header(c, inner)
-	end)
-	d.reagents = W.pool(function()
-		local r = W.frame("Frame", nil, c)
-		r:SetSize(inner, 18)
-		r.price = W.text(r, "GameFontHighlightSmall", 11)
-		r.price:SetPoint("RIGHT", 0, 0)
-		r.price:SetWidth(96)
-		r.price:SetJustifyH("RIGHT")
-		r.count = W.text(r, "GameFontHighlightSmall", 11)
-		r.count:SetPoint("RIGHT", r.price, "LEFT", -8, 0)
-		r.count:SetWidth(56)
-		r.count:SetJustifyH("RIGHT")
-		r.name = W.text(r, "GameFontHighlightSmall", 11)
-		r.name:SetPoint("LEFT", 0, 0)
-		r.name:SetPoint("RIGHT", r.count, "LEFT", -8, 0)
-		r:EnableMouse(true)
-		r:SetScript("OnEnter", function(self)
-			W.showTip(self, W.tipOf(self, self.name, self.price))
-		end)
-		r:SetScript("OnLeave", W.hideTip)
-		return r
-	end)
-	d.ways = W.pool(function()
-		local r = W.rowButton(c, 22)
-		r:SetWidth(inner)
-		r.outer = W.disc(r, 12, "ARTWORK", 1)
-		r.outer:SetPoint("LEFT", 2, 0)
-		r.mid = W.disc(r, 10, "ARTWORK", 2)
-		r.mid:SetPoint("CENTER", r.outer, "CENTER")
-		r.dot = W.disc(r, 6, "ARTWORK", 3)
-		r.dot:SetPoint("CENTER", r.outer, "CENTER")
-		r.right = W.text(r, "GameFontHighlightSmall", 11)
-		r.right:SetPoint("RIGHT", -4, 0)
-		r.right:SetJustifyH("RIGHT")
-		r.label = W.text(r, "GameFontHighlightSmall", 11)
-		r.label:SetPoint("LEFT", 22, 0)
-		r.label:SetPoint("RIGHT", r.right, "LEFT", -8, 0)
-		r.labels = { r.label, r.right }
-		return r
-	end)
-	d.map = ns.MapCanvas.new(d, 330, 92, {
+	d.list = W.list(c, inner, 100, {
+		make = detailRow,
+		draw = drawDetailRow,
+		noun = "lines",
+		height = function(it)
+			return (it.kind == "head" and SECTION_H) or (it.kind == "way" and WAY_H) or MAT_H
+		end,
+		keep = function(it)
+			return it.kind == "head"
+		end,
+	})
+	d.map = ns.MapCanvas.new(d, 330, MAP_H, {
 		header = "none",
 		onClick = function(map)
 			if map.where then
@@ -1076,25 +1349,69 @@ local function detail(parent)
 	d.buttons = W.pool(function()
 		return W.button(d, 96, 24)
 	end)
-	function d:Set(v)
-		for _, pool in ipairs({ self.paras, self.heads, self.reagents, self.ways }) do
-			W.start(pool)
+	-- the list's items of a detail model: Materials, then Other ways, each under its header
+	local function listItems(v)
+		local items = {}
+		local mats = v.materials or {}
+		if #mats > 0 then
+			items[#items + 1] = { kind = "head", text = v.materialsTitle or "Materials" }
+			for _, m in ipairs(mats) do
+				items[#items + 1] = {
+					kind = "material",
+					name = m.name,
+					have = m.have,
+					need = m.need,
+					right = m.right,
+					price = m.price,
+					source = m.source,
+					tone = m.tone,
+					tip = m.tip,
+				}
+			end
 		end
+		local ways = v.ways and v.ways.rows or {}
+		if #ways > 0 then
+			items[#items + 1] = { kind = "head", text = v.ways.title or "Other ways" }
+			for _, wy in ipairs(ways) do
+				items[#items + 1] = {
+					kind = "way",
+					label = wy.label,
+					right = wy.right,
+					picked = wy.picked,
+					action = wy.action,
+					tip = wy.tip,
+				}
+			end
+		end
+		return items
+	end
+	local function heightOf(items)
+		local h = 0
+		for _, it in ipairs(items) do
+			h = h + ((it.kind == "head" and SECTION_H) or (it.kind == "way" and WAY_H) or MAT_H)
+		end
+		return h
+	end
+	function d:Set(v)
+		W.start(self.labels)
+		W.start(self.paras)
+		local box = self.area.h
 		if not v then
 			self.title:Hide()
 			self.map:Hide()
+			self.list:Hide()
 			W.buttonRow(self.buttons, self, {}, 0, 0, 10)
 			local fs = W.take(self.paras)
 			fs:ClearAllPoints()
 			fs:SetPoint("TOPLEFT", 0, 0)
-			W.set(fs, "Pick a step in the list or on the timeline to see what it needs and where it is done.", "ash")
+			fs:SetWidth(inner)
+			W.set(fs, "Pick a line in the list or on the timeline to see what it needs and where it is done.", "ash")
 			fs:Show()
 			self:Rule(nil)
-			for _, pool in ipairs({ self.paras, self.heads, self.reagents, self.ways }) do
-				W.finish(pool)
-			end
-			self.scroll:SetContentHeight(40)
-			return
+			W.finish(self.labels)
+			W.finish(self.paras)
+			self.area:SetContentHeight(40)
+			return { fits = true }
 		end
 		self:Rule(v.color or "bone")
 		local y = 0
@@ -1103,83 +1420,77 @@ local function detail(parent)
 		W.set(self.title, v.title, "bone")
 		self.title:Show()
 		y = y + math.max(15, self.title:GetStringHeight() or 15) + 8
-		local function para(s, tone)
-			local fs = W.take(self.paras)
-			fs:ClearAllPoints()
-			fs:SetPoint("TOPLEFT", 0, -y)
-			W.set(fs, s, tone or "ash")
-			fs:Show()
-			y = y + math.max(11, fs:GetStringHeight() or 11) + 4
-		end
-		local function head(s)
-			y = y + 6
-			local fs = W.take(self.heads)
-			fs:ClearAllPoints()
-			fs:SetPoint("TOPLEFT", 0, -y)
-			W.set(fs, s, "gold")
-			fs:Show()
-			y = y + 20
-		end
-		for _, l in ipairs(v.lines or {}) do
-			para(l.text, l.tone)
-		end
-		if v.learn then
-			-- recipe-source data not yet seen in Forever is written in parch; "Known" is a word, not only a colour
-			local unsure = v.learn.confidence and v.learn.confidence ~= "confirmed"
-			para(v.learn.text, unsure and "parch" or "ash")
-			if v.learn.known then
-				para(v.learn.knownText or "Known", "green")
+		-- a gold label at the left, its paragraphs at the right
+		local function section(name, lines)
+			if #lines == 0 then
+				return
 			end
-		end
-		if v.reagents and #v.reagents > 0 then
-			head(v.reagentsTitle or "Reagents")
-			for _, rg in ipairs(v.reagents) do
-				local r = W.take(self.reagents)
-				r:ClearAllPoints()
-				r:SetPoint("TOPLEFT", 0, -y)
-				r.tip = rg.tip or (rg.source and { rg.name or "", rg.source } or nil)
-				W.set(r.name, rg.name, rg.tone or "bone")
-				W.set(
-					r.count,
-					rg.need and ("%s / %s"):format(tostring(rg.have or 0), tostring(rg.need)) or "",
-					(rg.have or 0) >= (rg.need or 0) and "green" or "bone"
-				)
-				W.set(r.price, rg.price or rg.source or "", rg.price and "ash" or "parch")
-				r:Show()
-				y = y + 18
+			local lb = W.take(self.labels)
+			lb:ClearAllPoints()
+			lb:SetPoint("TOPLEFT", 0, -y)
+			lb:SetWidth(LABEL_W - 6)
+			W.set(lb, name, "gold")
+			lb:Show()
+			for _, l in ipairs(lines) do
+				local fs = W.take(self.paras)
+				fs:ClearAllPoints()
+				fs:SetPoint("TOPLEFT", LABEL_W, -y)
+				fs:SetWidth(inner - LABEL_W)
+				W.set(fs, l.text, l.tone or "ash")
+				fs:Show()
+				y = y + math.max(11, fs:GetStringHeight() or 11) + 3
 			end
+			y = y + 5
 		end
-		if v.ways and v.ways.rows and #v.ways.rows > 0 then
-			head(v.ways.title or "Ways")
-			for _, wy in ipairs(v.ways.rows) do
-				local r = W.take(self.ways)
-				r:ClearAllPoints()
-				r:SetPoint("TOPLEFT", 0, -y)
-				r.action, r.tip = wy.action, wy.tip
-				r.outer:SetVertexColor(W.rgb(wy.picked and "gold" or "ash"))
-				r.mid:SetVertexColor(W.rgb("surface"))
-				r.dot:SetVertexColor(W.rgb("gold"))
-				r.dot:SetShown(wy.picked == true)
-				W.set(r.label, wy.label, wy.picked and "bone" or "ash")
-				W.set(r.right, wy.right or "", "ash")
-				r:Show()
-				y = y + 22
-			end
+		local dothis = {}
+		for _, l in ipairs(v.dothis or {}) do
+			dothis[#dothis + 1] = l
 		end
-		for _, pool in ipairs({ self.paras, self.heads, self.reagents, self.ways }) do
-			W.finish(pool)
+		if v.note then
+			dothis[#dothis + 1] = { text = v.note, tone = "warn" }
 		end
+		section("Do this", dothis)
+		local recipe = v.recipe
+		section(
+			"Get the recipe",
+			recipe and recipe.text and { { text = recipe.text, tone = recipe.tone or "ash" } } or {}
+		)
+		W.finish(self.labels)
+		W.finish(self.paras)
+		-- what is left belongs to the list; the map is drawn only when the list still shows whole beside it
+		local n = W.buttonRow(self.buttons, self, v.actions, 15, 10, inner, v.color, "BOTTOMLEFT")
+		local bottom = n > 0 and (24 + 10) or 0
+		local items = listItems(v)
+		local need = heightOf(items)
+		local room = box - y - bottom
+		-- with the map the list keeps `withMap` px: enough when it shows whole, or in two pages of at least a
+		-- header and two rows; a longer list takes the map's place ("Open in Where" still leads to it)
+		local withMap = room - (MAP_H + 8)
 		local hasMap = v.where ~= nil
+			and (need <= withMap or (withMap >= SECTION_H + 2 * WAY_H + 26 and need <= 2 * (withMap - 26)))
+		self.mapDropped = v.where ~= nil and not hasMap
+		if hasMap then
+			room = room - (MAP_H + 8)
+		end
 		self.map:SetShown(hasMap)
 		if hasMap then
+			self.map:SetPoint("BOTTOMLEFT", 15, DETAIL_PAD + bottom)
 			self.map:Set(v.where, { mode = "travel" })
 			W.setChip(self.mapChip, v.where.title, nil, v.where.sub)
 		end
-		local n = W.buttonRow(self.buttons, self, v.actions, 15, 10, 356 - 3 - 24, v.color, "BOTTOMLEFT")
-		local bottom = (n > 0 and 44 or 12) + (hasMap and 100 or 0)
-		self.scroll.h = 376 - 12 - bottom
-		self.scroll:SetHeight(self.scroll.h)
-		self.scroll:SetContentHeight(y + 4)
+		self.list:ClearAllPoints()
+		self.list:SetPoint("TOPLEFT", 0, -y)
+		self.list:SetShown(#items > 0)
+		self.list:SetBox(room)
+		local same = self.shown == v.n and v.n ~= nil
+		self.shown = v.n
+		self.list:SetItems(items, same)
+		local used = y + (#items > 0 and math.min(need, room) or 0) + (hasMap and (MAP_H + 8) or 0) + bottom
+		if #items > 0 and room < SECTION_H + WAY_H then
+			used = y + SECTION_H + WAY_H + bottom -- the texts above left no room for one header and one row
+		end
+		self.area:SetContentHeight(used)
+		return { fits = used <= box + 0.5, lines = #items, pages = self.list.pageCount, map = hasMap }
 	end
 	return d
 end
@@ -1188,40 +1499,71 @@ built.path = function()
 	local p = pageFrame()
 	p.timeline = timeline(p)
 	p.timeline:SetPoint("TOPLEFT", 0, 0)
-	p.list = W.list(p, 568, 376, {
-		make = stepRow,
-		draw = drawStepRow,
-		rowHeight = 46,
-		height = function(row)
-			return row.kind == "fold" and 26 or 46
-		end,
-	})
-	p.list:SetPoint("TOPLEFT", 0, -136)
+	p.bar = stretchBar(p)
+	p.bar:SetPoint("TOPLEFT", 0, -BAR_Y)
+	p.area = W.pages(p, LIST_W, LIST_H, "path lines")
+	p.area:SetPoint("TOPLEFT", 0, -LIST_Y)
+	p.head = stretchHead(p.area.content)
+	p.head:SetPoint("TOPLEFT", 0, 0)
+	p.rows = W.pool(function()
+		local r = pathRow(p.area.content)
+		r:SetWidth(LIST_W)
+		return r
+	end)
 	p.detail = detail(p)
-	p.detail:SetPoint("TOPLEFT", 580, -136)
-	p.parts = { p.timeline, p.list, p.detail }
+	p.detail:SetPoint("TOPLEFT", DETAIL_X, -LIST_Y)
+	p.parts = { p.timeline, p.bar, p.area, p.detail }
 	function p:Draw(vm)
 		if
-			pageEmpty(self, (not vm or vm.empty) and (vm and vm.empty or {
+			pageEmpty(self, (not vm or vm.empty) and (vm and (type(vm.empty) == "table" and vm.empty or {
+				title = "No plan yet",
+				text = vm.empty,
+			}) or {
 				title = "No path to show",
 				text = "Pick a profession at the top. The path is drawn from the plan for that "
 					.. "profession; without a plan there is nothing to lay on the timeline.",
 			}) or nil)
 		then
+			self.crumb = nil
 			return { steps = 0 }
 		end
-		J.pathSelected = vm.selected
-		self.timeline:Set(vm)
-		local keep = self.profession == vm.profession
-		self.profession = vm.profession
-		self.list:SetItems(vm.rows or {}, keep)
-		for i, row in ipairs(vm.rows or {}) do
-			if row.n == vm.selected and row.kind ~= "fold" and not keep then
-				self.list:Reveal(i)
-			end
+		local stretch = vm.stretches and vm.stretches[vm.stretch or 0] or nil
+		if
+			pageEmpty(self, not stretch and {
+				title = "No lines on this path",
+				text = "The plan for this profession has no line to show: either everything is done, or the "
+					.. "path came without its stretches (Where.pathSelect did not run).",
+			} or nil)
+		then
+			self.crumb = nil
+			return { steps = #(vm.rows or {}), stretches = 0 }
 		end
-		self.detail:Set(vm.detail)
-		return { steps = #(vm.rows or {}), segments = #(vm.segments or {}), shown = self.list.rows.n }
+		self.vm, self.crumb = vm, vm.crumb
+		self.timeline:Set(vm)
+		self.bar:Set(vm.stretches, vm.stretch)
+		local y = self.head:Set(stretch)
+		W.start(self.rows)
+		for _, row in ipairs(stretch.rows) do
+			local r = W.take(self.rows)
+			r:ClearAllPoints()
+			r:SetPoint("TOPLEFT", 0, -y)
+			drawPathRow(r, row)
+			r:Show()
+			y = y + ROW_H
+		end
+		W.finish(self.rows)
+		-- a stretch always fits (W.stretches cuts at PATH_MAX rows); one that does not is counted, never scrolled
+		self.area:SetContentHeight(y)
+		local det = self.detail:Set(vm.detail)
+		return {
+			steps = #(vm.rows or {}),
+			segments = #(vm.segments or {}),
+			stretches = #vm.stretches,
+			stretch = vm.stretch,
+			shown = self.rows.n,
+			detailFits = det.fits,
+			mapDropped = self.detail.mapDropped or nil,
+		}
 	end
 	return p
 end
@@ -1280,7 +1622,10 @@ end
 
 built.where = function()
 	local p = pageFrame()
-	p.side = W.scroll(p, 296, BODY_H)
+	-- The left column, 296 x 512, top down: the head (34), the selected spot as a card with its yields, then one
+	-- list in what is left: the other spots, best first, or (a two-segment control picks) the route to 300. The
+	-- list pages ("1 to 4 of 14 spots"); nothing here scrolls and the route never adds height.
+	p.side = W.pages(p, 296, BODY_H, "where side")
 	p.side:SetPoint("TOPLEFT", 0, 0)
 	local c = p.side.content
 	p.headTitle = W.text(c, "GameFontHighlight", 12)
@@ -1289,9 +1634,16 @@ built.where = function()
 	p.headSub = W.text(c, "GameFontHighlightSmall", 10)
 	p.headSub:SetPoint("TOPLEFT", 2, -17)
 	p.headSub:SetWidth(280)
-	p.rows = W.pool(function()
-		return spotRow(c)
-	end)
+	p.list = W.list(c, 286, 100, {
+		make = spotRow,
+		draw = function(r, s)
+			drawSpot(r, s)
+			W.selectRow(r, s.selected, "bone")
+		end,
+		rowHeight = 62,
+		noun = "spots",
+	})
+	p.listMode = W.segments(c, 22)
 	-- the selected spot: a full card with its yields
 	p.card = W.card(c, 286, 120)
 	p.card.chip = W.chip(p.card)
@@ -1307,22 +1659,31 @@ built.where = function()
 	p.card.third:SetPoint("RIGHT", -6, 0)
 	p.card.yields = W.yields(p.card, 286 - 12 - 8)
 	p.card.yields:SetPoint("TOPLEFT", 12, -58)
-	p.itinHead = W.header(c, 280)
-	p.itin = W.pool(function()
-		local r = W.rowButton(c, 34)
-		r:SetWidth(286)
-		r.range = W.text(r, "GameFontHighlightSmall", 11)
-		r.range:SetPoint("TOPLEFT", 10, -5)
-		r.range:SetWidth(64)
-		r.title = W.text(r, "GameFontHighlightSmall", 11)
-		r.title:SetPoint("TOPLEFT", 78, -5)
-		r.title:SetPoint("RIGHT", -6, 0)
-		r.sub = W.text(r, "GameFontHighlightSmall", 10)
-		r.sub:SetPoint("TOPLEFT", 78, -19)
-		r.sub:SetPoint("RIGHT", -6, 0)
-		r.labels = { r.title, r.sub }
-		return r
-	end)
+	p.route = W.list(c, 286, 100, {
+		make = function(list)
+			local r = W.rowButton(list, 34)
+			r.range = W.text(r, "GameFontHighlightSmall", 11)
+			r.range:SetPoint("TOPLEFT", 10, -5)
+			r.range:SetWidth(72)
+			r.title = W.text(r, "GameFontHighlightSmall", 11)
+			r.title:SetPoint("TOPLEFT", 86, -5)
+			r.title:SetPoint("RIGHT", -6, 0)
+			r.sub = W.text(r, "GameFontHighlightSmall", 10)
+			r.sub:SetPoint("TOPLEFT", 86, -19)
+			r.sub:SetPoint("RIGHT", -6, 0)
+			r.labels = { r.title, r.sub }
+			return r
+		end,
+		draw = function(r, row)
+			r.action = row.key and { id = "selectSpot", key = row.key, enabled = true } or nil
+			r.tip = row.tip
+			W.set(r.range, row.range, row.tone or "bone")
+			W.set(r.title, row.title, row.done and "ash" or "bone")
+			W.set(r.sub, row.sub or "", "ash")
+		end,
+		rowHeight = 34,
+		noun = "legs",
+	})
 	p.none = W.empty(c, 270)
 
 	p.caption = W.card(p, 628, 74)
@@ -1412,13 +1773,15 @@ built.where = function()
 		self.where, self.l2, self.l3 = where, nil, nil
 		W.set(self.headTitle, vm.head and vm.head.title or "", "bone")
 		W.set(self.headSub, vm.head and vm.head.sub or "", "ash")
-		W.start(self.rows)
-		W.start(self.itin)
+		self.crumb = where and not where.empty and where.title or nil
 		local y = 34
 		local spots = vm.spots or {}
+		-- the selected spot is the card; the others are the list, in the order given (best first)
+		local others, carded = {}, false
 		self.card:Hide()
 		for _, s in ipairs(spots) do
-			if s.selected and where and not where.empty then
+			if s.selected and where and not where.empty and not carded then
+				carded = true
 				local cd = self.card
 				cd:ClearAllPoints()
 				cd:SetPoint("TOPLEFT", 0, -y)
@@ -1434,51 +1797,22 @@ built.where = function()
 				if W.setMobChip(cd.chip, mobs) == 0 then
 					cd.chip:SetWidth(1)
 				end
-				local yh = cd.yields:Set(where.yields)
-				cd:SetHeight(58 + yh + (yh > 0 and 8 or 0))
+				-- at most six yield rows (the model gives four and counts the rest), so the list under the card
+				-- always keeps room for two spots and its pager
+				local yh = cd.yields:Set(where.yields, 6)
+				local ch = 58 + yh + (yh > 0 and 8 or 0)
+				cd:SetHeight(ch)
 				cd:Show()
-				y = y + cd:GetHeight() + 4
+				y = y + ch + 6
 			else
-				local r = W.take(self.rows)
-				r:ClearAllPoints()
-				r:SetPoint("TOPLEFT", 0, -y)
-				drawSpot(r, s)
-				W.selectRow(r, s.selected, "bone")
-				r:Show()
-				y = y + 62
+				others[#others + 1] = s
 			end
 		end
-		W.finish(self.rows)
-		-- the itinerary to 300 for world skills (optional: whereList.itinerary = { title, rows })
-		local it = vm.itinerary
-		if it and it.rows and #it.rows > 0 then
-			y = y + 12
-			self.itinHead:ClearAllPoints()
-			self.itinHead:SetPoint("TOPLEFT", 2, -y)
-			W.set(self.itinHead, it.title or "Route to 300", "gold")
-			self.itinHead:Show()
-			y = y + 22
-			for _, row in ipairs(it.rows) do
-				local r = W.take(self.itin)
-				r:ClearAllPoints()
-				r:SetPoint("TOPLEFT", 0, -y)
-				r.action = row.key and { id = "selectSpot", key = row.key, enabled = true } or nil
-				r.tip = row.tip
-				W.set(r.range, row.range, row.tone or "bone")
-				W.set(r.title, row.title, row.done and "ash" or "bone")
-				W.set(r.sub, row.sub or "", "ash")
-				r:Show()
-				y = y + 34
-			end
-		else
-			self.itinHead:Hide()
-		end
-		W.finish(self.itin)
 		if #spots == 0 or vm.empty then
 			self.none:ClearAllPoints()
 			self.none:SetPoint("TOPLEFT", 8, -y - 6)
 			y = y
-				+ 6
+				+ 12
 				+ self.none:Set(type(vm.empty) == "table" and vm.empty or {
 					title = "Nothing to fetch right now",
 					text = vm.empty or "No step of this profession needs a trip at this skill.",
@@ -1486,7 +1820,54 @@ built.where = function()
 		else
 			self.none:Hide()
 		end
-		self.side:SetContentHeight(y + 8)
+		-- the route to 300 takes the list's place when it is picked: it never adds height
+		local it = vm.itinerary
+		local hasRoute = it and it.rows and #it.rows > 0 or false
+		local s = jstate()
+		local mode = (hasRoute and (s.whereList == "route" or #others == 0)) and "route" or "spots"
+		if hasRoute and #others > 0 then
+			self.listMode:ClearAllPoints()
+			self.listMode:SetPoint("TOPLEFT", 0, -y)
+			self.listMode:Set(
+				{
+					{ id = "spots", label = "Other spots", tip = "The other spots that give points, best first." },
+					{
+						id = "route",
+						label = it.title or "Route to 300",
+						tip = "Where to go at each skill, to the top.",
+					},
+				},
+				mode,
+				function(id)
+					s.whereList = id
+					self:Draw(self.vm)
+				end
+			)
+			y = y + 28
+		else
+			self.listMode:Hide()
+			if hasRoute then
+				y = y + 2
+			end
+		end
+		local shown, hidden = self.list, self.route
+		if mode == "route" then
+			shown, hidden = self.route, self.list
+		end
+		hidden:Hide()
+		local items = mode == "route" and it.rows or others
+		local room = BODY_H - y
+		shown:ClearAllPoints()
+		shown:SetPoint("TOPLEFT", 0, -y)
+		shown:SetShown(#items > 0)
+		if #items > 0 then
+			shown:SetBox(room)
+			shown:SetItems(items, self.key == (where and where.key) and self.mode == mode)
+		end
+		self.mode = mode
+		-- the column's own height: the list is cut to the room left, so only the head, the card and the empty
+		-- state can overrun, and that is counted
+		self.side:SetContentHeight(#items > 0 and math.max(y + 62, 0) or y)
 
 		local saved = W.state and W.state.where and W.state.where.mode
 		self.map:Set(where, { mode = (where and where.key ~= self.key) and saved or nil })
@@ -1550,29 +1931,33 @@ local function shoppingItems(vm)
 	return {}
 end
 
-local function sidePane(p)
-	local side = W.scroll(p, 324, BODY_H)
+local function sidePane(p, name)
+	local side = W.pages(p, 324, BODY_H, name)
 	side:SetPoint("TOPLEFT", 612, 0)
 	return side
 end
 
 built.shopping = function()
 	local p = pageFrame()
-	p.main = W.scroll(p, 600, BODY_H)
+	p.main = W.pages(p, 600, BODY_H, "shopping list")
 	p.main:SetPoint("TOPLEFT", 0, 0)
-	p.side = sidePane(p)
+	p.side = sidePane(p, "shopping side")
+	p.side.redraw = function()
+		p:Draw(p.vm)
+	end
 	local c = p.side.content
-	p.total = W.text(c, "GameFontHighlightLarge", 15)
-	p.total:SetPoint("TOPLEFT", 0, -2)
-	p.total:SetWidth(310)
-	p.map = ns.MapCanvas.new(c, 314, 180, {
+	p.total = W.para(c, "GameFontHighlightLarge", 15, 310)
+	-- the errand map sits in a holder, so the side's flow can place and page it like any other piece
+	p.mapBox = W.frame("Frame", nil, c)
+	p.mapBox:SetSize(314, 180)
+	p.map = ns.MapCanvas.new(p.mapBox, 314, 180, {
 		onClick = function(map)
 			if map.where then
 				W.act({ id = "journal", page = "where", spot = map.where.key, enabled = true })
 			end
 		end,
 	})
-	p.map:SetPoint("TOPLEFT", 0, -30)
+	p.map:SetPoint("TOPLEFT", 0, 0)
 	p.open = W.button(c, 160, 24)
 	p.stockHead = W.header(c, 310)
 	p.stock = W.pool(function()
@@ -1594,47 +1979,44 @@ built.shopping = function()
 		then
 			return { rows = 0 }
 		end
+		self.vm = vm
 		W.items(self.main, items, 586)
+		-- the side: total, errand map, its button, then the stock lines; laid by a flow, so a long stock list
+		-- turns pages inside the pane
+		local flow = W.flow(self.side)
 		W.set(self.total, vm.total or "", "bone")
-		local y = 30
+		flow:Add(self.total, math.max(15, self.total:GetStringHeight() or 15) + 8)
 		self.map:SetShown(vm.errand ~= nil)
 		if vm.errand then
 			self.map:Set(vm.errand)
-			y = y + 188
-			self.open:ClearAllPoints()
-			self.open:SetPoint("TOPLEFT", 0, -y)
+			flow:Add(self.mapBox, 188)
 			W.setButton(
 				self.open,
 				{ id = "journal", page = "where", spot = vm.errand.key, label = "Open in Where", enabled = true },
 				"primary",
 				vm.errand.color
 			)
-			y = y + 34
+			flow:Add(self.open, 34)
 		else
+			self.mapBox:Hide()
 			self.open:Hide()
 		end
 		W.start(self.stock)
 		local stock = vm.stock or {}
 		if #stock > 0 then
-			self.stockHead:ClearAllPoints()
-			self.stockHead:SetPoint("TOPLEFT", 0, -y)
 			W.set(self.stockHead, vm.stockTitle or ("Stock (%d)"):format(#stock), "gold")
-			self.stockHead:Show()
-			y = y + 22
+			flow:Add(self.stockHead, 22, 0, true)
 			for _, line in ipairs(stock) do
 				local fs = W.take(self.stock)
-				fs:ClearAllPoints()
-				fs:SetPoint("TOPLEFT", 0, -y)
 				W.set(fs, type(line) == "table" and line.text or line, "ash")
-				fs:Show()
-				y = y + math.max(10, fs:GetStringHeight() or 10) + 4
+				flow:Add(fs, math.max(10, fs:GetStringHeight() or 10) + 4)
 			end
 		else
 			self.stockHead:Hide()
 		end
 		W.finish(self.stock)
-		self.side:SetContentHeight(y + 8)
-		return { rows = #items }
+		local sidePages = flow:Finish("lines")
+		return { rows = #items, sidePages = sidePages }
 	end
 	return p
 end
@@ -1710,9 +2092,9 @@ end
 
 built.alts = function()
 	local p = pageFrame()
-	p.main = W.scroll(p, 600, BODY_H)
+	p.main = W.pages(p, 600, BODY_H, "alts list")
 	p.main:SetPoint("TOPLEFT", 0, 0)
-	p.side = sidePane(p)
+	p.side = sidePane(p, "alts side")
 	p.parts = { p.main, p.side }
 	function p:Draw(vm)
 		local items = vm and altsItems(vm) or {}
@@ -1832,8 +2214,12 @@ built.settings = function()
 	local p = pageFrame()
 	p.cols = {}
 	for i = 1, 3 do
-		local sc = W.scroll(p, 304, BODY_H)
+		-- three columns that each page on their own: a long list turns pages inside its column
+		local sc = W.pages(p, 304, BODY_H, "settings column " .. i)
 		sc:SetPoint("TOPLEFT", (i - 1) * 316, 0)
+		sc.redraw = function()
+			p:Draw(p.vm)
+		end
 		p.cols[i] = sc
 	end
 	local cw = 290
@@ -1896,18 +2282,21 @@ built.settings = function()
 		for _, pool in pairs(pl) do
 			W.start(pool)
 		end
-		local col = { y = 0 }
-		local function place(x, h, dx)
-			x:ClearAllPoints()
-			x:SetPoint("TOPLEFT", dx or 0, -col.y)
-			x:Show()
-			col.y = col.y + h
+		-- pieces go to a flow: it lays them top down and splits them over the column's pages
+		local flow = W.flow(sc)
+		local col = { flow = flow }
+		local function place(x, h, dx, keep)
+			col.last = flow:Add(x, h, dx, keep)
+			return col.last
+		end
+		function col.gap(h)
+			flow:Gap(h)
 		end
 		function col.head(s)
-			col.y = col.y + (col.y > 0 and 12 or 0)
+			flow:Gap(12)
 			local fs = W.take(pl.heads)
 			W.set(fs, s, "gold")
-			place(fs, 22)
+			place(fs, 22, 0, true)
 		end
 		function col.para(s, tone, dx)
 			local fs = W.take(pl.paras)
@@ -1923,6 +2312,27 @@ built.settings = function()
 			place(b, 24, dx)
 			return b
 		end
+		-- a button laid over a piece already placed (at its right edge, or right of another button): it takes no
+		-- height of its own and shows only with that piece
+		function col.over(a, style, entry, wd, after)
+			local b = W.take(pl.buttons)
+			b.onClick = nil
+			W.setButton(b, a, style or "quiet")
+			local bw = wd or math.max(64, (b.label:GetStringWidth() or 0) + 20)
+			b:SetSize(bw, 20)
+			b:ClearAllPoints()
+			if after then
+				b:SetPoint("LEFT", after, "RIGHT", 6, 0)
+			else
+				b:SetPoint("RIGHT", entry.obj, "RIGHT", 0, 0)
+				-- the row's label ends where the button begins
+				if entry.obj.label then
+					entry.obj.label:SetPoint("RIGHT", entry.obj, "RIGHT", -(bw + 6), 0)
+				end
+			end
+			flow:With(entry, b)
+			return b
+		end
 		-- a row with a state pip: ok = filled square, absent = hollow square, broken = filled with a notch
 		function col.row(label, right, pipState, tone, tip)
 			local r = W.take(pl.rows)
@@ -1932,19 +2342,19 @@ built.settings = function()
 			r.pip:SetShown(pipState ~= nil)
 			r.pipIn:SetShown(pipState == "absent" or pipState == "broken")
 			r.label:SetPoint("LEFT", pipState and 16 or 2, 0)
+			r.label:SetPoint("RIGHT", r.right, "LEFT", -6, 0)
 			if pipState then
 				W.fill(r.pip, pipState == "ok" and "green" or (pipState == "broken" and "warn" or "ash"))
 				W.fill(r.pipIn, "ink")
 				r.pipIn:SetSize(pipState == "broken" and 2 or 6, 6)
 			end
-			place(r, 20)
-			return r
+			return r, place(r, 20)
 		end
 		function col.finish()
 			for _, pool in pairs(pl) do
 				W.finish(pool)
 			end
-			sc:SetContentHeight(col.y + 8)
+			col.pages = flow:Finish("lines")
 		end
 		col.pools = pl
 		col.place = place
@@ -2014,14 +2424,12 @@ built.settings = function()
 					col.button(e.reset, "link")
 				end
 			elseif e.kind == "list" then
-				col.row(e.label, e.rows and tostring(#e.rows) or "", nil, "bone", e.tip)
+				local _, listHead = col.row(e.label, e.rows and tostring(#e.rows) or "", nil, "bone", e.tip)
+				listHead.keep = #(e.rows or {}) > 0
 				for _, r in ipairs(e.rows or {}) do
-					local row = col.row(r.text or r.name, nil, nil, "ash", r.tip)
+					local _, entry = col.row(r.text or r.name, nil, nil, "ash", r.tip)
 					if r.action then
-						local b = col.button(r.action, "quiet")
-						b:ClearAllPoints()
-						b:SetPoint("RIGHT", row, "RIGHT", 0, 0)
-						col.y = col.y - 24
+						col.over(r.action, "quiet", entry)
 					end
 				end
 				if e.empty and #(e.rows or {}) == 0 then
@@ -2061,7 +2469,7 @@ built.settings = function()
 			if d.action then
 				col.button(d.action, "quiet", 16)
 			end
-			col.y = col.y + 4
+			col.gap(4)
 		end
 		if #(vm.data or {}) == 0 then
 			col.para("No data layer has reported yet.", "ash")
@@ -2069,7 +2477,7 @@ built.settings = function()
 		col.head(vm.explainTitle or "How the plan is made")
 		for _, line in ipairs(vm.explain or EXPLAIN) do
 			col.para(line, "ash")
-			col.y = col.y + 2
+			col.gap(2)
 		end
 		col.finish()
 
@@ -2079,16 +2487,17 @@ built.settings = function()
 		for _, l in ipairs(vm.learned or {}) do
 			local id = l.id or l.title
 			local open = self.open[id] == true
-			local head = col.row(("%s (%d)"):format(l.title or "", l.count or #(l.rows or {})), nil, nil, "bone", l.tip)
-			local toggle =
-				col.button({ id = "fold", label = open and "Hide" or "Show", enabled = #(l.rows or {}) > 0 }, "link")
-			toggle:ClearAllPoints()
-			toggle:SetPoint("RIGHT", head, "RIGHT", 0, 0)
+			local _, head =
+				col.row(("%s (%d)"):format(l.title or "", l.count or #(l.rows or {})), nil, nil, "bone", l.tip)
+			local toggle = col.over(
+				{ id = "fold", label = open and "Hide" or "Show", enabled = #(l.rows or {}) > 0 },
+				"link",
+				head
+			)
 			toggle.onClick = function()
 				self.open[id] = not open
 				self:Draw(self.vm)
 			end
-			col.y = col.y - 24
 			if self.confirm[id] then
 				col.para(
 					l.confirm or ("Reset %d %s? This cannot be undone."):format(l.count or 0, (l.title or ""):lower()),
@@ -2102,11 +2511,7 @@ built.settings = function()
 					self.confirm[id] = nil
 					W.act(l.reset or { id = "resetLearned", list = id, enabled = true })
 				end
-				local keep = col.button({ id = "keep", label = "Keep", enabled = true }, "quiet", 94, 72)
-				col.y = col.y - 24
-				keep:ClearAllPoints()
-				keep:SetPoint("TOPLEFT", 94, -col.y)
-				col.y = col.y + 24
+				local keep = col.over({ id = "keep", label = "Keep", enabled = true }, "quiet", col.last, 72, yes)
 				keep.onClick = function()
 					self.confirm[id] = nil
 					self:Draw(self.vm)
@@ -2123,16 +2528,13 @@ built.settings = function()
 					self:Draw(self.vm)
 				end
 			end
+			-- an open list shows every row: what does not fit turns the column's pages
 			if open then
-				for k, r in ipairs(l.rows or {}) do
-					if k > 60 then
-						col.para(("%d more"):format(#l.rows - 60), "ash", 16)
-						break
-					end
+				for _, r in ipairs(l.rows or {}) do
 					col.row(r.text, r.sub, nil, "ash", r.tip)
 				end
 			end
-			col.y = col.y + 6
+			col.gap(6)
 		end
 		if #(vm.learned or {}) == 0 then
 			col.para("Nothing learned yet. Trainers, vendors and places are noted as this character meets them.", "ash")
@@ -2244,6 +2646,11 @@ function J.frame()
 	return frame
 end
 
+-- The shell's parts (tabs, close, hint, crumb), for the tests.
+function J.shell()
+	return shell
+end
+
 -- A built page (nil until it was first shown), for the selftest and the tests.
 function J.page(name)
 	return pages[name]
@@ -2297,6 +2704,12 @@ function J.diag()
 		where = wp and wp.map:Stats() or nil,
 		map = ns.MapCanvas.diag,
 		widgets = W.stats,
+		-- nothing scrolls: `overflow.count` is how many laid-out areas needed more than their box (0 is right),
+		-- with the last one named; `pixel` is the window snapping (snaps, how many moved it, the last refusal)
+		overflow = W.overflow,
+		pixel = W.pixel,
+		close = shell.closeKind,
+		crumb = shell.crumbText,
 		atlasMissing = W.atlasMissing,
 		dropped = W.dropped,
 		field = ns.FieldUI and ns.FieldUI.diag() or nil,

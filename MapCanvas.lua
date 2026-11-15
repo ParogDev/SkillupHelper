@@ -331,7 +331,7 @@ local Map = {}
 Map.__index = Map
 
 -- opts: journal (numbered discs for every stop, north mark and scale in every mode, mode and floor controls),
--- header ("full" | "none"), onClick(map, button, pin), onWheel(map, delta), onLive(where, live) -> strings | nil,
+-- header ("full" | "none"), onClick(map, button, pin), onLive(where, live) -> strings | nil,
 -- skipClassic (ignored: confidence comes from the model).
 function M.new(parent, w, h, opts)
 	local self = setmetatable({}, Map)
@@ -453,16 +453,7 @@ function M.new(parent, w, h, opts)
 			self.opts.onClick(self, button, self:Nearest())
 		end
 	end)
-	if self.opts.onWheel or self.opts.journal then
-		clip:EnableMouseWheel(true)
-		clip:SetScript("OnMouseWheel", function(_, delta)
-			if self.opts.onWheel then
-				self.opts.onWheel(self, delta)
-			else
-				self:SetMode(delta > 0 and "spot" or "travel")
-			end
-		end)
-	end
+	-- No mouse wheel anywhere in the addon: the two-segment control on the journal's map switches the view.
 	-- One throttled OnUpdate per view. It does not run while the view (or any parent) is hidden: no work then.
 	self.acc = 0
 	clip:SetScript("OnUpdate", function(_, elapsed)

@@ -6,6 +6,7 @@
 ------------------------------------------------------------------------------------------------------------- mock
 
 local made -- counts of what the mock created, by kind
+local scrolls -- what would scroll: mouse-wheel handlers, and the frame types asked of CreateFrame
 local SECRET = {}
 local world -- what the fake client answers
 
@@ -94,6 +95,14 @@ function METHODS:GetPoint()
 end
 function METHODS:SetScript(name, fn)
 	self.scripts[name] = fn
+	if name == "OnMouseWheel" and fn then
+		scrolls.wheel = scrolls.wheel + 1
+	end
+end
+function METHODS:EnableMouseWheel(on)
+	if on then
+		scrolls.wheel = scrolls.wheel + 1
+	end
 end
 function METHODS:GetScript(name)
 	return self.scripts[name]
@@ -189,10 +198,18 @@ local ATLASES = {
 
 local function install()
 	made = {}
+	scrolls = { wheel = 0, types = {}, templates = {} }
 	world = { pos = { 0.42, 0.13 }, instance = false, waypoints = {}, bound = {}, opened = {} }
-	_G.CreateFrame = function(kind, name)
+	_G.GetPhysicalScreenSize = function()
+		return 1024, 768
+	end
+	_G.CreateFrame = function(kind, name, _, template)
 		local f = new("Frame")
-		f.frameType, f.name = kind, name
+		f.frameType, f.name, f.template = kind, name, template
+		scrolls.types[kind] = (scrolls.types[kind] or 0) + 1
+		if template then
+			scrolls.templates[template] = (scrolls.templates[template] or 0) + 1
+		end
 		if name then
 			_G[name] = f
 		end
@@ -526,25 +543,58 @@ local function overview(n)
 	return { rows = rows, totals = { tsmMissing = 1, priceAge = "2 h" } }
 end
 
-local function path()
-	local rows = {
-		{ kind = "fold", title = "6 steps done, 1 to 150", action = { id = "section", key = "done", enabled = true } },
-	}
-	for i = 1, 40 do
-		rows[#rows + 1] = {
+-- A path of n lines from 150 to 300 in stretches of at most six (the shape Where.pathSelect gives): row i selects
+-- planner step 2 * i. `shown` is the stretch the list shows; the selected line is the second.
+local function path(n, shown)
+	n = n or 20
+	local rows, stretches = {}, {}
+	for i = 1, n do
+		local from, to = 150 + math.floor((i - 1) * 150 / n), 150 + math.floor(i * 150 / n)
+		rows[i] = {
 			kind = i == 7 and "gap" or (i == 3 and "unlock" or "step"),
 			n = i,
-			icon = 134400,
-			title = "Craft 14 Heavy Grinding Stone " .. i,
-			sub = "usually 10. 42 Heavy Stone",
-			range = "150-165",
-			rangeTone = "orange",
-			cost = "12s",
-			ways = i % 2 == 0 and 3 or 1,
-			action = i == 7 and { id = "fillGap", label = "Fill this gap", enabled = true } or nil,
+			step = 2 * i,
+			icon = i % 2 == 0 and 134400 or nil,
+			title = i == 7 and ("No recipe from %d to %d"):format(from, to)
+				or ("Buy the recipe and craft 14 Heavy Grinding Stone " .. i),
+			sub = "Usually 10 crafts. Buy 42 Heavy Stone, 14 Coal and 2 more",
+			subFull = "Usually 10 crafts. Buy 42 Heavy Stone, 14 Coal, 3 Weak Flux, 1 Silver Bar",
+			from = from,
+			to = to,
+			range = ("%d to %d"):format(from, to),
+			rangeTone = i == 7 and "warn" or "orange",
+			cost = i ~= 7 and "12s" or nil,
+			costNote = i == 4 and "+ unpriced" or nil,
+			selected = i == 2,
+			tip = { "Line " .. i },
+			action = { id = "selectStep", step = 2 * i, enabled = true },
 		}
+		local k = math.floor((i - 1) / 6) + 1
+		stretches[k] = stretches[k] or { index = k, rows = {}, ranks = {} }
+		table.insert(stretches[k].rows, rows[i])
+	end
+	for k, s in ipairs(stretches) do
+		s.from, s.to = s.rows[1].from, s.rows[#s.rows].to
+		s.label = ("%d to %d"):format(s.from, s.to)
+		s.current, s.selected = k == 1, k == (shown or 1)
+		s.state = k == 1 and "you are here" or nil
+		s.action = { id = "selectStretch", index = k, enabled = true }
+		s.head = {
+			title = "Expert, " .. s.label,
+			lines = k == 1 and {
+				"Train Expert at 125, 50s 0c: needed to pass 150",
+				"Train Artisan at 200, 5g 0s 0c, needs level 35, you are 30: needed to pass 225",
+				"Train Master at 275, 10g: needed to pass 300",
+			} or {},
+		}
+		s.tip = { s.head.title }
 	end
 	return {
+		lines = rows,
+		stretches = stretches,
+		stretch = shown or 1,
+		shade = { from = stretches[shown or 1].from, to = stretches[shown or 1].to },
+		crumb = rows[2].title,
 		profession = "Blacksmithing",
 		skill = 150,
 		caps = {
@@ -579,29 +629,28 @@ local function path()
 			{ at = 200, kind = "bop" },
 		},
 		rows = rows,
-		selected = 2,
+		selected = 4,
 		detail = {
 			title = "Heavy Grinding Stone",
+			n = 2,
 			color = "orange",
-			lines = { { text = "Craft 14, usually 10. Bought for a bad-luck run at 90%", tone = "bone" } },
-			learn = {
-				skill = 125,
-				text = "Learned at 125 from any Blacksmithing trainer, 10s.",
-				known = true,
-				confidence = "classic",
+			dothis = {
+				{ text = "Craft up to 14. Usually 10 are enough.", tone = "bone" },
+				{ text = "Skill 150 to 165, orange at the start.", tone = "orange" },
 			},
-			reagents = {
-				{ name = "Heavy Stone", need = 42, have = 12, source = "Auction House", price = "40c" },
-				{ name = "Coal", need = 2, have = 2, source = "vendor" },
+			note = "Price unknown for 1 item: Silver Bar. Not in the cost.",
+			recipe = { text = "From the trainer at 125, 10s.", tone = "bone" },
+			materials = {
+				{ name = "Heavy Stone", need = 42, have = 12, right = "auction, 40c each" },
+				{ name = "Coal", need = 2, have = 2, right = "vendor, 5c each" },
 			},
 			ways = {
-				title = "Ways from 150 to 165",
+				title = "Other ways from 150 to 165",
 				rows = {
 					{
 						label = "Heavy Grinding Stone",
-						right = "",
+						right = "the plan's pick",
 						picked = true,
-						action = { id = "swap", spell = 1, enabled = true },
 					},
 					{
 						label = "Green Iron Boots",
@@ -1034,6 +1083,25 @@ describe("Map view: drawing", function()
 	end)
 end)
 
+-- Walks a paged owner (a W.list or a W.pages area) from its first page to its last: the pages' ranges must tile
+-- 1..total, so no item is on two pages or on none. Returns the total. A single page holds everything.
+local function tiles(owner)
+	if (owner.pageCount or 1) <= 1 then
+		assert.is_false(owner.pager.shown)
+		return owner.pager.total or 0
+	end
+	owner:Turn(-owner.pageCount)
+	local nextFirst = 1
+	for _ = 1, owner.pageCount do
+		assert.is_true(owner.pager.shown)
+		assert.equal(nextFirst, owner.pager.first)
+		nextFirst = owner.pager.last + 1
+		owner:Turn(1)
+	end
+	assert.equal(owner.pager.total, nextFirst - 1)
+	return nextFirst - 1
+end
+
 describe("Widgets", function()
 	local W
 	before_each(function()
@@ -1067,15 +1135,16 @@ describe("Widgets", function()
 		assert.is_false(y.shown)
 	end)
 
-	it("keeps only the rows in view for a long list", function()
-		local drawn = 0
+	it("pages a long list at row boundaries, with a pager and no scrolling", function()
+		local drawn = {}
 		local list = W.list(CreateFrame("Frame"), 568, 376, {
 			rowHeight = 46,
+			noun = "spots",
 			make = function(l)
 				return CreateFrame("Button", nil, l)
 			end,
-			draw = function()
-				drawn = drawn + 1
+			draw = function(_, item)
+				drawn[#drawn + 1] = item.n
 			end,
 		})
 		local items = {}
@@ -1083,14 +1152,116 @@ describe("Widgets", function()
 			items[i] = { n = i }
 		end
 		list:SetItems(items)
-		assert.is_true(#list.rows.items <= 10)
-		local rows = #list.rows.items
-		list:ScrollTo(46 * 300)
-		assert.equal(rows, #list.rows.items)
-		assert.is_true(list.bar.shown)
+		-- 376 px less the 26-px pager hold seven 46-px rows
+		assert.same({ 7, 72, 7 }, { #list.rows.items, list.pageCount, #drawn })
+		assert.is_true(list.pager.shown)
+		assert.equal("1 to 7 of 500 spots", list.pager.label.text)
+		assert.equal("inert", list.pager.prev.style)
+		fire(list.pager.next, "OnClick")
+		assert.equal("8 to 14 of 500 spots", list.pager.label.text)
+		assert.equal(8, drawn[#drawn - 6])
+		list:Reveal(500)
+		assert.same({ 72, "498 to 500 of 500 spots" }, { list.page, list.pager.label.text })
+		assert.equal("inert", list.pager.next.style)
+		assert.is_false(list.rows.items[4].shown)
+		assert.equal(500, tiles(list))
+		assert.equal(0, list:Unplaced())
+		-- the same page is kept when the items are set again with keepPage, the first page otherwise
+		list:Reveal(15)
+		list:SetItems(items, true)
+		assert.equal(3, list.page)
 		list:SetItems({ { n = 1 } })
-		assert.is_false(list.bar.shown)
+		assert.same({ 1, 1 }, { list.page, list.pageCount })
+		assert.is_false(list.pager.shown)
 		assert.is_false(list.rows.items[2].shown)
+		assert.equal(0, scrolls.wheel)
+		assert.equal(0, W.overflow.count)
+	end)
+
+	it("keeps a header with the row after it, and counts a row taller than the box", function()
+		local list = W.list(CreateFrame("Frame"), 300, 100, {
+			make = function(l)
+				return CreateFrame("Button", nil, l)
+			end,
+			draw = function() end,
+			height = function(it)
+				return it.h
+			end,
+			keep = function(it)
+				return it.head == true
+			end,
+		})
+		-- 30 + 30 fit on page 1; the header (20) would fit too but its row (30) would not: both go to page 2
+		list:SetItems({ { h = 30 }, { h = 30 }, { h = 20, head = true }, { h = 30 }, { h = 30 } })
+		assert.same({ 1, 1, 2, 2, 3 }, list.pageOf)
+		assert.equal(0, W.overflow.count)
+		list:SetBox(40)
+		list:SetItems({ { h = 60 } })
+		assert.equal(1, W.overflow.count)
+		assert.matches("list row needs 60 px, has 40", W.overflow.last, 1, true)
+	end)
+
+	it("pages view items and hand-laid pieces inside a fixed area", function()
+		local area = W.pages(CreateFrame("Frame"), 300, 120, "test area")
+		local items = { { kind = "head", text = "Group" } }
+		for i = 1, 12 do
+			items[#items + 1] = { kind = "row", name = "Row " .. i, right = "1" }
+		end
+		W.items(area, items, 286)
+		assert.is_true(area.pageCount > 1)
+		assert.is_true(area.pager.shown)
+		assert.matches("of 13 lines$", area.pager.label.text)
+		assert.equal(13, tiles(area))
+		W.items(area, { { kind = "line", text = "One line" } }, 286)
+		assert.same({ 1, false }, { area.pageCount, area.pager.shown })
+
+		-- a flow: pieces of any kind; a gap is dropped at the top of a page; a piece laid over another follows it
+		local area2 = W.pages(CreateFrame("Frame"), 300, 100, "flow area")
+		local flow = W.flow(area2)
+		local pieces = {}
+		for i = 1, 6 do
+			pieces[i] = CreateFrame("Frame")
+			flow:Gap(10)
+			local e = flow:Add(pieces[i], 30, 0, i == 3)
+			if i == 5 then
+				pieces.over = CreateFrame("Button")
+				flow:With(e, pieces.over)
+			end
+		end
+		-- the room is 100 - 26 = 74: two 30-px pieces and their gap per page; piece 3 keeps piece 4 with it
+		assert.equal(3, flow:Finish("rows"))
+		assert.same({ true, true, false }, { pieces[1].shown, pieces[2].shown, pieces[3].shown })
+		assert.equal("1 to 2 of 6 rows", area2.pager.label.text)
+		area2.redraw = function()
+			flow:Finish("rows")
+		end
+		assert.equal(6, tiles(area2))
+		area2:Turn(-9)
+		while not pieces[5].shown do
+			area2:Turn(1)
+		end
+		assert.is_true(pieces.over.shown)
+		assert.is_false(pieces[1].shown)
+		-- a hand-laid total over the box is counted and named, never scrolled
+		assert.equal(0, W.overflow.count)
+		area2:SetContentHeight(140)
+		assert.equal(1, W.overflow.count)
+		assert.equal("flow area needs 140 px, has 100", W.overflow.last)
+		assert.equal(0, scrolls.wheel)
+	end)
+
+	it("puts values on whole pixels and draws the close button from lines", function()
+		assert.equal(1, W.pxPerUnit(CreateFrame("Frame"))) -- 768 px high at scale 1
+		assert.same({ 3 / 1.3125, 1 / 1.3125, 0 }, {
+			W.snapValue(2.4, 1.3125),
+			W.snapValue(0.2, 1.3125, 1), -- a rule is never thinner than one pixel
+			W.snapValue(0.2, 1.3125),
+		})
+		local b = W.closeButton(CreateFrame("Frame"))
+		assert.equal(2, #b.cross)
+		assert.is_false(b.label.shown)
+		assert.is_number(b.cross[1].rotation)
+		assert.equal("Close (Escape)", b.tip)
 	end)
 
 	it("shows the full text of a truncated label in the tooltip", function()
@@ -1129,12 +1300,16 @@ describe("Journal", function()
 				return {
 					profession = "Blacksmithing",
 					status = "Prices read 2 h ago",
-					crumb = "Step 2: Heavy Grinding Stone",
 					professions = {
 						{ key = "Blacksmithing", name = "Blacksmithing", learned = true },
 						{ key = "Mining", name = "Mining", learned = false },
 					},
-					tabs = { { id = "shopping", count = 3 }, { id = "settings", pip = true } },
+					tabs = {
+						{ id = "overview", count = 3, tip = "3 gaps" },
+						{ id = "shopping", count = 3, tip = "3 things to buy" },
+						{ id = "alts", count = 2 },
+						{ id = "settings", pip = true },
+					},
 				}
 			end,
 			page = function(name, ctx)
@@ -1145,6 +1320,7 @@ describe("Journal", function()
 		for _, name in ipairs({
 			"selectProfession",
 			"selectStep",
+			"selectStretch",
 			"selectSpot",
 			"trackSpot",
 			"chooseWay",
@@ -1185,10 +1361,56 @@ describe("Journal", function()
 		local d = J.diag()
 		assert.equal(17, d.pages.overview.rows)
 		assert.equal(1, d.pages.overview.gaps)
-		assert.equal(41, d.pages.path.steps)
+		assert.same({ 20, 4, 1, 6 }, {
+			d.pages.path.steps,
+			d.pages.path.stretches,
+			d.pages.path.stretch,
+			d.pages.path.shown,
+		})
+		assert.is_true(d.pages.path.detailFits)
 		assert.equal(2, d.pages.where.spots)
 		assert.equal(9, d.pages.settings.controls)
 		assert.equal(2, d.pages.settings.errors)
+		assert.same({ 0, nil }, { d.overflow.count, d.overflow.last })
+		assert.is_table(d.pixel)
+	end)
+
+	it("the shell: a real close button, a breadcrumb that adds something, counts with a noun, a key hint", function()
+		J.setState({})
+		J.open("path")
+		-- the client's close button template, never a letter in a font; its click closes the journal
+		assert.equal(1, scrolls.templates.UIPanelCloseButton)
+		assert.equal("template", J.diag().close)
+		assert.is_nil(J.shell().close.text)
+		fire(J.shell().close, "OnClick")
+		assert.is_false(J.frame().shown)
+		J.open("path")
+		-- the dropdown says the profession; the breadcrumb says the selected line, never the profession again
+		assert.equal("Buy the recipe and craft 14 Heavy Grinding Stone 2", J.diag().crumb)
+		J.open("where")
+		assert.equal("Angor Fortress", J.diag().crumb)
+		J.provider.page = function()
+			local vm = whereList()
+			vm.selected.title = "Blacksmithing"
+			return vm
+		end
+		J.open("where")
+		assert.is_nil(J.diag().crumb)
+		-- tabs: "Shopping 3" has its noun in the tooltip; Overview never carries a count; a count without a noun is dropped
+		local labels, tips = {}, {}
+		for i, b in ipairs(J.shell().tabs) do
+			labels[i], tips[i] = b.label.text, b.tip
+		end
+		assert.same({ "Overview", "Path", "Where", "Shopping 3", "Alts and mail", "Settings and data" }, labels)
+		assert.equal("3 things to buy", tips[4])
+		-- the footer hint: a sentence without a key, the key with one; a click opens the settings page
+		local hint = J.shell().hint
+		assert.equal("No key opens the journal yet. Set one under Settings and data.", hint.label.text)
+		fire(hint, "OnClick")
+		assert.equal("settings", J.diag().page)
+		world.key = "K"
+		J.refresh()
+		assert.equal("Journal key: K", hint.label.text)
 	end)
 
 	it("shows an empty state that explains itself for a nil view-model on every page", function()
@@ -1229,11 +1451,199 @@ describe("Journal", function()
 		J.setPage("settings", {})
 	end)
 
-	it("virtualises the overview and the step list", function()
-		J.setPage("overview", overview(17))
-		assert.is_true(#J.page("overview").list.rows.items <= 14)
-		J.setPage("path", path())
-		assert.is_true(#J.page("path").list.rows.items <= 10)
+	it("the overview is a grid of cards: 17 professions on one page, each card with its four facts", function()
+		local vm = overview(17)
+		vm.rows[1].skillText, vm.rows[1].costText, vm.rows[1].coverText = "15 / 150", "To 300: 1g", "Path complete"
+		vm.rows[2].costText, vm.rows[2].costTone = "To 300: 2g + unpriced", "warn"
+		vm.rows[2].coverText, vm.rows[2].coverTone = "1 gap: 225 to 240", "warn"
+		vm.rows[2].unpriced = { "Thorium Bar" }
+		J.setPage("overview", vm)
+		local p = J.page("overview")
+		assert.same({ 17, 17, 1 }, { p.cards.n, #p.cards.items, p.grid.pageCount })
+		assert.is_false(p.grid.pager.shown)
+		local a, b = p.cards.items[1], p.cards.items[2]
+		assert.same(
+			{ "Alchemy", "15 / 150", "To 300: 1g", "Path complete" },
+			{ a.name.text, a.skill.text, a.cost.text, a.cover.text }
+		)
+		assert.same({ "To 300: 2g + unpriced", "1 gap: 225 to 240" }, { b.cost.text, b.cover.text })
+		-- three columns of 306 px, rows of 75 px: card 4 starts the second row, and the last row ends in the body
+		assert.same({ "TOPLEFT", 0, -81 }, p.cards.items[4].points[1])
+		assert.same({ "TOPLEFT", 315, -405 }, p.cards.items[17].points[1])
+		-- the tooltip carries what the card leaves out: the gap's reason, the unpriced items, the cost breakdown
+		local tip = table.concat(
+			(function()
+				local out = {}
+				for i, l in ipairs(b.tip) do
+					out[i] = type(l) == "table" and l[1] or l
+				end
+				return out
+			end)(),
+			" | "
+		)
+		for _, want in ipairs({
+			"225 to 240: no priced recipe",
+			"Price unknown, not in the cost: Thorium Bar",
+			"Materials: 1g",
+			"Recipes: 20s",
+			"Training: 5s",
+		}) do
+			assert.matches(want, tip, 1, true)
+		end
+		-- "Rogues only" is said on the card, which is dimmed and opens nothing
+		local lock = p.cards.items[10]
+		assert.same({ "Lockpicking", "Rogues only", false }, { lock.name.text, lock.skill.text, lock.action.enabled })
+		-- more professions than the grid holds turn pages (no data ships that many): nothing scrolls
+		local many = overview(17)
+		for i = 18, 40 do
+			many.rows[i] = copy(many.rows[1])
+			many.rows[i].key, many.rows[i].name = "Extra" .. i, "Extra " .. i
+		end
+		J.setPage("overview", many)
+		assert.same({ 3, 15, true }, { p.grid.pageCount, p.cards.n, p.grid.pager.shown })
+		assert.equal("1 to 15 of 40 professions", p.grid.pager.label.text)
+		assert.equal(40, tiles(p.grid))
+		assert.equal(0, ns.Widgets.overflow.count)
+	end)
+
+	it("the path shows one stretch that fits, its rank trainings, and the stretch bar", function()
+		J.setPage("path", path(30))
+		local p = J.page("path")
+		assert.same({ 6, 5 }, { p.rows.n, #p.vm.stretches })
+		-- the header: the stretch, its place in the path, two rank lines and the count of the rest
+		assert.same({
+			"Expert, 150 to 180",
+			"1 to 6 of the path",
+			"Train Expert at 125, 50s 0c: needed to pass 150",
+			"Train Artisan at 200, 5g 0s 0c, needs level 35, you are 30: needed to pass 225, and 1 more",
+		}, { p.head.title.text, p.head.count.text, p.head.lines[1].text, p.head.lines[2].text })
+		assert.equal("Train Master at 275, 10g: needed to pass 300", p.head.tip[4])
+		-- header (22 + 2 * 16) and six rows of 46 px end inside the 338-px box
+		assert.same({ "TOPLEFT", 0, -(54 + 5 * 46) }, p.rows.items[6].points[1])
+		assert.is_true(54 + 6 * 46 <= p.area.h)
+		-- a row: number, title with the whole width, what to buy, range with the band letter, cost and its note
+		local r = p.rows.items[4]
+		assert.same(
+			{ "4", "Buy the recipe and craft 14 Heavy Grinding Stone 4", "O 165 to 170", "12s", "+ unpriced" },
+			{ r.n.text, r.title.text, r.range.text, r.cost.text, r.note.text }
+		)
+		assert.equal("Usually 10 crafts. Buy 42 Heavy Stone, 14 Coal and 2 more", r.sub.text)
+		assert.is_nil(r.btn) -- no "N ways" button in a row
+		for _, row in ipairs(p.rows.items) do
+			for _, fs in ipairs({ row.title, row.sub, row.range }) do
+				assert.is_nil(tostring(fs.text):find("...", 1, true))
+			end
+		end
+		-- the bar: one button per stretch, the current one marked, Previous inert on the first
+		local bar = p.bar
+		assert.equal(5, bar.pool.n)
+		assert.same(
+			{ "150 to 180", "you are here", true },
+			{ bar.pool.items[1].label.text, bar.pool.items[1].state.text, bar.pool.items[1].selected }
+		)
+		assert.same({ "inert", "quiet" }, { bar.prev.style, bar.next.style })
+		fire(bar.pool.items[3], "OnClick", "LeftButton")
+		assert.same({ "selectStretch", 3 }, { calls[#calls][1], calls[#calls][2] })
+		fire(bar.next, "OnClick", "LeftButton")
+		assert.same({ "selectStretch", 2 }, { calls[#calls][1], calls[#calls][2] })
+		-- another stretch shown: the detail keeps the selected line, the list shows the stretch's lines
+		J.setPage("path", path(30, 3))
+		assert.equal("13", tostring(p.rows.items[1].n.text))
+		assert.is_true(bar.pool.items[3].selected)
+		assert.equal("Heavy Grinding Stone", p.detail.title.text)
+	end)
+
+	it("the path's detail fits: sections, one paged list of materials and ways, the map only with room", function()
+		local vm = path()
+		J.setPage("path", vm)
+		local d = J.page("path").detail
+		local texts = {}
+		for i = 1, d.labels.n do
+			texts[#texts + 1] = d.labels.items[i].text
+		end
+		for i = 1, d.paras.n do
+			texts[#texts + 1] = d.paras.items[i].text
+		end
+		assert.same({
+			"Do this",
+			"Get the recipe",
+			"Craft up to 14. Usually 10 are enough.",
+			"Skill 150 to 165, orange at the start.",
+			"Price unknown for 1 item: Silver Bar. Not in the cost.",
+			"From the trainer at 125, 10s.",
+		}, texts)
+		-- the list: Materials (2), Other ways (2), each under its header; beside the map it takes two pages, and
+		-- a header never ends a page
+		local kinds = {}
+		for i, it in ipairs(d.list.items) do
+			kinds[i] = it.kind
+		end
+		assert.same({ "head", "material", "material", "head", "way", "way" }, kinds)
+		assert.same({ 2, true }, { d.list.pageCount, d.map.frame.shown })
+		assert.same({ 1, 1, 1, 2, 2, 2 }, d.list.pageOf)
+		local mat = d.list.rows.items[2]
+		assert.same(
+			{ "Heavy Stone", "12 / 42", "auction, 40c each" },
+			{ mat.label.text, mat.count.text, mat.right.text }
+		)
+		d.list:Turn(1)
+		local pick = d.list.rows.items[2]
+		assert.same(
+			{ "Heavy Grinding Stone", "the plan's pick", true },
+			{ pick.label.text, pick.right.text, pick.dot.shown }
+		)
+		-- without the unpriced note there is room for all of it beside the map
+		vm.detail.note = nil
+		J.setPage("path", vm)
+		assert.same({ 1, true }, { d.list.pageCount, d.map.frame.shown })
+		-- twelve materials and nine ways: the map gives way, the list pages, the card still fits its box
+		for i = 3, 12 do
+			vm.detail.materials[i] = { name = "Material " .. i, need = i, have = 0, right = "auction, 1s each" }
+		end
+		for i = 3, 9 do
+			vm.detail.ways.rows[i] =
+				{ label = "Way " .. i, right = "+1s", action = { id = "swap", spell = i, enabled = true } }
+		end
+		J.setPage("path", vm)
+		local st = J.diag().pages.path
+		assert.same({ true, true }, { st.detailFits, st.mapDropped })
+		assert.is_false(d.map.frame.shown)
+		assert.is_true(d.list.pageCount > 1)
+		assert.equal(23, tiles(d.list))
+		assert.equal(0, ns.Widgets.overflow.count)
+		-- no model: one sentence, nothing else
+		d:Set(nil)
+		assert.matches("^Pick a line", d.paras.items[1].text)
+	end)
+
+	it("the timeline: marker shapes in the legend, the shaded stretch, every edge on a whole pixel", function()
+		J.setPage("path", path(30))
+		local t = J.page("path").timeline
+		local labels = {}
+		for i = 1, t.labels.n do
+			labels[t.labels.items[i].text] = true
+		end
+		for _, word in ipairs({ "Trainer", "Auction recipe", "Vendor recipe", "Shortcut", "No recipe", "You, 150" }) do
+			assert.is_true(labels[word], word)
+		end
+		for text in pairs(labels) do
+			assert.is_nil(tostring(text):find("Diamond", 1, true)) -- the legend sentence is gone
+		end
+		assert.is_true(#t.edges > 40)
+		for _, x in ipairs(t.edges) do
+			assert.equal(math.floor(x + 0.5), x) -- one pixel per unit in this mock: whole units
+		end
+		-- the timeline is navigation: a click on a segment or on a marker selects that line
+		_G.GetCursorPosition = function()
+			return 18 + 152 * 3, 600 - 60 -- skill 152, in the segment lane
+		end
+		fire(t, "OnMouseUp")
+		assert.same({ "selectStep", 2 }, { calls[#calls][1], calls[#calls][2] })
+		_G.GetCursorPosition = function()
+			return 18 + 165 * 3, 600 - 32 -- the auction-recipe marker at 165
+		end
+		fire(t, "OnMouseUp")
+		assert.same({ "selectStep", 4 }, { calls[#calls][1], calls[#calls][2] })
 	end)
 
 	it("filters and sorts the overview", function()
@@ -1241,16 +1651,16 @@ describe("Journal", function()
 		J.setState(state)
 		J.setPage("overview", overview(17))
 		local p = J.page("overview")
-		assert.equal(17, #p.list.items)
+		assert.equal(17, #p.rows)
 		fire(p.filters.pool.items[1], "OnClick") -- Mine
 		assert.equal("mine", state.journal.filter)
-		assert.equal(12, #p.list.items)
+		assert.equal(12, #p.rows)
 		fire(p.filters.pool.items[4], "OnClick") -- Gathering
-		assert.equal(5, #p.list.items)
+		assert.equal(5, #p.rows)
 		fire(p.filters.pool.items[2], "OnClick") -- All
 		fire(p.sorts.pool.items[3], "OnClick") -- Cost: cheapest first, no price last
-		assert.equal("Alchemy", p.list.items[1].name)
-		assert.equal("Enchanting", p.list.items[17].name)
+		assert.equal("Alchemy", p.rows[1].name)
+		assert.equal("Enchanting", p.rows[17].name)
 	end)
 
 	it("opens, toggles, remembers the page and closes on Escape's list", function()
@@ -1296,28 +1706,28 @@ describe("Journal", function()
 		J.setState({})
 		J.open("overview")
 		-- an overview row opens that profession's path
-		local row = J.page("overview").list.rows.items[2]
+		local row = J.page("overview").cards.items[2]
 		assert.equal("Blacksmithing", row.name.text)
 		fire(row, "OnClick", "LeftButton")
 		assert.same({ "selectProfession", "Blacksmithing" }, last("selectProfession"))
 		assert.equal("path", J.diag().page)
 		assert.equal("Blacksmithing", last("page")[3].profession)
 
-		-- a step row selects its step; the ways button asks for the Way menu with the button as owner
-		local list = J.page("path").list
-		fire(list.rows.items[2], "OnClick", "LeftButton")
-		assert.same({ "selectStep", 1 }, { last("selectStep")[1], last("selectStep")[2] })
-		local ways = list.rows.items[3].btn
-		assert.equal("3 ways", ways.label.text)
-		fire(ways, "OnClick", "LeftButton")
-		assert.same(
-			{ "wayMenu", 2, ways },
-			{ last("chooseWay")[2].id, last("chooseWay")[2].step, last("chooseWay")[3] }
-		)
+		-- a row selects its line by the planner step it stands for; a stretch button asks for that stretch
+		local pp = J.page("path")
+		fire(pp.rows.items[3], "OnClick", "LeftButton")
+		assert.same({ "selectStep", 6 }, { last("selectStep")[1], last("selectStep")[2] })
+		assert.equal(6, last("page")[3].step)
+		fire(pp.bar.pool.items[2], "OnClick", "LeftButton")
+		assert.same({ "selectStretch", 2 }, { last("selectStretch")[1], last("selectStretch")[2] })
 
-		-- a way in the detail
-		fire(J.page("path").detail.ways.items[2], "OnClick", "LeftButton")
+		-- another way is picked in the detail (the second page of its list), never in a row
+		pp.detail.list:Turn(1)
+		local way = pp.detail.list.rows.items[3]
+		assert.equal("Green Iron Boots", way.label.text)
+		fire(way, "OnClick", "LeftButton")
 		assert.same({ "swap", 2 }, { last("chooseWay")[2].id, last("chooseWay")[2].spell })
+		assert.is_nil(J.diag().acts.wayMenu)
 
 		J.act({ id = "selectSpot", key = "swamp", enabled = true })
 		assert.same({ "selectSpot", "swamp" }, last("selectSpot"))
@@ -1577,5 +1987,196 @@ describe("Field card and tracker", function()
 		})
 		world.menu.items[3].run()
 		assert.is_true(state.tracker.locked)
+	end)
+end)
+
+---------------------------------------------------------------------------------------------------------- no scrolling
+
+-- The owner's rule: "If the information requires scroll bars, then the layout is wrong." No page may create a
+-- mouse-wheel handler, a Slider or a ScrollFrame, lay content out over its box, or leave an item on no page.
+describe("Nothing scrolls", function()
+	local ns, J, W
+	before_each(function()
+		ns = load()
+		J, W = ns.JournalUI, ns.Widgets
+		J.setState({})
+	end)
+
+	-- the worst case the pages must hold: 17 professions, a 30-line path, 25 spots with a 12-leg route, 40 things
+	-- to buy with 30 stock lines, 6 other characters with 30 rows each, every settings list long and open
+	local WORST = {
+		overview = function()
+			return overview(17)
+		end,
+		path = function()
+			local vm = path(30)
+			for i = 3, 14 do
+				vm.detail.materials[i] =
+					{ name = "Material " .. i, need = 20, have = i, right = "auction, 1s 20c each" }
+			end
+			for i = 3, 12 do
+				vm.detail.ways.rows[i] = { label = "Another recipe " .. i, right = "+1g 20s" }
+			end
+			return vm
+		end,
+		where = function()
+			local vm = whereList()
+			for i = 3, 25 do
+				vm.spots[i] = copy(vm.spots[2])
+				vm.spots[i].key, vm.spots[i].title = "spot" .. i, "Spot " .. i
+			end
+			for i = 2, 12 do
+				vm.itinerary.rows[i] =
+					{ range = "200 to 225", title = "Leg " .. i, sub = "Somewhere", key = "spot" .. i }
+			end
+			for i = 4, 9 do
+				vm.selected.yields.rows[i] = copy(vm.selected.yields.rows[1])
+			end
+			return vm
+		end,
+		shopping = function()
+			local vm = shopping()
+			for i = 1, 40 do
+				vm.blocks[#vm.blocks + 1] = { kind = "row", name = "Reagent " .. i, right = "20 x 5c", mark = "gold" }
+			end
+			for i = 3, 30 do
+				vm.stock[i] = "Keep " .. i .. " of something for a later step"
+			end
+			return vm
+		end,
+		alts = function()
+			local vm = alts()
+			for c = 1, 6 do
+				local rows = {}
+				for i = 1, 30 do
+					rows[i] = { item = "Item " .. i, want = 2, held = 9, state = "not queued" }
+				end
+				vm.characters[c] = { name = "Alt " .. c, rows = rows }
+			end
+			for g = 2, 12 do
+				vm.queue.groups[g] = { to = "Main", rows = { { name = "Iron Bar", right = "14" } } }
+			end
+			return vm
+		end,
+		settings = function()
+			local vm = settings()
+			for _, e in ipairs(vm.planner) do
+				if e.kind == "list" then
+					for i = 1, 40 do
+						e.rows[i] = {
+							text = "Hidden recipe " .. i,
+							action = { id = "shortcut", spell = i, label = "Offer again", enabled = true },
+						}
+					end
+				end
+			end
+			for i = 4, 12 do
+				vm.data[i] = { id = "layer" .. i, label = "Layer " .. i, state = "broken", errors = { "one", "two" } }
+			end
+			for _, l in ipairs(vm.learned) do
+				l.count = 40
+				for i = 1, 40 do
+					l.rows[i] = { text = "Learned row " .. i, sub = "at " .. i }
+				end
+				l.reset = { id = "resetLearned", list = l.id, label = "Reset", enabled = true }
+			end
+			return vm
+		end,
+	}
+
+	-- every paged owner of a page: its lists and areas
+	local function owners(name)
+		local p = J.page(name)
+		if name == "overview" then
+			return { p.grid }
+		elseif name == "path" then
+			return { p.detail.list }
+		elseif name == "where" then
+			return { p.mode == "route" and p.route or p.list }
+		elseif name == "shopping" or name == "alts" then
+			return { p.main, p.side }
+		end
+		return { p.cols[1], p.cols[2], p.cols[3] }
+	end
+
+	local function check(name, what)
+		local label = name .. " (" .. what .. ")"
+		assert.equal(0, scrolls.wheel, label .. ": a mouse-wheel handler")
+		assert.is_nil(scrolls.types.Slider, label .. ": a Slider")
+		assert.is_nil(scrolls.types.ScrollFrame, label .. ": a ScrollFrame")
+		assert.is_nil(W.scroll, "the scroll area is gone")
+		assert.equal(0, W.overflow.count, label .. ": " .. tostring(W.overflow.last))
+		local sum = 0
+		for _, owner in ipairs(owners(name)) do
+			sum = sum + tiles(owner)
+		end
+		assert.equal(0, W.overflow.count, label .. ", after turning every page: " .. tostring(W.overflow.last))
+		return sum
+	end
+
+	it("no fixture page makes a wheel handler, a slider or a scroll frame, or overflows its box", function()
+		for _, name in ipairs(PAGES) do
+			J.setPage(name, FIXTURE[name]())
+			check(name, "fixture")
+			J.setPage(name, nil)
+			assert.equal(0, W.overflow.count, name .. " empty: " .. tostring(W.overflow.last))
+		end
+	end)
+
+	it("the worst case fits every page: what does not fit one page is on another", function()
+		local totals = {}
+		for _, name in ipairs(PAGES) do
+			if name == "settings" then
+				J.setPage(name, WORST[name]())
+				local p = J.page("settings")
+				p.open.ranks, p.open.vendors, p.confirm.ranks = true, true, true
+			end
+			J.setPage(name, WORST[name]())
+			totals[name] = check(name, "worst case")
+		end
+		-- the path: 30 lines in 5 stretches, each line in exactly one, none longer than its box
+		local vm = WORST.path()
+		local inStretch = {}
+		for _, s in ipairs(vm.stretches) do
+			assert.is_true(#s.rows <= 6)
+			for _, r in ipairs(s.rows) do
+				inStretch[r.n] = (inStretch[r.n] or 0) + 1
+			end
+		end
+		for i = 1, 30 do
+			assert.equal(1, inStretch[i])
+		end
+		for k = 1, #vm.stretches do
+			J.setPage("path", path(30, k))
+			assert.equal(#vm.stretches[k].rows, J.page("path").rows.n)
+			assert.equal(0, W.overflow.count, "stretch " .. k .. ": " .. tostring(W.overflow.last))
+		end
+		-- the detail's 14 materials and 12 ways under their two headers
+		assert.equal(28, totals.path)
+		-- where: the selected spot is the card, the other 24 are the list; the 12-leg route takes the list's place
+		assert.equal(24, totals.where)
+		local where = J.page("where")
+		where.list:Turn(-99)
+		assert.equal("1 to 3 of 24 spots", where.list.pager.label.text)
+		fire(where.listMode.pool.items[2], "OnClick")
+		assert.same({ "route", true, false }, { where.mode, where.route.shown, where.list.shown })
+		assert.equal(12, tiles(where.route))
+		assert.matches("of 12 legs$", where.route.pager.label.text)
+		assert.equal(0, W.overflow.count, tostring(W.overflow.last))
+		-- settings: 40 hidden recipes, 40 learned rows per open list and the reset question all page in their columns
+		local cols = J.page("settings").cols
+		assert.is_true(cols[1].pageCount > 1 and cols[2].pageCount > 1 and cols[3].pageCount > 1)
+		assert.is_true(totals.settings > 150)
+		assert.is_true(totals.shopping > 70 and totals.alts > 180)
+		assert.equal(0, scrolls.wheel)
+	end)
+
+	it("the map view has no wheel: its two-segment control switches the view", function()
+		local map = ns.MapCanvas.new(CreateFrame("Frame"), 628, 430, { journal = true })
+		map:Set(loop(16), { mode = "travel" })
+		assert.equal(0, scrolls.wheel)
+		assert.is_nil(map.frame.scripts.OnMouseWheel)
+		map:SetMode("spot")
+		assert.equal("spot", map:Stats().mode)
 	end)
 end)

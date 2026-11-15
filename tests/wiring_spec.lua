@@ -55,10 +55,53 @@ local function newFrame(registry)
 	function methods.IsShown()
 		return false
 	end
+	-- regions and sizes, so the journal's pages can be drawn from the provider's view-models
+	for _, make in ipairs({ "CreateTexture", "CreateFontString", "CreateLine", "CreateMaskTexture" }) do
+		methods[make] = function()
+			return newFrame(registry)
+		end
+	end
+	function methods.SetText(self, s)
+		self.text = s
+	end
+	function methods.GetText(self)
+		return self.text
+	end
+	function methods.SetSize(self, w, h)
+		self.w, self.h = w, h
+	end
+	function methods.SetWidth(self, w)
+		self.w = w
+	end
+	function methods.SetHeight(self, h)
+		self.h = h
+	end
+	function methods.GetWidth(self)
+		return self.w or 0
+	end
+	function methods.GetHeight(self)
+		return self.h or 0
+	end
+	function methods.GetStringWidth(self)
+		return #tostring(self.text or "") * 6
+	end
+	function methods.GetStringHeight()
+		return 12
+	end
+	function methods.GetEffectiveScale()
+		return 1
+	end
 	registry[#registry + 1] = f
 	return setmetatable(f, {
+		-- a widget method the mock does not know does nothing; a lower-case key is a plain field (nil until set)
 		__index = function(_, k)
-			return methods[k] or function() end
+			if methods[k] then
+				return methods[k]
+			end
+			if type(k) == "string" and k:match("^%u") then
+				return function() end
+			end
+			return nil
 		end,
 	})
 end
@@ -149,6 +192,15 @@ local function client(sc, registry, printed)
 	G.GetBindingKey = function()
 		return nil
 	end
+	-- the game always has C_Item: empty bags, and names the client has not cached yet
+	G.C_Item = {
+		GetItemCount = function(item)
+			return sc.bags and sc.bags[item] or 0
+		end,
+		GetItemNameByID = function()
+			return nil
+		end,
+	}
 	if sc.prices ~= nil then
 		G.TSM_API = {
 			GetCustomPriceValue = function(_, item)
@@ -414,6 +466,98 @@ describe("Provider: a view-model for every page", function()
 		local t = row(p.overview, 197)
 		assert.is_truthy(t.cost.total, "costed from vendor prices")
 		assert.is_true(t.tsmMissing > 0, "the auction items are counted as missing prices")
+		-- the plan has crafts without prices: the Path page still draws, its materials counted from the bags
+		assert.is_true(#p.path.rows > 0)
+		assert.is_nil(a.P.diag.haveWhy)
+		assert.is_nil(a.P.diag.firstError)
+	end)
+
+	it("a failing bag scan leaves the Path page whole and names the broken link", function()
+		local a = login({ prices = true, professions = { { 164, 28, 75 } } })
+		a.env.C_Item.GetItemCount = function()
+			error("item data not loaded")
+		end
+		local p = pages(a, 164)
+		assert.is_true(#p.path.rows > 0)
+		assert.is_table(p.path.detail)
+		assert.matches("item data not loaded", a.P.diag.haveWhy, 1, true)
+		assert.is_nil(a.P.diag.firstError)
+	end)
+
+	it("draws the provider's Overview, Path and Where through the journal's pages: the two halves together", function()
+		local a = login({ prices = true, professions = { { 164, 28, 75 }, { 186, 60, 150 } } })
+		local J, Wd, MAX = a.ns.JournalUI, a.ns.Widgets, a.ns.Where.PATH_MAX
+		local function draw(page, profession)
+			local c = { page = page, profession = profession }
+			a.P.provider.journal(c)
+			local vm = a.P.provider.page(page, c)
+			J.setPage(page, vm)
+			assert.equal(0, Wd.overflow.count, page .. ": " .. tostring(Wd.overflow.last))
+			return vm, J.diag().pages[page]
+		end
+		-- Overview: every profession the data ships is a card on the one page, each with its two lines
+		local ov, st = draw("overview", 164)
+		assert.is_true(#ov.rows >= 10 and #ov.rows <= 18)
+		assert.same({ #ov.rows, #ov.rows, 1 }, { st.rows, st.shown, st.pages })
+		for _, r in ipairs(ov.rows) do
+			assert.is_string(r.costText, r.name)
+			assert.is_string(r.coverText, r.name)
+		end
+		-- no count on a tab, and no breadcrumb from the shell: the page gives it
+		local shell = a.P.provider.journal({ page = "path", profession = 164 })
+		assert.is_nil(shell.crumb)
+		for _, tab in ipairs(shell.tabs) do
+			assert.is_nil(tab.count, tab.id)
+		end
+		-- Path of a crafting profession: lines in stretches that fit, the first line not done selected
+		local path
+		path, st = draw("path", 164)
+		assert.same({ #path.rows, #path.stretches, path.stretch }, { st.steps, st.stretches, st.stretch })
+		assert.is_true(st.shown >= 1 and st.shown <= MAX)
+		assert.is_true(st.detailFits)
+		local inStretch = 0
+		for _, s in ipairs(path.stretches) do
+			assert.is_true(#s.rows <= MAX, s.label)
+			inStretch = inStretch + #s.rows
+		end
+		assert.equal(#path.rows, inStretch)
+		assert.equal(path.rows[1].step, path.selected)
+		assert.equal(path.rows[1].title, J.page("path").crumb)
+		for _, r in ipairs(path.rows) do
+			assert.is_nil((r.title .. (r.sub or "")):find("...", 1, true), r.title)
+			assert.is_nil(r.ways)
+		end
+		-- a line of the last stretch, picked on the timeline or in the list: the page turns to its stretch
+		local far = path.rows[#path.rows]
+		a.P.provider.selectStep(far.step)
+		path, st = draw("path", 164)
+		assert.same({ far.step, #path.stretches }, { path.selected, path.stretch })
+		assert.equal(#path.stretches[path.stretch].rows, st.shown)
+		-- a stretch button: that stretch, the same selected line; a profession change forgets both
+		a.P.provider.selectStretch(1)
+		path = draw("path", 164)
+		assert.same({ far.step, 1 }, { path.selected, path.stretch })
+		a.P.provider.selectProfession(186)
+		path = draw("path", 164)
+		assert.same({ path.rows[1].step, 1 }, { path.selected, path.stretch })
+		-- Path of a world skill: the same page, rows with a range, a detail that leads to Where
+		local mining
+		mining, st = draw("path", 186)
+		assert.is_true(st.steps >= 1 and st.stretches >= 1 and st.shown <= MAX)
+		for _, r in ipairs(mining.rows) do
+			assert.is_number(r.from)
+			assert.is_number(r.to)
+			assert.equal("selectStep", r.action.id)
+		end
+		assert.equal("Open in Where", mining.detail.actions[1].label)
+		-- Where: the spots through the page
+		local where
+		where, st = draw("where", 186)
+		assert.equal(#where.spots, st.spots)
+		assert.is_string(J.page("where").crumb)
+		assert.is_nil(J.diag().lastWhy)
+		assert.is_nil(a.P.diag.firstError)
+		assert.equal(0, Wd.overflow.count, tostring(Wd.overflow.last))
 	end)
 end)
 
