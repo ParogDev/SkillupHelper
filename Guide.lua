@@ -42,6 +42,10 @@ function G.needsOf(step, profession)
 	elseif step.kind == "buyRecipe" then
 		-- a recipe item the data's vendor sells for less than the auction house goes to a vendor
 		local kind = step.where == "vendor" and "vendor" or "auction"
+		if step.where == "source" or not step.item then
+			-- a recipe to get from a quest, a drop or a teacher: no NPC the guide knows
+			return out
+		end
 		out[1] = { kind = kind, items = { { item = step.item, count = 1 } } }
 		return out
 	end

@@ -686,14 +686,6 @@ local function overlaid(row, over)
 	return out or row
 end
 
-local function countOf(t)
-	local n = 0
-	for _ in pairs(t or {}) do
-		n = n + 1
-	end
-	return n
-end
-
 -- The table the planner reads, from the three layers (any may be nil), and what loaded:
 -- report = { shipped = { build, professions = { "Name(id) n recipes" } } or the broken link,
 --            plan = "present, ..." or "absent (optional)", custom = "absent (optional)" or { applied, errors } }.
@@ -707,17 +699,33 @@ function L.effectivePlan(shipped, plan, custom)
 		version = 2,
 		build = shipped and shipped.build or (plan and plan.build),
 		vendor = copyOf(shipped and shipped.vendor),
-		items = copyOf(shipped and shipped.items),
+		-- item rows a layer adds or changes sit in this table; every other item reads through to the shipped table
+		-- (thousands of rows that are never copied or walked)
+		items = setmetatable({}, { __index = shipped and shipped.items or nil }),
 		professions = {},
 	}
+	-- per profession: the layers' parts, merged the first time its `recipes` are read (lazy below)
+	local layers = {}
 	if shipped then
 		local profs = {}
+		local counts = type(shipped.counts) == "table" and shipped.counts or {}
 		for id, p in pairs(shipped.professions or {}) do
 			out.professions[id] = p
-			profs[#profs + 1] = ("%s(%s) %d recipes"):format(tostring(p.name), tostring(id), countOf(p.recipes))
+			layers[id] = { base = p }
+			-- the generator's own count: a profession's recipe table is not walked at load
+			profs[#profs + 1] = ("%s(%s) %s recipes"):format(
+				tostring(p.name),
+				tostring(id),
+				tostring(counts[id] or "?")
+			)
 		end
 		table.sort(profs)
-		report.shipped = { build = shipped.build, professions = profs }
+		report.shipped = {
+			build = shipped.build,
+			-- where and when the overlay's facts were read ("Wowhead, Forever section, 2026-11-14")
+			source = shipped.source,
+			professions = profs,
+		}
 	else
 		report.shipped = "Data/Recipes.lua not loaded: the shipped recipe data is missing from this copy of the addon"
 	end
@@ -734,30 +742,18 @@ function L.effectivePlan(shipped, plan, custom)
 			out.vendor[item] = price
 		end
 		for item, row in pairs(plan.items or {}) do
-			out.items[item] = out.items[item] and overlaid(out.items[item], row) or row
+			local b = out.items[item]
+			rawset(out.items, item, b and overlaid(b, row) or row)
 		end
 		local n = 0
 		for id, p in pairs(plan.professions or {}) do
 			n = n + 1
-			local base = out.professions[id]
-			if not base then
+			if not layers[id] then
 				out.professions[id] = p
+				layers[id] = { base = p }
 			else
-				local merged = overlaid(base, p)
-				if merged == base then
-					merged = copyOf(base)
-				end
-				merged.recipes = copyOf(base.recipes)
-				if v2 then
-					for spell, row in pairs(p.recipes or {}) do
-						local b = merged.recipes[spell]
-						merged.recipes[spell] = b and overlaid(b, row) or row
-					end
-				end
-				-- the shipped data covers every rank; an export made for a lower target must not shorten the plan
-				merged.to = math.max(tonumber(base.to) or 0, tonumber(p.to) or 0)
-				merged.ranks = base.ranks
-				out.professions[id] = merged
+				layers[id].plan = p
+				layers[id].planRecipes = v2
 			end
 		end
 		report.plan = ("present, %d profession%s%s%s"):format(
@@ -772,28 +768,21 @@ function L.effectivePlan(shipped, plan, custom)
 	if custom ~= nil then
 		local applied = 0
 		for line, rows in pairs(clean.recipes) do
-			local base = out.professions[line]
-			if not base then
+			local layer = layers[line]
+			if not layer then
 				errors[#errors + 1] = ("recipes[%s]: no profession with this skill line id in the data"):format(
 					tostring(line)
 				)
 			else
-				local prof = copyOf(base)
-				prof.recipes = copyOf(base.recipes)
-				prof.removed = copyOf(base.removed)
+				-- checked now (one lookup per entry, so the errors are known at login), applied on first use
+				local keep = {}
+				local baseRecipes = layer.base.recipes or {}
 				for _, spell in ipairs(sortedKeysOf(rows)) do
 					local row = rows[spell]
-					local b = prof.recipes[spell]
-					if row == false then
-						-- out of the plan, also when the client lists it as learned (Scan.build reads `removed`)
-						prof.recipes[spell] = nil
-						prof.removed[spell] = true
-						applied = applied + 1
-					elseif b then
-						prof.recipes[spell] = overlaid(b, row)
-						applied = applied + 1
-					elseif row.y and row.g and row.mats then
-						prof.recipes[spell] = row
+					local known = baseRecipes[spell]
+						or (layer.planRecipes and layer.plan.recipes and layer.plan.recipes[spell])
+					if row == false or known or (row.y and row.g and row.mats) then
+						keep[spell] = row
 						applied = applied + 1
 					else
 						errors[#errors + 1] = ("recipes[%s][%s]: not in the data, and a new recipe needs y, g and mats"):format(
@@ -802,7 +791,7 @@ function L.effectivePlan(shipped, plan, custom)
 						)
 					end
 				end
-				out.professions[line] = prof
+				layer.custom = next(keep) and keep or nil
 			end
 		end
 		for item, price in pairs(clean.vendor) do
@@ -810,7 +799,8 @@ function L.effectivePlan(shipped, plan, custom)
 			applied = applied + 1
 		end
 		for item, row in pairs(clean.items) do
-			out.items[item] = out.items[item] and overlaid(out.items[item], row) or row
+			local b = out.items[item]
+			rawset(out.items, item, b and overlaid(b, row) or row)
 			applied = applied + 1
 		end
 		if #clean.npcs > 0 then
@@ -824,6 +814,53 @@ function L.effectivePlan(shipped, plan, custom)
 	end
 	if not next(out.professions) then
 		return nil, report
+	end
+	-- A profession a layer changes gets its own entry: the fields now (a handful), the recipes when first read.
+	-- Nothing walks a recipe table at login; only the professions the player opens are ever merged.
+	for id, layer in pairs(layers) do
+		if layer.plan or layer.custom then
+			local base, p = layer.base, layer.plan
+			local entry = {}
+			for _, src in ipairs({ base, p or {} }) do
+				for k, v in pairs(src) do
+					if k ~= "recipes" and k ~= "removed" then
+						entry[k] = v
+					end
+				end
+			end
+			if p then
+				-- the shipped data covers every rank; an export made for a lower target must not shorten the plan
+				entry.to = math.max(tonumber(base.to) or 0, tonumber(p.to) or 0)
+				entry.ranks = base.ranks
+			end
+			out.professions[id] = setmetatable(entry, {
+				__index = function(t, k)
+					if k ~= "recipes" and k ~= "removed" then
+						return nil
+					end
+					local recipes, removed = copyOf(base.recipes), false
+					if p and layer.planRecipes then
+						for spell, row in pairs(p.recipes or {}) do
+							local b = recipes[spell]
+							recipes[spell] = b and overlaid(b, row) or row
+						end
+					end
+					for spell, row in pairs(layer.custom or {}) do
+						if row == false then
+							-- out of the plan, also when the client lists it as learned (Scan.build reads `removed`)
+							recipes[spell] = nil
+							removed = removed or {}
+							removed[spell] = true
+						else
+							recipes[spell] = recipes[spell] and overlaid(recipes[spell], row) or row
+						end
+					end
+					rawset(t, "recipes", recipes)
+					rawset(t, "removed", removed)
+					return rawget(t, k) or nil
+				end,
+			})
+		end
 	end
 	return out, report
 end

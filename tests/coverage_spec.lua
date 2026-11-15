@@ -12,14 +12,38 @@ end
 -- Professions the data cannot level by crafting today: { brackets = { { from, to } }, reason }. The test asserts
 -- these exact brackets, so a data change that closes (or moves) a hole fails here until the entry is updated.
 -- The aim is an empty table.
-local KNOWN_HOLES = {
-	[186] = {
-		brackets = { { 140, 155 }, { 185, 300 } },
-		reason = "Mining is levelled by mining ore. Its craft recipes are the smelting spells, which turn grey at "
-			.. "140 (Iron) and 185 (Gold); the later ones (Steel, Mithril, Truesilver, Dark Iron, Thorium) give no "
-			.. "skill at all in the data (yellow = grey). No data is missing: crafting alone cannot do it.",
-	},
-}
+local KNOWN_HOLES = {}
+
+-- A skill raised in the world (the entry has world = true: Mining) is covered by its recipes plus the world targets
+-- of Data/Spots.lua: a target gives skill from its requirement until `bands.grey` points above it. Returns the skill
+-- levels of `gaps` no target covers, or nil when Data/Spots.lua is not there (it is generated separately).
+local function worldHoles(id, gaps)
+	local f = loadfile("Data/Spots.lua")
+	if not f then
+		return nil
+	end
+	local s = {}
+	f("SkillupHelper", s)
+	local spots = s.Data and s.Data.spots
+	local skill = spots and spots.skills and spots.skills[id]
+	if not skill then
+		return nil
+	end
+	local grey = spots.bands and spots.bands.grey or 100
+	local left = {}
+	for _, g in ipairs(gaps) do
+		for level = math.floor(g.from), math.floor(g.to) - 1 do
+			local covered = false
+			for _, t in pairs(skill.targets or {}) do
+				covered = covered or (type(t.req) == "number" and t.req <= level and level < t.req + grey)
+			end
+			if not covered then
+				left[#left + 1] = level
+			end
+		end
+	end
+	return left
+end
 
 -- With trainer and auto recipes only (no recipe item bought): the brackets that need a bought recipe.
 local NEEDS_A_RECIPE_ITEM = {
@@ -199,6 +223,22 @@ describe("the shipped recipe data", function()
 			if known then
 				seenHoles[id] = true
 				assert.same(known.brackets, bracketsOf(r.gaps), prof.name .. ": KNOWN_HOLES is out of date")
+			elseif prof.world then
+				-- recipes plus world targets: what neither covers is a hole, named level by level
+				local left = worldHoles(id, r.gaps)
+				if left == nil then
+					print(
+						prof.name
+							.. ": needs world spots (Data/Spots.lua is not here); recipes leave "
+							.. describeGaps(prof, r.gaps)
+					)
+				elseif #left > 0 then
+					failures[#failures + 1] = ("%s (%d): neither a recipe nor a world target gives skill at %s"):format(
+						prof.name,
+						id,
+						table.concat(left, ", ")
+					)
+				end
 			elseif not r.complete then
 				failures[#failures + 1] = ("%s (%d) is not covered:\n  %s"):format(
 					prof.name,
@@ -219,7 +259,7 @@ describe("the shipped recipe data", function()
 			local prof = data.professions[id]
 			local r = cost(prof, false)
 			assert.same({}, r.recipesToBuy, prof.name)
-			if not r.complete and not KNOWN_HOLES[id] then
+			if not r.complete and not KNOWN_HOLES[id] and not prof.world then
 				got[id] = bracketsOf(r.gaps)
 				print(("%s needs a bought recipe at:\n  %s"):format(prof.name, describeGaps(prof, r.gaps)))
 			end

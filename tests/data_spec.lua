@@ -24,6 +24,8 @@ local function shipped()
 	return {
 		version = 2,
 		build = "1.60.1.1",
+		source = "a test, 2026-01-01",
+		counts = { [164] = 3, [185] = 1 },
 		vendor = { [10] = 40 },
 		items = { [1] = { name = "Bar", sell = 5 }, [2] = { name = "Stone", sell = 2 } },
 		professions = {
@@ -208,6 +210,75 @@ describe("effectivePlan", function()
 		assert.same({}, report.custom.errors)
 		assert.equal(1, eff.professions[164].recipes[2660].learn)
 		assert.is_nil(eff.professions[164].recipes[2663])
+	end)
+end)
+
+describe("what is built at login", function()
+	-- every profession entry of the real shipped file, with a tripwire on its recipe table
+	local function tripwired()
+		local data = {}
+		assert(loadfile("Data/Recipes.lua"))("SkillupHelper", data)
+		local real, touched = data.Data.recipes, {}
+		local shippedCopy = {}
+		for k, v in pairs(real) do
+			shippedCopy[k] = v
+		end
+		shippedCopy.professions = {}
+		for id, prof in pairs(real.professions) do
+			local entry = {}
+			for k, v in pairs(prof) do
+				if k ~= "recipes" then
+					entry[k] = v
+				end
+			end
+			shippedCopy.professions[id] = setmetatable(entry, {
+				__index = function(_, k)
+					if k == "recipes" then
+						touched[id] = (touched[id] or 0) + 1
+						return prof.recipes
+					end
+				end,
+			})
+		end
+		return shippedCopy, touched, real
+	end
+
+	it("touches no profession's recipes, and reports the counts the generator wrote", function()
+		local data, touched, real = tripwired()
+		local eff, report = L.effectivePlan(data, nil, nil)
+		assert.same({}, touched)
+		assert.equal(real.build, report.shipped.build)
+		assert.is_string(report.shipped.source)
+		local n = 0
+		for id, prof in pairs(real.professions) do
+			n = n + 1
+			local count = 0
+			for _ in pairs(prof.recipes) do
+				count = count + 1
+			end
+			assert.equal(count, real.counts[id], prof.name)
+		end
+		assert.equal(n, #report.shipped.professions)
+		assert.matches("^Alchemy%(171%) %d+ recipes$", report.shipped.professions[1])
+		-- asked for one profession: only that one is read
+		assert.is_table(eff.professions[164].recipes[2660])
+		assert.same({ [164] = 1 }, touched)
+	end)
+
+	it("merges a local plan and a custom file only for a profession that is opened", function()
+		local data, touched = tripwired()
+		local plan = { version = 2, professions = { [185] = { name = "Cooking", from = 1, recipes = {} } } }
+		local custom = { recipes = { [164] = { [2660] = { learn = 1 } } }, vendor = { [2880] = 100 } }
+		local eff, report = L.effectivePlan(data, plan, custom)
+		assert.same({}, report.custom.errors)
+		-- the custom entry was checked against its own profession (one lookup); nothing else was read
+		assert.same({ [164] = 1 }, touched)
+		assert.equal(1, eff.professions[164].recipes[2660].learn)
+		assert.equal(1, eff.professions[185].from)
+		assert.is_table(eff.professions[185].recipes)
+		assert.is_nil(touched[197])
+		-- item rows read through to the shipped table without a copy
+		assert.equal(data.items[2880], eff.items[2880])
 	end)
 end)
 
@@ -415,8 +486,98 @@ describe("recipe items", function()
 		assert.is_true(cut.bop)
 		-- "Use it": the player can get it, so the plan crafts it, still without an auction buy
 		local used = P.run(cooking({ bop = true }, { exclude = { allow = { [COD] = true } } }))
-		assert.is_nil(find(used, "buyRecipe", COD))
 		assert.is_not_nil(find(used, "craft", COD))
+		-- with an explicit step in front of the crafts that says where it comes from, and no price made up
+		local get = find(used, "buyRecipe", COD)
+		assert.same(
+			{ "source", "binds when picked up, source not known", true },
+			{ get.where, get.source, get.priceUnknown }
+		)
+		assert.is_nil(get.price)
+		assert.is_false(P.needsAh({ price = {} }, get))
+		for _, r in ipairs(used.trip and used.trip.rows or {}) do
+			assert.is_not.equal(I.CODRECIPE, r.item)
+		end
+		local card = ns.View.describe({
+			profession = "Cooking",
+			skill = 173,
+			maxSkill = 225,
+			planner = { steps = { get }, hold = {}, leftovers = {} },
+		}, {
+			money = L.money,
+			nameOf = function(_, f)
+				return f
+			end,
+			have = function()
+				return 0
+			end,
+		}).next
+		assert.same(
+			{ "Get the recipe: binds when picked up, source not known", "recipe price unknown" },
+			{ card.verb, card.cost }
+		)
+	end)
+
+	it("names the source in the get-the-recipe step, and says the price is unknown in the cost", function()
+		local function get(change, extra)
+			local input = cooking(change, { exclude = { allow = { [COD] = true } } })
+			for k, v in pairs(extra or {}) do
+				input[k] = v
+			end
+			if not (change and change.bop) then
+				input.price[I.CODRECIPE] = nil
+			end
+			return find(P.run(input), "buyRecipe", COD)
+		end
+		assert.equal("auction house, no price today", get().source)
+		assert.equal("a drop; auction house, no price today", get({ from = "drop" }).source)
+		assert.equal("a quest reward", get({ bop = true, from = "quest" }).source)
+		local horde = { name = "Kelsey Yance", npc = 2664, a = 1, h = -1 }
+		assert.equal(
+			"sold by Kelsey Yance",
+			get({ bop = true, from = "vendor", vendor = horde, buy = 2200 }, { faction = "Horde" }).source
+		)
+		-- costToCap: the recipe is listed with no price and counted as unknown, not as free
+		local prof = { recipes = cooking({ bop = true, learn = 1 }).recipes }
+		local r = P.costToCap(prof, 173, 225, function(item)
+			-- the fish is cheap, so the cod is the plan's pick once the chops stop being orange
+			return item ~= I.CODRECIPE and (item == I.COD and 1 or 50) or nil
+		end, { cap = 225, learned = F.COOKING_LEARNED, exclude = { allow = { [COD] = true } } })
+		assert.equal(1, r.unknownRecipePrices)
+		assert.matches("1 recipe price unknown", ns.View.costLine("Cooking", 173, 225, r, { money = L.money }), 1, true)
+	end)
+
+	it("offers a gated recipe that is learnable part-way through a step, from its learn skill", function()
+		-- learn 175 (the fixture), the step it would shorten starts at 173
+		local plan = P.run(cooking({ bop = true, from = "drop" }))
+		local cut = shortcut(plan, COD)
+		assert.is_not_nil(cut)
+		assert.equal(175, cut.from)
+		assert.is_true(cut.saves > P.SHORTCUT_MIN)
+	end)
+
+	it("gates a recipe learned by character level until the character has it", function()
+		local function spells(level)
+			local ctx = P.prepare({
+				skill = 100,
+				cap = 300,
+				level = level,
+				price = { [1] = { buy = 10 } },
+				recipes = {
+					[9] = { name = "Deadly Poison", y = 130, g = 180, mats = { 1, 1 }, src = "trainer", level = 30 },
+				},
+			})
+			return ctx.options[1], ctx.hidden[1]
+		end
+		local open, gated = spells(30)
+		-- no learn skill: gated by level only, so usable through its orange range
+		assert.same({ 9, 0 }, { open.spell, open.at })
+		assert.is_nil(gated)
+		open, gated = spells(29)
+		assert.is_nil(open)
+		assert.is_true(gated.tooLow)
+		-- level not known: not assumed too low
+		assert.is_not_nil((spells(nil)))
 	end)
 
 	it("asks TSM for no price of a bind-on-pickup recipe item", function()
@@ -544,8 +705,13 @@ describe("where a recipe comes from", function()
 	it("names the source of a bind-on-pickup recipe item on its shortcut", function()
 		assert.equal(
 			"its recipe binds when picked up: sold by Kelsey Yance",
-			cut(run({ bop = true, from = "vendor", vendor = VENDOR, buy = 2200 })).why
+			cut(
+				run({ bop = true, from = "vendor", vendor = { name = "Kelsey Yance", npc = 2664, h = -1 }, buy = 2200 })
+			).why
 		)
+		-- from a vendor the character can reach it is simply bought there, bind on pickup or not
+		local buy = step(run({ bop = true, from = "vendor", vendor = VENDOR, buy = 2200 }), "buyRecipe")
+		assert.same({ "vendor", 2200 }, { buy.where, buy.price })
 		assert.equal("its recipe binds when picked up: a drop", cut(run({ bop = true, from = "drop" })).why)
 		assert.equal("its recipe binds when picked up: a quest reward", cut(run({ bop = true, from = "quest" })).why)
 	end)
@@ -557,6 +723,7 @@ describe("where a recipe comes from", function()
 		assert.equal("not confirmed obtainable in Forever", cut(plan).why)
 		local used = run({ src = "unlisted", item = false }, { exclude = { allow = { [COD] = true } } })
 		assert.is_not_nil(step(used, "craft"))
+		assert.equal("not confirmed obtainable in Forever", step(used, "buyRecipe").source)
 		-- a learned one is simply known
 		local known = run({ src = "unlisted", item = false }, { learned = { [COD] = true, [3398] = true } })
 		assert.is_not_nil(step(known, "craft"))
@@ -599,6 +766,8 @@ describe("where a recipe comes from", function()
 			right = right or (type(row.text) == "string" and row.text:find("^Train Belt") and row.right)
 		end
 		assert.equal("at 45, 2s 50c", right)
+		-- and the Shopping tab totals what trainers are paid, on its own line
+		assert.matches("^Training 2s 50c: %d recipes? %(1 price unknown%)$", d.shopping.training)
 	end)
 end)
 

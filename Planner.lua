@@ -374,33 +374,45 @@ function P.prepare(input)
 			-- it unless the user said "use it" (exclude.allow[spell]) or enabled special teachers; it is offered as a
 			-- shortcut on the steps it would make cheaper, or on a gap it fills.
 			local allowed = input.exclude and input.exclude.allow and input.exclude.allow[spell] == true
-			-- a recipe item: one that binds when picked up is never an auction buy (a drop, a quest, a vendor), and a
-			-- tradeable one is a buy only while it has a price. Both are gated: shown as shortcuts that say why.
+			-- a recipe item: one that binds when picked up is never an auction buy (ItemSparse.Bonding = 1; checked
+			-- against auction data: none of those items is ever listed), and a tradeable one is an auction buy only
+			-- while it has a price.
 			local bop = src == "item" and r.bop == true
 			local recipePrice = (src == "item" and not bop) and buyOf(ctx, r.item or -1) or nil
 			local recipeWhere = "ah"
-			-- a vendor known to sell the recipe item, at the item's vendor price: the cheaper of vendor and auction.
-			-- A vendor the character may not reach (the other faction's, a reputation) is not assumed: vendorWhy.
+			-- a vendor known to sell the recipe item, at the item's vendor price: the cheaper of vendor and auction,
+			-- and the one way to plan a recipe that binds when picked up. A vendor the character may not reach (the
+			-- other faction's, a reputation) is not assumed: vendorWhy.
 			local vendorWhy
-			if src == "item" and not bop and type(r.vendor) == "table" and type(r.buy) == "number" then
+			if src == "item" and type(r.vendor) == "table" and type(r.buy) == "number" then
 				vendorWhy = vendorBlock(r, input.faction)
 				if not vendorWhy and (not recipePrice or r.buy < recipePrice) then
 					recipePrice, recipeWhere = r.buy, "vendor"
 				end
 			end
+			-- with no way to buy it, a recipe item is gated: a shortcut that says why
 			local noPrice = src == "item" and not bop and recipePrice == nil
+			local bopOnly = bop and recipePrice == nil
+			-- a recipe learned by character level (Poisons): not learnable yet below that level
+			local tooLow = not learned
+				and type(r.level) == "number"
+				and type(input.level) == "number"
+				and r.level > input.level
 			local gated = not allowed
 				and (
 					unchecked
-					or bop
+					or bopOnly
 					or noPrice
+					or tooLow
 					-- not in the data's list of the profession's recipes: not confirmed obtainable
 					or src == "unlisted"
 					or (src == "special" and not (input.exclude and input.exclude.special == false))
 				)
 			local at = -math.huge
 			if not learned then
-				at = r.learn or (src == "item" and 0 or y)
+				-- no learn skill in the data: a recipe item or a level-gated recipe has none, a trainer recipe is
+				-- assumed learnable from yellow
+				at = r.learn or ((src == "item" or type(r.level) == "number") and 0 or y)
 			end
 			local prod = ctx.product[spell]
 			if not prod then
@@ -429,6 +441,8 @@ function P.prepare(input)
 				from = src == "item" and r.from or nil,
 				bop = bop or nil,
 				noPrice = noPrice or nil,
+				level = r.level,
+				tooLow = tooLow or nil,
 				trainCost = src == "trainer" and r.cost or nil,
 				vendor = prod.vendor or 0,
 				sell = prod.sell,
@@ -662,8 +676,9 @@ local function baselineFor(ctx, chance)
 	for _, o in ipairs(ctx.options) do
 		if o.src ~= "item" then
 			opts[#opts + 1] = o
-		elseif o.bop or not o.recipePrice then
-			-- here only because the user said "Use it" (exclude.allow): they can get the recipe, nothing to buy
+		elseif not o.recipePrice then
+			-- here only because the user said "Use it" (exclude.allow): they can get the recipe, at a price nobody
+			-- knows. The plan says where it comes from (a "get the recipe" step) and counts no price for it.
 			opts[#opts + 1] = o
 		elseif not ctx.noRecipeBuys then
 			cands[#cands + 1] = o
@@ -1184,6 +1199,8 @@ local function shortcutOf(o, saves)
 		needs = o.teacher or "a special teacher"
 	elseif o.unchecked then
 		needs = "no trainer you opened teaches it"
+	elseif o.tooLow then
+		why = ("needs character level %d"):format(o.level)
 	elseif o.src == "unlisted" then
 		why = "not confirmed obtainable in Forever"
 	elseif o.bop then
@@ -1205,6 +1222,9 @@ local function othersOf(ctx, base, step, info)
 	local lo = math.floor(step.from)
 	local hi = math.min(math.max(lo, math.ceil(step.to - EPS) - 1), ctx.cap - 1)
 	local extra
+	-- a gated recipe need not cover the whole step: learnable part-way through, it is compared from its learn skill
+	-- on (the step's own recipe stays before that). part[spell] = { x = what it changes, from = its first level }.
+	local part = {}
 	for s = lo, hi do
 		local lv = base.levels[s]
 		if not lv or not lv.costs then
@@ -1213,6 +1233,11 @@ local function othersOf(ctx, base, step, info)
 		local f = math.max(0, math.min(step.to, s + 1) - math.max(step.from, s))
 		local now = {}
 		for spell, c in pairs(lv.costs) do
+			local g = info[spell]
+			if g and g.gated and spell ~= step.spell and c < lv.c then
+				part[spell] = part[spell] or { x = 0, from = s }
+				part[spell].x = part[spell].x + f * (c - lv.c)
+			end
 			-- an alternative covers the whole step: a spell missing at any level drops out. The spell a swap replaced
 			-- is not an alternative: the step offers "Back to" it (step.swapFrom).
 			if spell ~= step.spell and spell ~= step.swapFrom and (not extra or extra[spell]) then
@@ -1222,12 +1247,21 @@ local function othersOf(ctx, base, step, info)
 		extra = now
 	end
 	local out, cuts = {}, {}
+	for spell, pt in pairs(part) do
+		if pt.x < -P.SHORTCUT_MIN then
+			-- a gated recipe that would make this step, or the rest of it, cheaper: a shortcut, with what it saves
+			local cut = shortcutOf(info[spell], -pt.x)
+			cut.from = pt.from > lo and pt.from or nil
+			cuts[#cuts + 1] = cut
+		end
+	end
 	for spell, x in pairs(extra or {}) do
 		local o = info[spell]
-		if o and o.gated and x < -P.SHORTCUT_MIN then
-			-- a gated recipe that would make this step cheaper: a shortcut, with what it saves
-			cuts[#cuts + 1] = shortcutOf(o, -x)
-		else
+		if o and o.gated and part[spell] and part[spell].x < -P.SHORTCUT_MIN then
+			-- offered as a shortcut above
+			x = nil
+		end
+		if x then
 			out[#out + 1] = {
 				spell = spell,
 				name = o and o.name,
@@ -1472,6 +1506,33 @@ local function finishCore(ctx, baseline, have, commits, own)
 				}
 			end
 			local crafts
+			if not o.learned and o.src ~= "auto" and o.src ~= "known" and not announced[o.spell] then
+				-- a recipe the user said they can get ("Use it") that the plan cannot buy: say where it comes from, and
+				-- that its price is not known (never counted as free)
+				announced[o.spell] = true
+				local from
+				if o.src == "special" then
+					from = o.teacher or "a special teacher"
+				elseif o.src == "unlisted" then
+					from = "not confirmed obtainable in Forever"
+				else
+					from = fromText(o) or (o.bop and "binds when picked up, source not known") or nil
+					if not o.bop then
+						from = (from and (from .. "; ") or "") .. "auction house, no price today"
+					end
+				end
+				steps[#steps + 1] = {
+					kind = "buyRecipe",
+					spell = o.spell,
+					name = o.name,
+					item = o.recipeItem,
+					where = "source",
+					source = from,
+					priceUnknown = true,
+					learn = o.at,
+					owned = (o.recipeItem and (own[o.recipeItem] or 0) > 0) or nil,
+				}
+			end
 			local source = seg.source
 			if source ~= "buy" then
 				local limit = stockLimit(ctx, o, have, pool)
@@ -1839,7 +1900,7 @@ end
 -- Whether a step sends the user to the AH: a recipe to buy there, or a reagent it buys there.
 local function needsAh(ctx, st)
 	if st.kind == "buyRecipe" then
-		return not st.owned and st.where ~= "vendor"
+		return not st.owned and st.where == "ah"
 	end
 	for _, b in ipairs(st.kind == "craft" and st.buy or {}) do
 		if isAh(ctx, b.item) then
@@ -1886,7 +1947,7 @@ local function tripOf(ctx, steps, chance, gold)
 		end
 		local cost = 0
 		if st.kind == "buyRecipe" then
-			cost = (st.owned or st.where == "vendor") and 0 or (st.price or 0)
+			cost = (st.owned or st.where ~= "ah") and 0 or (st.price or 0)
 		else
 			for _, b in ipairs(st.buy) do
 				if isAh(ctx, b.item) then
@@ -1899,7 +1960,7 @@ local function tripOf(ctx, steps, chance, gold)
 			break
 		end
 		if st.kind == "buyRecipe" then
-			if not st.owned and st.where ~= "vendor" then
+			if not st.owned and st.where == "ah" then
 				add(st.item, 1, st.price, "count")
 				byItem[st.item].recipe = true
 			end
@@ -2018,7 +2079,7 @@ function P.shoppingOf(ctx, steps, trip)
 			if not st.owned and st.where == "vendor" then
 				local merchant = st.vendor and st.vendor.name
 				add(shop.vendor, vendorBy, st.item, 1, st.price, { merchant = merchant, kind = "pattern" }, j)
-			elseif not st.owned then
+			elseif not st.owned and st.where == "ah" then
 				add(shop.ah, ahBy, st.item, 1, st.price, { kind = "pattern" }, j)
 			end
 		elseif st.kind == "craft" then
@@ -2136,6 +2197,32 @@ function P.finish(ctx, baseline, have, opts)
 	return plan
 end
 
+-- What a plan pays trainers: { total, recipes = n, ranks = n, unknown = n } (copper; unknown = trainer recipes and
+-- ranks whose price the data does not have). Trainer recipes are the plan's train steps; ranks are plan.rankUps (a
+-- rank trained inside one long step has no step of its own).
+function P.trainingOf(plan)
+	local t = { total = 0, recipes = 0, ranks = 0, unknown = 0 }
+	for _, st in ipairs(plan and plan.steps or {}) do
+		if st.kind == "train" then
+			t.recipes = t.recipes + 1
+			if type(st.cost) == "number" then
+				t.total = t.total + st.cost
+			else
+				t.unknown = t.unknown + 1
+			end
+		end
+	end
+	for _, up in ipairs(plan and plan.rankUps or {}) do
+		t.ranks = t.ranks + 1
+		if type(up.cost) == "number" then
+			t.total = t.total + up.cost
+		else
+			t.unknown = t.unknown + 1
+		end
+	end
+	return t
+end
+
 -- What it costs to level a profession entry (Data/Recipes.lua's shape: { recipes, ranks }) from skill `from` to `to`,
 -- for any profession, also one the character does not have: the real planner, run with nothing in the bags.
 -- priceFn(item) -> copper to buy one, or nil (no price). opts (all optional):
@@ -2184,11 +2271,14 @@ function P.costToCap(prof, from, to, priceFn, opts)
 	local auto = {}
 	for spell, r in pairs(recipes) do
 		-- only recipes the plan may use by itself: not the unlisted, special or bind-on-pickup shortcuts
-		if not r.gone and r.src ~= "unlisted" and r.src ~= "special" and not (r.src == "item" and r.bop) then
+		-- (one the user allowed, "Use it", is planned like any other, so its reagents are priced too)
+		local allowed = opts.exclude and opts.exclude.allow and opts.exclude.allow[spell] == true
+		local shortcut = r.src == "unlisted" or r.src == "special" or (r.src == "item" and r.bop and not r.vendor)
+		if not r.gone and (allowed or not shortcut) then
 			for k = 1, #(r.mats or {}) - 1, 2 do
 				need(r.mats[k])
 			end
-			if r.src == "item" and r.item then
+			if r.src == "item" and r.item and not r.bop then
 				need(r.item, true)
 			end
 		end
@@ -2237,6 +2327,7 @@ function P.costToCap(prof, from, to, priceFn, opts)
 		unknownPrices = #unknownItems,
 		unknownItems = unknownItems,
 		unknownRecipeItems = unknownRecipes,
+		unknownRecipePrices = 0,
 		reached = plan.cap,
 		capBlock = plan.capBlock,
 	}
@@ -2253,15 +2344,15 @@ function P.costToCap(prof, from, to, priceFn, opts)
 		elseif st.kind == "buyRecipe" then
 			recipeCost = recipeCost + (st.price or 0)
 			out.recipesToBuy[#out.recipesToBuy + 1] =
-				{ spell = st.spell, name = st.name, item = st.item, price = st.price }
-		elseif st.kind == "train" then
-			out.trainingCost = out.trainingCost + (tonumber(st.cost) or 0)
+				{ spell = st.spell, name = st.name, item = st.item, price = st.price, source = st.source }
+			if st.priceUnknown and not st.owned then
+				-- a recipe to get at a price nobody knows: said, never counted as free
+				out.unknownRecipePrices = out.unknownRecipePrices + 1
+			end
 		end
 	end
-	-- the ranks trained on the way (a rank inside one long step has no step of its own: step.rankUp)
-	for _, up in ipairs(plan.rankUps or {}) do
-		out.trainingCost = out.trainingCost + (tonumber(up.cost) or 0)
-	end
+	-- trainer recipes and the ranks trained on the way: the same sum the panel shows (P.trainingOf)
+	out.trainingCost = out.trainingCost + P.trainingOf(plan).total
 	if (plan.cap or from) < to then
 		local why = "no rank raises the cap"
 		if plan.capBlock then

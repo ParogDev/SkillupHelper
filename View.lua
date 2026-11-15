@@ -468,6 +468,10 @@ local function nextCard(st, env, listed)
 		card.name = env.nameOf(st.item, "Recipe: " .. tostring(st.name))
 		if st.owned then
 			card.verb = "In your bags: learn it"
+		elseif st.where == "source" then
+			-- a recipe the user chose to use that the plan cannot buy: where it comes from, price not known
+			card.verb = "Get the recipe: " .. tostring(st.source or "source not known")
+			card.cost = "recipe price unknown"
 		elseif st.where == "vendor" then
 			local who = st.vendor and st.vendor.name
 			card.verb = ("Buy it from %s for %s"):format(who and tostring(who) or "its vendor", money(st.price))
@@ -569,6 +573,13 @@ local function laterRow(n, st, env)
 			text = "Train " .. st.name .. (st.unchecked and (", " .. V.UNCHECKED) or ""),
 			-- the trainer's price when the data or a trainer visit gave one
 			right = ("at %d"):format(st.at) .. (st.cost and st.cost > 0 and (", " .. env.money(st.cost)) or ""),
+		}
+	elseif st.kind == "buyRecipe" and st.where == "source" then
+		return {
+			n = n,
+			color = "gold",
+			text = ("Get the recipe for %s: %s"):format(tostring(st.name), tostring(st.source or "source not known")),
+			right = "price unknown",
 		}
 	elseif st.kind == "buyRecipe" and st.where == "vendor" then
 		return {
@@ -1269,6 +1280,10 @@ function V.costLine(name, from, to, r, env, why)
 	if n > 0 then
 		parts[#parts + 1] = ("%d recipe%s to buy"):format(n, n == 1 and "" or "s")
 	end
+	local unknown = r.unknownRecipePrices or 0
+	if unknown > 0 then
+		parts[#parts + 1] = ("%d recipe price%s unknown"):format(unknown, unknown == 1 and "" or "s")
+	end
 	local state = "complete"
 	if #(r.gaps or {}) > 0 then
 		local gaps = {}
@@ -1550,6 +1565,27 @@ function V.altsView(mail, env)
 	return out
 end
 
+-- What the plan pays trainers, as the Shopping tab's own line under the total (the same sum as "/skillup cost"):
+-- "Training 5s 60c: 2 recipes, 1 rank (1 price unknown)". nil when the plan trains nothing.
+function V.trainingLine(p, env)
+	local t = ns.Planner and ns.Planner.trainingOf and ns.Planner.trainingOf(p)
+	if not t or t.recipes + t.ranks == 0 then
+		return nil
+	end
+	local parts = {}
+	if t.recipes > 0 then
+		parts[#parts + 1] = ("%d recipe%s"):format(t.recipes, t.recipes == 1 and "" or "s")
+	end
+	if t.ranks > 0 then
+		parts[#parts + 1] = ("%d rank%s"):format(t.ranks, t.ranks == 1 and "" or "s")
+	end
+	return ("Training %s: %s%s"):format(
+		env.money(t.total),
+		table.concat(parts, ", "),
+		t.unknown > 0 and (" (%d price%s unknown)"):format(t.unknown, t.unknown == 1 and "" or "s") or ""
+	)
+end
+
 -- The Shopping tab's head line: "Total 3g 12s, 2 stops" (+ "N unknown").
 local function shoppingTitle(blocks, env)
 	local total, unknown = 0, 0
@@ -1725,6 +1761,7 @@ function V.describe(m, env, opts)
 			d.later[#d.later + 1] = row
 		end
 		sh.stock = stockLines(p, env)
+		sh.training = V.trainingLine(p, env)
 		local data = d.more.data
 		local cov = p.coverage and p.coverage.to
 		if type(cov) == "number" and (not m.maxSkill or cov < m.maxSkill) then
@@ -1967,6 +2004,9 @@ function V.shoppingItems(s, collapsed)
 	local out = {}
 	if s.title then
 		out[#out + 1] = { kind = "line", text = s.title, color = "bone", size = 12 }
+	end
+	if s.training then
+		out[#out + 1] = { kind = "line", text = s.training }
 	end
 	if s.tripLine then
 		out[#out + 1] = { kind = "line", text = s.tripLine }
