@@ -3215,7 +3215,7 @@ function W.dataRows(ctx)
 			#errs > 0 and errs or nil
 		)
 	else
-		add("custom", "Your Custom file", "absent", "not present")
+		add("custom", "Your Custom file", "absent", "not present: no SkillupHelper_Custom addon loaded")
 	end
 	return rows
 end

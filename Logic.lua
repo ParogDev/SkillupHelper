@@ -456,7 +456,8 @@ end
 --   1. Data/Recipes.lua (ns.Data.recipes): shipped, every recipe of every profession, no auction prices;
 --   2. Data/Plan.lua (ns.Data.plan): optional, written on a PC by a price tool, for some professions only. Its
 --      fallback prices (items[].mv), sale values (recipes[].sell / takes), pricesAt and offline rows go on top;
---   3. Data/Custom.lua (ns.Data.custom): optional, the player's own changes (Data/Custom.example.lua).
+--   3. SkillupHelper_Custom (ns.Data.custom): optional, the player's own changes, from their own addon folder
+--      (extras/SkillupHelper_Custom/Custom.example.lua shows the shape).
 -- No layer is ever written to: a changed row is a copy.
 
 local SOURCES = { auto = true, trainer = true, item = true, special = true, unlisted = true }
@@ -556,7 +557,7 @@ local function sortedKeysOf(t)
 	return keys
 end
 
--- Checks Data/Custom.lua's table. Returns the entries that are usable ({ recipes, vendor, items, npcs }, each maybe
+-- Checks the SkillupHelper_Custom table. Returns the entries that are usable ({ recipes, vendor, items, npcs }, each maybe
 -- empty) and a list of errors, one per bad entry, each naming its key ("recipes[164][2660].learn: must be ...").
 -- A bad entry is left out; the rest of the file still applies. Never raises.
 function L.validateCustom(custom)
@@ -565,7 +566,7 @@ function L.validateCustom(custom)
 		return clean, errors
 	end
 	if type(custom) ~= "table" then
-		return clean, { "ns.Data.custom: must be a table" }
+		return clean, { "SkillupHelper_Custom: must be a table" }
 	end
 	for _, k in ipairs(sortedKeysOf(custom)) do
 		-- spots and trainers are checked and applied by Journal.lua (P.applyCustom)

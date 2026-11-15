@@ -4,8 +4,6 @@
 # Written on this PC by tools/tsm/skillup_lua.py (scaffolding repo): prices from your own auction house.
 Data/Plan.lua
 Data/Plan.lua.tmp
-# Your own changes to the recipe data (Data/Custom.example.lua shows the shape).
-Data/Custom.lua
 # tools/gen_recipes.py: downloaded client tables and the half-written output.
 tools/.cache/
 Data/Recipes.lua.tmp

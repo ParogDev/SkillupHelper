@@ -13,8 +13,8 @@ local ALLOWED_GLOBALS = {
 	SkillupHelper_OnCompartmentEnter = true,
 	SkillupHelper_OnCompartmentLeave = true,
 }
--- Listed in the TOC, absent from the repo: the game skips them (local files a player may add).
-local OPTIONAL = { ["Data/Plan.lua"] = true, ["Data/Custom.lua"] = true }
+-- Listed in the TOC, absent from the repo: the game skips it (written by a price tool on the player's PC).
+local OPTIONAL = { ["Data/Plan.lua"] = true }
 
 local function tocFiles()
 	local out = {}
@@ -221,6 +221,10 @@ end
 local function loadAddon(sc)
 	local registry, printed = {}, {}
 	local G = client(sc or {}, registry, printed)
+	-- globals other addons set before this one loads (sc.globals: the player's SkillupHelper_Custom table)
+	for k, v in pairs(sc and sc.globals or {}) do
+		G[k] = v
+	end
 	local written, errors = {}, {}
 	local env = setmetatable({}, {
 		__index = function(_, k)
@@ -324,6 +328,75 @@ describe("Load order", function()
 			assert.is_true(at[f] < at["UI.lua"], f)
 		end
 		assert.is_true(at["Data/Spots.lua"] < at["Where.lua"])
+	end)
+
+	-- A TOC line for a file nobody ships logs a load warning on every start (BugGrabber, 0.3.0).
+	it("lists no player file in the TOC: SkillupHelper_Custom is its own addon, loaded first", function()
+		for _, f in ipairs(tocFiles()) do
+			assert.is_nil(f:find("Custom", 1, true), f)
+		end
+		local toc = assert(io.open("SkillupHelper.toc")):read("*a")
+		assert.truthy(toc:find("\n## OptionalDeps: SkillupHelper_Custom", 1, true))
+	end)
+
+	it("reads the SkillupHelper_Custom table at load into the plan and the places", function()
+		local env = {}
+		local chunk = assert(loadfile("extras/SkillupHelper_Custom/Custom.lua"))
+		setfenv(chunk, env)
+		chunk("SkillupHelper_Custom", {})
+		local custom = env.SkillupHelper_Custom
+		custom.recipes[164] = { [2660] = { learn = 1 } }
+		custom.trainers[1] =
+			{ id = 999001, name = "My Trainer", map = 1454, x = 40, y = 60, role = "trainer", trains = "Mining" }
+		local a = login({ globals = { SkillupHelper_Custom = custom } })
+		assert.equal(custom, a.ns.Data.custom)
+		local eff = a.ns.plan()
+		assert.same({}, a.ns.Data.layers.custom.errors)
+		assert.equal(1, eff.professions[164].recipes[2660].learn)
+		assert.is_nil(a.ns.customNotice())
+		assert.same({}, a.P.custom.errors)
+		assert.is_true(a.P.custom.applied >= 1)
+	end)
+
+	it("runs without a SkillupHelper_Custom addon: no custom layer, no error", function()
+		local a = login({})
+		assert.is_nil(a.ns.Data.custom)
+		assert.is_not_nil(a.ns.plan())
+		assert.is_nil(a.ns.customNotice())
+	end)
+
+	-- An intermediate 0.3.0 build called W.scroll after Widgets.lua had dropped it: "attempt to call a nil value" when
+	-- the journal opened a page. Every W.<name>( the other files call must be defined by Widgets.lua.
+	it("calls no Widgets function that Widgets.lua does not define", function()
+		local defined = {}
+		for line in io.lines("Widgets.lua") do
+			local name = line:match("^function W%.([%w_]+)") or line:match("^W%.([%w_]+)%s*=")
+			if name then
+				defined[name] = true
+			end
+		end
+		local missing, checked = {}, 0
+		for _, file in ipairs(tocFiles()) do
+			-- only files where W is the widgets module (GuideUI's W is a width, Where.lua has its own W)
+			local src = not OPTIONAL[file] and assert(io.open(file)):read("*a") or ""
+			if file ~= "Widgets.lua" and src:find("\nlocal W = ns.Widgets\n", 1, true) then
+				checked = checked + 1
+				local n = 0
+				for line in io.lines(file) do
+					n = n + 1
+					local code = line:gsub("%-%-.*$", "")
+					for name in code:gmatch("%f[%w_]W%.([%w_]+)%s*%(") do
+						-- `W.x and W.x(...)` is an optional hook, guarded where it is called
+						local guarded = code:find("W." .. name .. " and W." .. name, 1, true)
+						if not defined[name] and not guarded then
+							missing[#missing + 1] = ("%s:%d W.%s"):format(file, n, name)
+						end
+					end
+				end
+			end
+		end
+		assert.same({}, missing)
+		assert.is_true(checked >= 3)
 	end)
 
 	it("wires the provider and the login events without an error", function()

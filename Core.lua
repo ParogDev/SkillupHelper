@@ -3,12 +3,19 @@ local ADDON, ns = ...
 SkillupHelper = ns
 ns.Data = ns.Data or {}
 
+-- The player's own changes live in an optional addon folder of their own, SkillupHelper_Custom (a copy of
+-- extras/SkillupHelper_Custom), so an update never overwrites them and the TOC lists no missing file. The TOC's
+-- OptionalDeps loads it first; its Custom.lua sets this one global table. Read before Journal.lua applies its places.
+if ns.Data.custom == nil then
+	ns.Data.custom = SkillupHelper_Custom
+end
+
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
 ns.CODE_VERSION = "0.3.2"
 
 -- The data the planner reads, built once from the three layers (Logic.effectivePlan): the shipped Data/Recipes.lua,
--- an optional local Data/Plan.lua on top, an optional Data/Custom.lua on top of both. ns.Data.layers says what
--- loaded (selftest.data). A Data/Custom.lua that breaks the merge is left out and named, never a Lua error.
+-- an optional local Data/Plan.lua on top, the optional SkillupHelper_Custom table on top of both. ns.Data.layers says
+-- what loaded (selftest.data). A custom table that breaks the merge is left out and named, never a Lua error.
 function ns.plan()
 	if ns.Data.effective == nil then
 		local ok, eff, report = pcall(ns.Logic.effectivePlan, ns.Data.recipes, ns.Data.plan, ns.Data.custom)
@@ -18,7 +25,7 @@ function ns.plan()
 			if not ok then
 				eff, report = nil, { error = "data layers failed: " .. tostring(eff) }
 			end
-			report.custom = { applied = 0, errors = { "Data/Custom.lua could not be applied: " .. err } }
+			report.custom = { applied = 0, errors = { "SkillupHelper_Custom could not be applied: " .. err } }
 		end
 		ns.Data.effective = eff or false
 		ns.Data.layers = report
@@ -26,14 +33,14 @@ function ns.plan()
 	return ns.Data.effective or nil
 end
 
--- One chat line when Data/Custom.lua has entries that were left out (all of them are in selftest.data.custom).
+-- One chat line when SkillupHelper_Custom has entries that were left out (all of them are in selftest.data.custom).
 function ns.customNotice()
 	local c = ns.Data.layers and ns.Data.layers.custom
 	local errors = type(c) == "table" and c.errors or {}
 	if #errors == 0 then
 		return nil
 	end
-	return ("SkillupHelper: Data/Custom.lua: %d entr%s left out. First: %s"):format(
+	return ("SkillupHelper: SkillupHelper_Custom: %d entr%s left out. First: %s"):format(
 		#errors,
 		#errors == 1 and "y" or "ies",
 		errors[1]

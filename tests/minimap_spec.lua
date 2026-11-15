@@ -7,7 +7,7 @@ local SECRET = {}
 local SCREEN_W, SCREEN_H, SCALE = 2560, 1440, 0.64
 local K = SCALE * SCREEN_H / 768 -- pixels per UI unit: 1.2
 
-local OPTIONAL = { ["Data/Plan.lua"] = true, ["Data/Custom.lua"] = true }
+local OPTIONAL = { ["Data/Plan.lua"] = true }
 
 local function tocFiles()
 	local out = {}

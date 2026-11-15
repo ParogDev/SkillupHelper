@@ -70,8 +70,12 @@ for _, g in ipairs({
 	read_globals[#read_globals + 1] = g
 end
 
+-- The player's own changes: the one table their SkillupHelper_Custom addon sets (Core.lua reads it).
+read_globals[#read_globals + 1] = "SkillupHelper_Custom"
+
 globals = { "SkillupHelper", "SkillupHelperDB", "SLASH_SKILLUPHELPER1", "SlashCmdList" }
 
 files["Data/"] = { max_line_length = false }
+files["extras/"] = { globals = { "SkillupHelper_Custom" }, max_line_length = false }
 files["tests/"] = { std = "+busted", globals = { "SkillupHelper", "SkillupHelperDB", "_G" } }
 exclude_files = { ".luacheckrc" }
