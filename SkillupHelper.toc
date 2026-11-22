@@ -19,6 +19,7 @@ Data\Plan.lua
 Data\Npcs.lua
 Data\Spots.lua
 Data\Trainers.lua
+Data\Routes.lua
 Logic.lua
 Learned.lua
 Guide.lua
