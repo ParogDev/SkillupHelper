@@ -208,17 +208,20 @@ A plain array in the shape of `Data/Npcs.lua`, plus `ns.Data.trainersMeta = { ve
 | Field | Meaning |
 |---|---|
 | `id, name` | NPC id and name from the Forever list |
-| `map, x, y` | zone or city map and map percent, from the Classic spawn |
+| `map, x, y` | zone or city map and map percent: seen in game, else the wow-professions.com NPC page, else the Classic spawn |
 | `place` | the town of a `Data/Npcs.lua` row on the same map within 6 map percent, else the zone name |
 | `role` | `trainer`, `recipes` or `recipedrop` |
 | `trains` | trainers: the profession name, the field `Guide.seedRecords` reads for role `trainer` |
 | `skill` | skill line id, or a list (rogue trainers: `{ 40, 633 }`) |
-| `rank` | `apprentice` to `grand master`, only when the tag starts with it |
+| `rank` | the highest rank the trainer teaches in Forever, from its wow-professions.com page (or the guide section that sends the player to it) when the site has one; else `apprentice` to `grand master` when the tag starts with it |
+| `ranks` | site trainers with a rank table: `{ { rank, skill, level, cost } }`, rank lowercase, `skill` / `level` required to learn it, `cost` in copper |
 | `tag` | the NPC's title as listed |
 | `faction` | `A`, `H` or `B` from `react`. When `react` is missing, from the Classic faction template |
 | `recipes`, `sells` | recipe item ids: the Forever list joined with Classic `npc_vendor` and `npc_vendor_template` |
 | `limited` | `{ [item] = n }`, Classic limited stock |
 | `classic` | true: position from cmangos |
+| `seen` | true: position seen in the Forever game (`tools/data/npcs_seen.json`) |
+| `site` | true: position from the NPC's wow-professions.com page (`tools/data/npcs_site.json`, matched by name and skill line) |
 | `nopos` | true: no position. `place` is the zone and `map` its map when known |
 | `unsure` | true: listed as a recipe's source, absent from Classic. It may be a vendor or a drop |
 | `mismatch` | the cmangos name when it differs from the Forever name. The row is then `nopos` |
@@ -232,8 +235,10 @@ creature the recipe drops from. The Forever list names 28 of those as a recipe's
 they sell nothing. They carry `recipes` and no `sells`. If Guide later wants one role per profession the list is
 `<skill slug>trainer` (`alchemytrainer`, `miningtrainer` and so on) derived from `skill`.
 
-Counts for this build: 437 rows, 341 with a position and 96 without. No name mismatches. 339 trainers, 70 recipe
-vendors (11 `unsure`), 28 drop sources. 40 vendors have limited stock.
+Counts for this build: 437 rows, 349 with a position and 88 without. No name mismatches. 339 trainers, 70 recipe
+vendors (11 `unsure`), 28 drop sources. 40 vendors have limited stock. 53 Leatherworking and Cooking trainers carry
+the site layer (2026-11-22; `python tools/gen_npcs.py --relayer` re-applies it to the shipped file without the
+cmangos dump).
 
 ## Curated file
 
