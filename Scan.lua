@@ -467,7 +467,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		S.seenKey(caps.trainerSeen),
 		recipeKey,
 		S.worldKey(caps.world),
-		caps.route and #caps.route or "noroute",
+		-- a regenerated Data/Routes.lua (new source date) or another row count replans
+		caps.route and (tostring(ns.Data.routes and ns.Data.routes.source) .. "#" .. #caps.route) or "noroute",
 	}, ":")
 	local bc = baseCache[cacheKey]
 	if not bc or bc.key ~= key then

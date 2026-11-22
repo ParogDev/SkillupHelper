@@ -201,7 +201,7 @@ the player to.
 |---|---|
 | `version` | the code that loaded (`ns.CODE_VERSION`) |
 | `data` | data layers: shipped build and counts, `custom.errors`, `status` (data age), `gameIsNewer` |
-| `route` | `Data/Routes.lua` loaded (source, lines), `off` (`/skillup guide off`), and for the last profession planned the craft steps `onGuide` / `offGuide` and `lastOffGuide` ("skill: reason") |
+| `route` | `Data/Routes.lua` loaded (source, skillLines, rows), `off` (`/skillup guide off`), and for the last profession planned the craft steps `onGuide` / `offGuide` and `lastOffGuide` ("skill: reason") |
 | `lastError`, panel errors | the docked panel's last failure |
 | `journal` | `JournalUI.diag()`: pages drawn, `missing` provider callbacks, `lastWhy`, map mode and art |
 | `journalWiring` | `firstError` of the wiring, planner `costRuns` / `costMaxMs`, `customPlaces`, `worldTries` |

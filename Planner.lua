@@ -289,6 +289,15 @@ local function vendorBlock(r, faction)
 	return nil
 end
 
+-- Whether a route row (Data/Routes.lua) is for the player's side: an untagged row always, a faction-tagged one only
+-- when faction ("Alliance" | "Horde") is known and matches. Rule 4, in P.prepare and costToCap alike.
+local function routeRowMine(e, faction)
+	if e.faction == nil then
+		return true
+	end
+	return type(faction) == "string" and string.lower(faction) == e.faction
+end
+
 -- Where a recipe item comes from, for a shortcut's text: the vendor's name, else the kind of source.
 local FROM_TEXT = { vendor = "sold by a vendor", quest = "a quest reward", drop = "a drop", crafted = "crafted" }
 local function fromText(o)
@@ -353,7 +362,7 @@ function P.prepare(input)
 	ctx.guideSpell, ctx.guideMain, ctx.guideWhy = {}, {}, {}
 	if type(input.route) == "table" and #input.route > 0 then
 		ctx.guide, ctx.guideOther = {}, {}
-		local side = type(input.faction) == "string" and string.lower(input.faction) or nil
+		ctx.sideKnown = input.faction == "Alliance" or input.faction == "Horde"
 		for _, e in ipairs(input.route) do
 			if
 				type(e) == "table"
@@ -361,7 +370,8 @@ function P.prepare(input)
 				and type(e.from) == "number"
 				and type(e.to) == "number"
 			then
-				local other = e.faction ~= nil and side ~= nil and e.faction ~= side
+				-- the other faction's row, or a faction's row while the side is not known: not the player's
+				local other = not routeRowMine(e, input.faction)
 				for s = math.floor(e.from), math.ceil(e.to) - 1 do
 					if other then
 						ctx.guideOther[s] = true
@@ -730,8 +740,11 @@ end
 local function offGuideWhy(ctx, s)
 	local g = ctx.guide and ctx.guide[s]
 	if not g then
-		return ctx.guideOther and ctx.guideOther[s] and "the guide's recipes here are the other faction's"
-			or "the guide has nothing for this level"
+		if ctx.guideOther and ctx.guideOther[s] then
+			return ctx.sideKnown and "the guide's recipes here are the other faction's"
+				or "the guide's recipes here are for one faction, and yours is not known"
+		end
+		return "the guide has nothing for this level"
 	end
 	if not ctx.optionOf then
 		ctx.optionOf = {}
@@ -2997,7 +3010,7 @@ function P.costToCap(prof, from, to, priceFn, opts)
 	-- the guide's spells (opts.route, rule 4): planned like a recipe the user allowed, so priced the same way
 	local guided = {}
 	for _, e in ipairs(type(opts.route) == "table" and opts.route or {}) do
-		if type(e) == "table" and e.spell then
+		if type(e) == "table" and e.spell and routeRowMine(e, opts.faction) then
 			guided[e.spell] = true
 		end
 	end

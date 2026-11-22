@@ -143,13 +143,13 @@ function ns.selftest.routeReport(routes, scan, off)
 	if type(routes) ~= "table" then
 		return "Data/Routes.lua not loaded: plans go by price alone (a new file needs a game restart)"
 	end
-	local lines = 0
+	local skillLines, rows = 0, 0
 	for k, v in pairs(routes) do
 		if type(k) == "number" and type(v) == "table" then
-			lines = lines + 1
+			skillLines, rows = skillLines + 1, rows + #v
 		end
 	end
-	local out = { source = routes.source, lines = lines, off = off and true or nil }
+	local out = { source = routes.source, skillLines = skillLines, rows = rows, off = off and true or nil }
 	local g = type(scan) == "table" and scan.planner and scan.planner.guide
 	if type(g) == "table" then
 		out.profession = scan.profession

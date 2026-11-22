@@ -132,6 +132,47 @@ describe("Planner rule 4: the guide is the route", function()
 		assert.equal("the guide's recipes here are the other faction's", only.steps[1].offGuide)
 	end)
 
+	it("skips faction rows when the side is not known", function()
+		local recipes = { [1] = recipe("A", M1), [2] = recipe("B", M2), [4] = recipe("D", M4) }
+		local learned = { [1] = true, [2] = true, [4] = true }
+		local r = route({ from = 100, to = 120, spell = 2 }, { from = 100, to = 120, spell = 4, faction = "horde" })
+		-- D is cheapest, but its row is Horde's: with no faction only B is the guide's
+		local plan = P.run(input(recipes, learned, { route = r }))
+		assert.same({ 2 }, crafts(plan))
+		assert.is_true(plan.steps[1].guide)
+		local horde = route({ from = 100, to = 120, spell = 4, faction = "horde" })
+		local only = P.run(input(recipes, learned, { route = horde }))
+		assert.equal("the guide's recipes here are for one faction, and yours is not known", only.steps[1].offGuide)
+	end)
+
+	it("costToCap allows only the player's faction rows", function()
+		-- a special recipe on Horde's row: planned for Horde, a shortcut for Alliance and for an unknown side
+		local recipes = {
+			[1] = recipe("A", M1),
+			[6] = recipe("Special", M4, { src = "special", teacher = "a quest", learn = 100 }),
+		}
+		local prof = { recipes = recipes, ranks = {} }
+		local function price(i)
+			return ({ [M1] = 10, [M4] = 5 })[i]
+		end
+		local function first(faction)
+			local r = P.costToCap(prof, 100, 120, price, {
+				learned = { [1] = true },
+				cap = 120,
+				faction = faction,
+				route = route({ from = 100, to = 120, spell = 6, faction = "horde" }),
+			})
+			for _, st in ipairs(r.steps) do
+				if st.kind == "craft" then
+					return st.spell
+				end
+			end
+		end
+		assert.equal(6, first("Horde"))
+		assert.equal(1, first("Alliance"))
+		assert.equal(1, first(nil))
+	end)
+
 	it("falls back off the guide with a reason where the guide's recipe is grey", function()
 		local recipes = { [1] = recipe("A", M1), [5] = recipe("E", M2, { y = 100, g = 110 }) }
 		local plan = P.run(input(recipes, { [1] = true, [5] = true }, {

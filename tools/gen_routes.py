@@ -10,7 +10,7 @@ Facts only: per skill line, the skill ranges and spell ids the guide names, whet
 alternatives, and the faction a row is for. No names or sentences from the pages (names come from Data/Recipes.lua).
 A guide whose page no longer parses (wowprof.ShapeError) is skipped and named; the others are still written. Exit
 codes: 0 written (or dry run), 1 no guide parsed, 2 a spell the guide names is not in Data/Recipes.lua (checked when
-the file is there; --no-check skips it).
+the file is there; --no-check skips it): nothing is written then, unless --force.
 """
 
 from __future__ import annotations
@@ -91,6 +91,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--recipes", help="Data/Recipes.lua to check the spell ids against (default: the addon's)")
     ap.add_argument("--no-check", action="store_true", help="do not check spell ids against Data/Recipes.lua")
     ap.add_argument("--dry-run", action="store_true", help="print the summary, write nothing")
+    ap.add_argument("--force", action="store_true",
+                    help="write even when a spell is missing from Data/Recipes.lua (exit 2 all the same)")
     a = ap.parse_args(argv)
     profs = a.only or sorted(wowprof.SKILL_LINE)
     routes: dict[int, list[dict]] = {}
@@ -127,6 +129,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"error: skill line {line}: spells not in {rfile.name}: {missing}", file=sys.stderr)
                 rc = 2
     if a.dry_run:
+        return rc
+    if rc == 2 and not a.force:
+        print("nothing written: update Data/Recipes.lua first, or pass --force to write the route anyway",
+              file=sys.stderr)
         return rc
     source = f"wow-professions.com, Forever section, {datetime.date.today().isoformat()}"
     out = Path(a.out) if a.out else DEFAULT_OUT

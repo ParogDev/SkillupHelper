@@ -130,10 +130,15 @@ class GenRoutes(unittest.TestCase):
             Path(d, "alchemy.html").write_text(GUIDE, encoding="utf-8")
             Path(d, "Recipes.lua").write_text(recipes, encoding="utf-8")
             out = Path(d, "Routes.lua")
-            rc = R.main(["--only", "alchemy", "--html", d, "--out", str(out), "--recipes", str(Path(d, "Recipes.lua"))])
-            # the page names spells the recipe file lacks: written, and exit 2 names them
-            self.assertEqual(rc, 2)
+            args = ["--only", "alchemy", "--html", d, "--out", str(out), "--recipes", str(Path(d, "Recipes.lua"))]
+            # the page names spells the recipe file lacks: exit 2 names them and nothing is written
+            self.assertEqual(R.main(args), 2)
+            self.assertFalse(out.exists())
+            # --force writes all the same, still exit 2
+            self.assertEqual(R.main(args + ["--force"]), 2)
             self.assertIn("[171] = {", out.read_text(encoding="utf-8"))
+            # with no recipe check it writes and exits 0
+            self.assertEqual(R.main(args + ["--no-check"]), 0)
             self.assertEqual(R.main(["--only", "nonsense", "--html", d, "--out", str(out)]), 1)
 
 

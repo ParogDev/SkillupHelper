@@ -673,7 +673,8 @@ describe("Core", function()
 		}
 		assert.same({
 			source = "src",
-			lines = 1,
+			skillLines = 1,
+			rows = 1,
 			off = true,
 			profession = "Leatherworking",
 			steps = 4,
