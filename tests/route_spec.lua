@@ -221,6 +221,33 @@ describe("Planner rule 4: the guide is the route", function()
 		assert.is_true(plan.steps[2].guide)
 	end)
 
+	it("buys a guide alternative's pattern only when it saves more than it costs", function()
+		local CHEAP = 16
+		local recipes = {
+			[2] = recipe("B", M2),
+			[8] = recipe("Alt pattern", M1, { src = "item", item = PAT, learn = 100 }),
+			[9] = recipe("Cheap alt pattern", M1, { src = "item", item = CHEAP, learn = 100 }),
+		}
+		local r = route({ from = 100, to = 120, spell = 2 }, { from = 100, to = 120, spell = 8, alt = true })
+		-- 20 crafts saving 20c each: a 10g pattern never pays, the main pick stays
+		local pricey = P.run(input(recipes, { [2] = true }, { route = r }))
+		assert.same({ "craft" }, kinds(pricey))
+		assert.same({ 2 }, crafts(pricey))
+		-- a 1s pattern pays for itself: bought, with what it saves, and the alternative planned
+		r[2].spell = 9
+		local inp = input(recipes, { [2] = true }, { route = r })
+		inp.price[CHEAP] = { buy = 100, where = "ah", salvage = 1 }
+		local cheap = P.run(inp)
+		assert.same({ "buyRecipe", "craft" }, kinds(cheap))
+		assert.equal(CHEAP, cheap.steps[1].item)
+		assert.is_true(cheap.steps[1].saves > 100)
+		assert.same({ 9 }, crafts(cheap))
+		assert.is_true(cheap.steps[2].guideAlt)
+		-- with no price for the pattern it is not planned: a shortcut at most
+		inp.price[CHEAP] = nil
+		assert.same({ 2 }, crafts(P.run(inp)))
+	end)
+
 	it("keeps the guide when recipe buys are off only for recipes it need not buy", function()
 		local recipes = {
 			[1] = recipe("A", M2),
@@ -298,14 +325,28 @@ describe("Shipped routes (Data/Routes.lua) over the shipped recipes", function()
 		assert(loadfile("Data/Routes.lua"))("SkillupHelper", data)
 	end)
 
-	local function flat()
-		return 100
+	-- reagents at 100c; a recipe item at its vendor price when the guide makes it a main pick, else 50000c (a rare
+	-- pattern on the AH)
+	local function pricesFor(line)
+		local main = {}
+		for _, e in ipairs(data.Data.routes[line]) do
+			main[e.spell] = main[e.spell] or not e.alt
+		end
+		local recipeItem = {}
+		for spell, r in pairs(data.Data.recipes.professions[line].recipes) do
+			if r.item then
+				recipeItem[r.item] = (main[spell] and r.buy) or 50000
+			end
+		end
+		return function(i)
+			return recipeItem[i] or 100
+		end
 	end
 
 	local function plan(line, from, to, faction)
 		local rs = data.Data.recipes
 		local prof = rs.professions[line]
-		local r = P.costToCap(prof, from, to, flat, {
+		local r = P.costToCap(prof, from, to, pricesFor(line), {
 			cap = to,
 			items = rs.items,
 			faction = faction,
@@ -327,7 +368,12 @@ describe("Shipped routes (Data/Routes.lua) over the shipped recipes", function()
 					off[#off + 1] = lines[#lines]
 				end
 			elseif st.kind == "buyRecipe" then
-				lines[#lines + 1] = ("  get recipe %s (learn %s)"):format(tostring(st.name), tostring(st.learn))
+				lines[#lines + 1] = ("  get recipe %s (learn %s, price %s%s)"):format(
+					tostring(st.name),
+					tostring(st.learn),
+					tostring(st.price or "unknown"),
+					st.saves and (", saves " .. math.floor(st.saves)) or ""
+				)
 			elseif st.kind == "train" then
 				lines[#lines + 1] = ("  train %s at %s"):format(tostring(st.name), tostring(st.at))
 			elseif st.kind == "gap" then

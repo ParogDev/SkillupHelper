@@ -349,7 +349,8 @@ function P.prepare(input)
 	ctx.recipes = recipes
 	-- the guide's route (rule 4): ctx.guide[s] = { [spell] = "main" | "alt" } for every skill an entry covers, the
 	-- other faction's rows left out (ctx.guideOther[s]: a skill only such rows cover). nil without a route.
-	ctx.guideSpell, ctx.guideWhy = {}, {}
+	-- guideMain[spell]: the guide's main pick somewhere (a recipe item it needs is bought whatever it saves)
+	ctx.guideSpell, ctx.guideMain, ctx.guideWhy = {}, {}, {}
 	if type(input.route) == "table" and #input.route > 0 then
 		ctx.guide, ctx.guideOther = {}, {}
 		local side = type(input.faction) == "string" and string.lower(input.faction) or nil
@@ -374,6 +375,7 @@ function P.prepare(input)
 				end
 				if not other then
 					ctx.guideSpell[e.spell] = true
+					ctx.guideMain[e.spell] = ctx.guideMain[e.spell] or not e.alt
 				end
 			end
 		end
@@ -529,6 +531,10 @@ function P.prepare(input)
 				end
 				if why then
 					ctx.guideWhy[spell] = why
+				elseif src == "item" and not ctx.guideMain[spell] then
+					-- only one of the guide's alternatives: its pattern must pay for itself (the recipe-buy test of
+					-- baselineFor, at the guide's skills); with no price it stays a shortcut
+					guideOnly = not gated and not allowed
 				elseif gated or src == "item" then
 					gated, guideOnly = false, not allowed
 				end
@@ -819,7 +825,8 @@ local function fallbackAt(ctx, list, s, chance, maxRank, only)
 		local o = f.o
 		local fits = s >= o.at and (not maxRank or f.rank <= maxRank) and usableAt(ctx, o, s)
 		if only then
-			fits = fits and only[o.spell] ~= nil
+			-- a gated one (an alternative's pattern with no price) is not the guide's to plan
+			fits = fits and only[o.spell] ~= nil and not o.gated
 		end
 		local p = fits and chance(s, o.y, o.g) * o.k or 0
 		if p > 0 then
@@ -1064,9 +1071,10 @@ local function baselineFor(ctx, chance)
 	for _, to in pairs(ctx.exclude and ctx.exclude.swap or {}) do
 		swapTo[to] = true
 	end
-	-- and so is one the guide names (rule 4): bought when a guide level uses it, whatever it saves
+	-- and so is one the guide names as its main pick (rule 4): bought when a guide level uses it, whatever it saves.
+	-- One only among the guide's alternatives goes through the saving test below, like any recipe item.
 	for _, c in ipairs(cands) do
-		local guided = ctx.guideSpell and ctx.guideSpell[c.spell]
+		local guided = ctx.guideMain and ctx.guideMain[c.spell]
 		if swapTo[c.spell] or guided then
 			opts[#opts + 1] = c
 			if not bought[c.spell] then
@@ -1095,8 +1103,11 @@ local function baselineFor(ctx, chance)
 				for s = ctx.skill, ctx.cap - 1 do
 					local cost, p = costPt(ctx, c, s, cum, nil, chance)
 					local v = (levels[s] and levels[s].fallback ~= "gated") and levels[s].c or HUGE
-					-- a guide level takes only the guide's recipes (rule 4): no saving there
-					if levels[s] and levels[s].guide and not guideKind(ctx, s, c.spell) then
+					-- a guide level takes only the guide's recipes (rule 4): no saving there; a guide alternative saves
+					-- only at the skills the guide names it for
+					if
+						not usableAt(ctx, c, s) or (levels[s] and levels[s].guide and not guideKind(ctx, s, c.spell))
+					then
 						cost = nil
 					end
 					if cost and cost < v then

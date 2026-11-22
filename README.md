@@ -107,7 +107,8 @@ These rules hold for every plan, every replan and every alternative the panel of
    **Hide**. A recipe the guide names (rule 9) counts as one you can get, at the skills the guide uses it for.
 9. **The guide is the route.** Where the wow-professions.com Forever guide covers a skill, the plan picks only
    among the recipes it names there: its main pick and its alternatives for your faction. Prices, your stock and
-   rule 1 decide between those, and a recipe the guide names is bought without having to save money first. Where
+   rule 1 decide between those. A recipe item the guide uses as its main pick is bought without having to save
+   money first; an alternative's pattern you don't know is bought only when it saves more than it costs. Where
    none of them gives skill (grey in the data, not learnable yet, the other faction's) the plan takes the cheapest
    recipe and the card says "Off guide" and why. Your swap, "not now" and `/skillup recipes off` win over the
    guide. A guide step shows "Guide" (or "Guide alt") on its card. `/skillup guide off` plans by price alone.

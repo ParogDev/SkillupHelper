@@ -7,8 +7,9 @@
   and the bad-luck sizing choose between them. At Leatherworking 161 it planned green Hillman's Leather Gloves; now
   it plans Barbaric Shoulders, then Guardian Gloves, as the guide does.
 - A recipe the guide names is planned even where the addon was unsure you could get it (a quest or special
-  teacher, a trainer recipe no trainer you opened listed), and a recipe item the guide uses is bought without
-  having to pay for itself first.
+  teacher, a trainer recipe no trainer you opened listed), and a recipe item the guide uses as its main pick is
+  bought without having to pay for itself first. A pattern for one of the guide's alternatives is bought only when
+  it saves more than it costs, as the guide advises.
 - The card says "Guide" or "Guide alt" on a step that follows the guide, and "Off guide" with the reason where
   the guide's recipes give no skill (grey in the data, not learnable yet, the other faction's). Your swaps, "not
   now" and `/skillup recipes off` still win over the guide. `/skillup guide off` plans by price alone.
