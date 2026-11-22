@@ -55,14 +55,10 @@ end
 
 -- An unlock's NPCs as guide records ({ id (the npc id, else "unlock:<name>"), name, map, x, y, place, zone, nopos,
 -- shipped, confidence = "classic" }): they carry their own positions, so the chip works for an NPC no other data
--- lists. Cached per unlock list.
-local unlockCache = setmetatable({}, { __mode = "k" })
+-- lists. Not cached: the lists are two or three NPCs, and the places come from the data as it is now.
 function G.unlockRecords(npcs, data)
 	if type(npcs) ~= "table" then
 		return {}
-	end
-	if unlockCache[npcs] and not data then
-		return unlockCache[npcs]
 	end
 	local out = {}
 	for _, n in ipairs(npcs) do
@@ -83,9 +79,6 @@ function G.unlockRecords(npcs, data)
 				unlock = true,
 			}
 		end
-	end
-	if not data then
-		unlockCache[npcs] = out
 	end
 	return out
 end
@@ -146,10 +139,12 @@ function G.needsOf(step, profession)
 			at = step.at,
 			cap = step.kind == "trainRank" and step.cap or nil,
 			-- a recipe learned past an unlock rank's training skill: the trainers the guide names (Planner markUnlocks)
+			-- join the pool (npcsAdd); every other trainer that teaches the recipe still serves it
 			npcs = step.kind == "train" and type(step.trainers) == "table" and #step.trainers > 0 and G.unlockRecords(
 				step.trainers
 			) or nil,
 		}
+		out[1].npcsAdd = out[1].npcs and true or nil
 		return out
 	elseif step.kind == "buyRecipe" then
 		-- a recipe item the data's vendor sells for less than the auction house goes to a vendor
@@ -182,6 +177,8 @@ end
 function G.pending(needs, have)
 	local out = {}
 	for _, n in ipairs(needs) do
+		-- a trainer or quest need stays open: no bag count closes it; it goes with its step once the rank is learned
+		-- (the skill cap rises and the plan drops the trainRank step)
 		local open = n.kind == "trainer" or n.kind == "quest"
 		for _, it in ipairs(n.items or {}) do
 			if (have(it.item) or 0) < it.count then
@@ -280,7 +277,7 @@ end
 -- for a trainer never opened or read in part, when its rank is below the need (second value "rank": a Journeyman for
 -- an Expert recipe). A whole list that has the name wins over the rank: it was read on this client.
 function G.serves(npc, need)
-	if type(need.npcs) == "table" then
+	if type(need.npcs) == "table" and not need.npcsAdd then
 		-- only the NPCs the need names (a rank unlock): matched by id, else by name; the guide says they serve it
 		local hit = false
 		for _, n in ipairs(need.npcs) do
@@ -474,16 +471,6 @@ function G.arrowAngle(bearing, facing)
 	return a
 end
 
--- The nearest NPC serving `need`. here = { continent, x, y } (world yards) or nil when the position is unknown.
--- world(map, x, y) -> continent, wx, wy or nil. Picks the best server first (the higher G.serves score: a vendor
--- selling every item beats one selling some, a trainer known to teach the name beats one that may), then the
--- shortest distance on the player's continent; other continents last, without a distance.
--- An NPC without a position (nopos) comes after every NPC that has one: it has a zone, no distance and no waypoint.
--- Returns { npc, distance, bearing, wx, wy, continent, sameContinent, partial, certain, name, zone, source
--- ("learned" | "seed" | "shipped"), confidence ("confirmed" | "classic" | "nopos"), note (G.confidenceText), nopos,
--- unsure } or nil, how many serve it, how many trainers of the profession were left out because their full service
--- list lacks the name, and the counts { servers, excluded, belowRank (left out by their rank), profession (records
--- of the need's profession, whatever they teach), bySource = { shipped, learned, seed } (of the servers) }.
 -- The NPCs to look through for a need: npcs as given, or for a need that names its NPCs (need.npcs) those, each as
 -- the known record of the same id when there is one (a position measured on this client wins), else as named.
 function G.needNpcs(npcs, need)
@@ -497,6 +484,26 @@ function G.needNpcs(npcs, need)
 		end
 	end
 	local out = {}
+	if need.npcsAdd then
+		-- the whole pool, plus each named NPC no record lists, as a trainer of the need's profession (no rank: the
+		-- guide says it teaches this)
+		local names = {}
+		for _, npc in ipairs(npcs or {}) do
+			out[#out + 1] = npc
+			names[npc.name or ""] = true
+		end
+		for _, n in ipairs(need.npcs) do
+			if not byId[n.id] and not names[n.name] then
+				local m = {}
+				for key, v in pairs(n) do
+					m[key] = v
+				end
+				m.trains = need.profession
+				out[#out + 1] = m
+			end
+		end
+		return out
+	end
 	for _, n in ipairs(need.npcs) do
 		local k = byId[n.id]
 		if k and G.confidenceOf(k) ~= "nopos" then
@@ -513,6 +520,16 @@ function G.needNpcs(npcs, need)
 	return out
 end
 
+-- The nearest NPC serving `need`. here = { continent, x, y } (world yards) or nil when the position is unknown.
+-- world(map, x, y) -> continent, wx, wy or nil. Picks the best server first (the higher G.serves score: a vendor
+-- selling every item beats one selling some, a trainer known to teach the name beats one that may), then the
+-- shortest distance on the player's continent; other continents last, without a distance.
+-- An NPC without a position (nopos) comes after every NPC that has one: it has a zone, no distance and no waypoint.
+-- Returns { npc, distance, bearing, wx, wy, continent, sameContinent, partial, certain, name, zone, source
+-- ("learned" | "seed" | "shipped"), confidence ("confirmed" | "classic" | "nopos"), note (G.confidenceText), nopos,
+-- unsure } or nil, how many serve it, how many trainers of the profession were left out because their full service
+-- list lacks the name, and the counts { servers, excluded, belowRank (left out by their rank), profession (records
+-- of the need's profession, whatever they teach), bySource = { shipped, learned, seed } (of the servers) }.
 local function scan(npcs, need, here, world, each)
 	npcs = G.needNpcs(npcs, need)
 	local stats = { servers = 0, excluded = 0, belowRank = 0, profession = 0 }

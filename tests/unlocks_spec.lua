@@ -322,6 +322,28 @@ describe("Rank unlocks", function()
 			)
 		end)
 
+		it("a recipe's named trainers join the pool: another trainer seen teaching it still serves", function()
+			local plan = lw("Horde", ROUTE_RANKS[165])
+			local pneed = G.needsOf(train(plan, 10548), "Leatherworking")[1]
+			assert.is_true(pneed.npcsAdd)
+			-- a trainer this client opened, standing where the player is, whose list has the recipe
+			local here = {
+				id = 999123,
+				name = "Opened Trainer",
+				map = 1456,
+				x = 41.7,
+				y = 42.6,
+				trains = "Leatherworking",
+				teaches = G.teachesSet({ "Nightscape Pants" }),
+			}
+			local known = G.shippedRecords(TRAINER_ROWS, "Horde")
+			known[#known + 1] = here
+			assert.equal("Opened Trainer", G.nearest(known, pneed, HERE, world).name)
+			-- the rank unlock itself still goes only to the trainers the guide names
+			local need = G.needsOf(rankStep(plan, "Artisan"), "Leatherworking")[1]
+			assert.equal("Hahrana Ironhide", G.nearest(known, need, HERE, world).name)
+		end)
+
 		it("without unlocks the trainers' ranks still pick an Artisan for a recipe learned at 205", function()
 			local plan = lw("Horde", nil)
 			local pants = train(plan, 10548)

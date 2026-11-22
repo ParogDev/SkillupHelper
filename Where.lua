@@ -2666,8 +2666,6 @@ local function haveOf(ctx, item)
 	return ok and num(n) or nil
 end
 
--- "Train Journeyman at 50, 5s: needed to pass 75". The character level is said only when it is too low, or when
--- the rank asks for one and the level is not known (then without "unknown": "needs level 10").
 -- The NPCs of a rank unlock (Data/Routes.lua routeRanks, already filtered to the faction) by name and place:
 -- "Wulan, Shadowprey Village (Desolace)", several joined with " or ". nil without a named NPC.
 function W.unlockWho(npcs)
@@ -2716,6 +2714,8 @@ function W.unlockText(unlock, nameOf, rankName)
 	return nil
 end
 
+-- "Train Journeyman at 50, 5s: needed to pass 75". The character level is said only when it is too low, or when
+-- the rank asks for one and the level is not known (then without "unknown": "needs level 10").
 local function rankText(rank, ctx, money)
 	local parts = {}
 	if rank.at then
