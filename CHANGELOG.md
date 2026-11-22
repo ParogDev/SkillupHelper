@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.7
+
+- Rank steps say how the guide unlocks the rank. Expert Cooking: buy the Expert Cookbook from Wulan (Horde,
+  Shadowprey Village) or Shandrina (Alliance, Ashenvale) at Cooking 125. Artisan Cooking: the Clamlette Surprise
+  quest from Dirge Quikcleave in Gadgetzan (level 35, Cooking 225), with the hand-in (12 Giant Egg, 10 Zesty Clam
+  Meat, 20 Alterac Swiss) as a shopping list. The guide chip sends you to the vendor, the auction house, then
+  the quest giver.
+- Trainer ranks and positions come from wow-professions.com's Forever NPC pages for Leatherworking and Cooking
+  trainers, over the Classic data. Artisan Leatherworking and the recipes from 200 up send Horde to Hahrana
+  Ironhide (Camp Mojache, Feralas) and Alliance to Drakk Stonehand (Aerie Peak), not to Una or Telonis, who teach
+  Expert in Forever. A trainer you opened in game still wins.
+- Enchanting and Engineering follow their guides too. First Aid's Healing Potion steps and Blacksmithing's
+  Mithril Spurs are now the guide's alternatives, not its main picks.
+- Not yet: the journal's Path page still marks Artisan Cooking at 200, not 225.
+
 ## 0.3.6
 
 - The plan follows the wow-professions.com Forever guide. At every skill the guide covers, the planner picks only

@@ -663,7 +663,7 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal("0.3.6", ns.CODE_VERSION)
+		assert.equal("0.3.7", ns.CODE_VERSION)
 		-- selftest.route: the route file, and the last plan's steps on and off the guide
 		assert.matches("^Data/Routes%.lua not loaded", ns.selftest.routeReport(nil))
 		local routes = { source = "src", [165] = { { from = 1, to = 2, spell = 3 } } }
