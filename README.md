@@ -58,7 +58,8 @@ keeps what still works.
 
 The other slash commands still work. Each one is also a control on the journal's Settings page and writes the same
 setting: `/skillup luck 95`, `/skillup effort 30`, `/skillup recipes off`, `/skillup resale on`, `/skillup exclude dungeon|ahpatterns|special|<spellID>`,
-`/skillup allow <spellID>`, `/skillup cost [profession]`, `/skillup ranks`.
+`/skillup allow <spellID>`, `/skillup cost [profession]`, `/skillup ranks`. `/skillup guide off` (slash command
+only for now) plans by price alone instead of along the guide's route; `/skillup guide on` goes back.
 
 ## Install
 
@@ -103,7 +104,13 @@ These rules hold for every plan, every replan and every alternative the panel of
 8. **Only recipes you can surely get.** The plan uses recipes you know, trainer recipes, auto-learned ones and
    recipe items with a price. A recipe from a special NPC, a quest, or one that binds on pickup is a **shortcut**:
    never planned, but shown on the step it would make cheaper or the gap it would fill, with **Use it** and
-   **Hide**.
+   **Hide**. A recipe the guide names (rule 9) counts as one you can get, at the skills the guide uses it for.
+9. **The guide is the route.** Where the wow-professions.com Forever guide covers a skill, the plan picks only
+   among the recipes it names there: its main pick and its alternatives for your faction. Prices, your stock and
+   rule 1 decide between those, and a recipe the guide names is bought without having to save money first. Where
+   none of them gives skill (grey in the data, not learnable yet, the other faction's) the plan takes the cheapest
+   recipe and the card says "Off guide" and why. Your swap, "not now" and `/skillup recipes off` win over the
+   guide. A guide step shows "Guide" (or "Guide alt") on its card. `/skillup guide off` plans by price alone.
 
 **Ranked by what you pay.** A recipe's cost is its materials plus the effort setting. What the products would sell
 for does not count unless you turn on "Count selling what I craft" (Settings, or `/skillup resale on`); with it off
@@ -123,6 +130,7 @@ node route is in the journal and on a card under the panel while that window is 
 | `Data/Recipes.lua` | every recipe, threshold, reagent, learn rank and training cost | the Forever client tables (wago.tools export), with facts from Wowhead's Forever section on top |
 | `Data/Spots.lua` | where to level Lockpicking, Mining, Herbalism, Skinning, Fishing | lock and node requirements from the Forever client; positions, levels and pools from the cmangos classic-db |
 | `Data/Trainers.lua` | profession trainers and recipe vendors | the NPC list from Wowhead's Forever section; positions from the cmangos classic-db |
+| `Data/Routes.lua` | the leveling route of each crafting profession | the wow-professions.com Forever guides (skill ranges and spell ids only) |
 | `Data/Npcs.lua` | the guide's seed NPCs in the capitals | hand-kept |
 
 The journal's Settings and data page shows the build each file was made from, and says so when your game is a

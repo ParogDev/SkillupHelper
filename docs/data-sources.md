@@ -1,6 +1,6 @@
 # Where the data comes from, and how it stays current
 
-SkillupHelper ships three generated data files. Each fact in them has one of four sources. This page lists the
+SkillupHelper ships four generated data files. Each fact in them has one of five sources. This page lists the
 sources with their licences, which one wins when two disagree, how each is refreshed, and how a change in the game
 reaches players.
 
@@ -9,6 +9,7 @@ reaches players.
 | `Data/Recipes.lua` | every craft recipe: thresholds, reagents, learn rank, cost, recipe item, vendor | `tools/gen_recipes.py` |
 | `Data/Spots.lua` | where to level Lockpicking, Mining, Herbalism, Skinning, Fishing | `tools/gen_spots.py` |
 | `Data/Trainers.lua` | profession trainers and recipe vendors, with a position where one is known | `tools/gen_npcs.py` |
+| `Data/Routes.lua` | the leveling route of each crafting guide: skill ranges and the recipes for them | `tools/gen_routes.py` |
 
 `docs/spots-data.md` has the schema and the assumptions of the last two.
 
@@ -73,6 +74,25 @@ What the addon sees while its user plays, kept in `SkillupHelperDB.learned` and 
 Feeds, in game and at once: the addon's own plan (a trainer's numbers win over the shipped ones the moment the
 trainer is opened). Feeds, for everyone, after a merge: `tools/data/overlay.manual.json` (learn ranks, costs,
 thresholds, ranks, vendors, vendor reagents) and `tools/data/npcs_seen.json` (positions).
+
+### 5. The wow-professions.com Forever guides
+
+The leveling guides in the Forever section of <https://www.wow-professions.com> (pages © their publisher), read
+by `tools/wowprof.py` and written to `Data/Routes.lua` by `tools/gen_routes.py`. Only facts are taken: per skill
+line the skill ranges, the Wowhead Forever spell id of each recipe the guide names for a range, whether it is one of
+the guide's alternatives, and the faction a row is for. No name or sentence of a page is shipped (names come from
+`Data/Recipes.lua`), and no fetched page is committed.
+
+Feeds the planner's route (README, "How the plan is made", the guide rule): at a skill the guide covers, the plan
+chooses only among the recipes the guide names there. The guide wins the route and nothing else: prices,
+thresholds, learn ranks, reagents and the cap model stay with sources 1 to 4, and the player's own choices (a swap,
+"not now", recipe buys off) win over the guide.
+
+Refreshed by a person: `python tools/gen_routes.py` fetches every crafting guide it knows and rewrites the file.
+A guide whose page changed shape is skipped and named (exit 0 while any guide parsed); a spell the guide names that
+`Data/Recipes.lua` lacks is named and exits 2 (a new recipe, or recipe data older than the site). Diff the file and
+name each changed step in the PR. Enchanting and Engineering are skipped today: their pages have a step the parser
+does not read yet. Adding the file to the TOC needed a game restart once; later regenerations need a `/reload`.
 
 ## Which source wins
 

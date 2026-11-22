@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.6
+
+- The plan follows the wow-professions.com Forever guide. At every skill the guide covers, the planner picks only
+  among the recipes the guide names there, its main pick and its alternatives for your faction; prices, your bags
+  and the bad-luck sizing choose between them. At Leatherworking 161 it planned green Hillman's Leather Gloves; now
+  it plans Barbaric Shoulders, then Guardian Gloves, as the guide does.
+- A recipe the guide names is planned even where the addon was unsure you could get it (a quest or special
+  teacher, a trainer recipe no trainer you opened listed), and a recipe item the guide uses is bought without
+  having to pay for itself first.
+- The card says "Guide" or "Guide alt" on a step that follows the guide, and "Off guide" with the reason where
+  the guide's recipes give no skill (grey in the data, not learnable yet, the other faction's). Your swaps, "not
+  now" and `/skillup recipes off` still win over the guide. `/skillup guide off` plans by price alone.
+- New data file `Data/Routes.lua` (from `tools/gen_routes.py`): Leatherworking, Cooking, Alchemy, Blacksmithing,
+  Tailoring and First Aid. Enchanting and Engineering have no route yet. **Restart the game once** after updating:
+  a new file in the TOC is not loaded by `/reload`.
+
 ## 0.3.5
 
 - One recipe over one stretch of skill is one step. Hillman's Shoulders showed as "Craft 5, 133-137" then
