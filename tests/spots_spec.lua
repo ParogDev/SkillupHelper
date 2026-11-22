@@ -318,7 +318,9 @@ describe("Data/Trainers.lua", function()
 				assert.is_number(r.map, r.name)
 				assert.is_true(percent(r.x) and percent(r.y), r.name)
 				assert.is_string(r.place, r.name)
-				assert.is_true(r.classic, r.name)
+				-- exactly one source for the position: Classic, wow-professions.com (site) or seen in game
+				local n = (r.classic and 1 or 0) + (r.site and 1 or 0) + (r.seen and 1 or 0)
+				assert.equal(1, n, r.name)
 			end
 		end
 	end)

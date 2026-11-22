@@ -27,13 +27,114 @@ function G.npcId(guid)
 	return tonumber(id)
 end
 
+-- The town and zone of an unlock NPC (Data/Routes.lua routeRanks npcs: { id?, name, map, x, y, place? }): its own
+-- place, else the place of the shipped or seeded row with its id, else the town of the nearest row on the same map
+-- (G.placeNear), else the zone. zone: the map's name in Data/Spots.lua. data: ns.Data's shape (default ns.Data).
+function G.unlockPlace(npc, data)
+	data = data or ns.Data or {}
+	local rows = {}
+	for _, list in ipairs({ data.npcs or {}, data.trainers or {} }) do
+		for _, r in ipairs(list) do
+			rows[#rows + 1] = r
+		end
+	end
+	local maps = type(data.spots) == "table" and data.spots.maps or {}
+	local zone = npc.map and maps[npc.map] and maps[npc.map].name or nil
+	local place = type(npc.place) == "string" and npc.place or nil
+	if not place and npc.id then
+		for _, r in ipairs(rows) do
+			if r.id == npc.id and type(r.place) == "string" then
+				place = r.place
+				break
+			end
+		end
+	end
+	place = place or G.placeNear(npc.map, npc.x, npc.y, rows, nil)
+	return place or zone, zone
+end
+
+-- An unlock's NPCs as guide records ({ id (the npc id, else "unlock:<name>"), name, map, x, y, place, zone, nopos,
+-- shipped, confidence = "classic" }): they carry their own positions, so the chip works for an NPC no other data
+-- lists. Cached per unlock list.
+local unlockCache = setmetatable({}, { __mode = "k" })
+function G.unlockRecords(npcs, data)
+	if type(npcs) ~= "table" then
+		return {}
+	end
+	if unlockCache[npcs] and not data then
+		return unlockCache[npcs]
+	end
+	local out = {}
+	for _, n in ipairs(npcs) do
+		if type(n) == "table" and type(n.name) == "string" then
+			local place, zone = G.unlockPlace(n, data)
+			local nopos = n.map == nil or type(n.x) ~= "number" or type(n.y) ~= "number"
+			out[#out + 1] = {
+				id = n.id or ("unlock:" .. n.name),
+				name = n.name,
+				map = n.map,
+				x = not nopos and n.x or nil,
+				y = not nopos and n.y or nil,
+				place = place,
+				zone = zone,
+				nopos = nopos or nil,
+				shipped = true,
+				confidence = "classic",
+				unlock = true,
+			}
+		end
+	end
+	if not data then
+		unlockCache[npcs] = out
+	end
+	return out
+end
+
 -- What the step to do now needs a visit for, in the order to go: a list of
 -- { kind = "vendor", items = { { item, count } } } | { kind = "trainer", profession = name }
--- | { kind = "auction", items = {...} }. Empty when the step needs nothing from an NPC.
+-- | { kind = "auction", items = {...} } | { kind = "quest", quest, name = questName }. A need may carry npcs (guide
+-- records, G.unlockRecords): then only those NPCs serve it (a rank unlock of Data/Routes.lua: the trainer, the book's
+-- vendor or the quest giver the guide names). Empty when the step needs nothing from an NPC.
 function G.needsOf(step, profession)
 	local out = {}
 	if type(step) ~= "table" then
 		return out
+	end
+	local unlock = step.kind == "trainRank" and type(step.unlock) == "table" and step.unlock or nil
+	if unlock and #(unlock.npcs or {}) > 0 then
+		local npcs = G.unlockRecords(unlock.npcs)
+		if unlock.kind == "book" and unlock.item then
+			out[1] = { kind = "vendor", items = { { item = unlock.item, count = 1 } }, npcs = npcs }
+			return out
+		elseif unlock.kind == "quest" then
+			-- the hand-in items first (vendor, then auction house), then the quest giver
+			local vendor, ah = {}, {}
+			for _, m in ipairs(unlock.mats or {}) do
+				if m.where == "vendor" then
+					vendor[#vendor + 1] = { item = m.item, count = m.count }
+				elseif m.where == "ah" then
+					ah[#ah + 1] = { item = m.item, count = m.count }
+				end
+			end
+			if #vendor > 0 then
+				out[#out + 1] = { kind = "vendor", items = vendor }
+			end
+			if #ah > 0 then
+				out[#out + 1] = { kind = "auction", items = ah }
+			end
+			out[#out + 1] = { kind = "quest", quest = unlock.quest, name = unlock.questName, npcs = npcs }
+			return out
+		elseif unlock.kind == "trainer" then
+			out[1] = {
+				kind = "trainer",
+				profession = profession,
+				name = step.name,
+				at = step.at,
+				cap = step.cap,
+				npcs = npcs,
+			}
+			return out
+		end
 	end
 	if type(step.kind) == "string" and step.kind:find("^train") then
 		-- "train" (a recipe) and any later train step (a rank-up): the service to learn is step.name, else step.rank
@@ -44,6 +145,10 @@ function G.needsOf(step, profession)
 			name = step.name or step.rank,
 			at = step.at,
 			cap = step.kind == "trainRank" and step.cap or nil,
+			-- a recipe learned past an unlock rank's training skill: the trainers the guide names (Planner markUnlocks)
+			npcs = step.kind == "train" and type(step.trainers) == "table" and #step.trainers > 0 and G.unlockRecords(
+				step.trainers
+			) or nil,
 		}
 		return out
 	elseif step.kind == "buyRecipe" then
@@ -77,7 +182,7 @@ end
 function G.pending(needs, have)
 	local out = {}
 	for _, n in ipairs(needs) do
-		local open = n.kind == "trainer"
+		local open = n.kind == "trainer" or n.kind == "quest"
 		for _, it in ipairs(n.items or {}) do
 			if (have(it.item) or 0) < it.count then
 				open = true
@@ -175,6 +280,20 @@ end
 -- for a trainer never opened or read in part, when its rank is below the need (second value "rank": a Journeyman for
 -- an Expert recipe). A whole list that has the name wins over the rank: it was read on this client.
 function G.serves(npc, need)
+	if type(need.npcs) == "table" then
+		-- only the NPCs the need names (a rank unlock): matched by id, else by name; the guide says they serve it
+		local hit = false
+		for _, n in ipairs(need.npcs) do
+			if (npc.id ~= nil and npc.id == n.id) or npc.name == n.name then
+				hit = true
+				break
+			end
+		end
+		if not hit then
+			return 0
+		end
+		return need.kind == "vendor" and #need.items or (need.kind == "trainer" and 2 or 1)
+	end
 	if need.kind == "vendor" then
 		local n = 0
 		for _, it in ipairs(need.items) do
@@ -365,7 +484,37 @@ end
 -- unsure } or nil, how many serve it, how many trainers of the profession were left out because their full service
 -- list lacks the name, and the counts { servers, excluded, belowRank (left out by their rank), profession (records
 -- of the need's profession, whatever they teach), bySource = { shipped, learned, seed } (of the servers) }.
+-- The NPCs to look through for a need: npcs as given, or for a need that names its NPCs (need.npcs) those, each as
+-- the known record of the same id when there is one (a position measured on this client wins), else as named.
+function G.needNpcs(npcs, need)
+	if type(need) ~= "table" or type(need.npcs) ~= "table" then
+		return npcs or {}
+	end
+	local byId = {}
+	for _, npc in ipairs(npcs or {}) do
+		if npc.id ~= nil then
+			byId[npc.id] = npc
+		end
+	end
+	local out = {}
+	for _, n in ipairs(need.npcs) do
+		local k = byId[n.id]
+		if k and G.confidenceOf(k) ~= "nopos" then
+			local m = {}
+			for key, v in pairs(k) do
+				m[key] = v
+			end
+			m.place = k.place or n.place
+			out[#out + 1] = m
+		else
+			out[#out + 1] = n
+		end
+	end
+	return out
+end
+
 local function scan(npcs, need, here, world, each)
+	npcs = G.needNpcs(npcs, need)
 	local stats = { servers = 0, excluded = 0, belowRank = 0, profession = 0 }
 	stats.bySource = { shipped = 0, learned = 0, seed = 0 }
 	local named = need.kind == "trainer" and G.norm(need.name) ~= nil
@@ -513,6 +662,8 @@ function G.needLabel(need, nameOf)
 		return ("%s trainer"):format(need.profession or "profession")
 	elseif need.kind == "auction" then
 		return "auction house"
+	elseif need.kind == "quest" then
+		return need.name and ("quest %s"):format(need.name) or "quest giver"
 	end
 	local names = {}
 	for i, it in ipairs(need.items) do
@@ -547,6 +698,8 @@ function G.unknownText(need, nameOf, excluded, belowRank)
 		)
 	elseif need.kind == "auction" then
 		return "No auctioneer known yet. Every capital has one; I note the ones you open."
+	elseif need.kind == "quest" then
+		return ("The guide names no quest giver for %s on your side."):format(tostring(need.name or "this quest"))
 	end
 	return ("No known vendor for %s yet. Trade Supplies vendors carry most of it; I note vendors you open."):format(
 		G.needLabel(need, nameOf)
@@ -582,6 +735,8 @@ function G.whyNone(need, c)
 		)
 	elseif need.kind == "auction" then
 		return "Data/Npcs.lua has no auctioneer, and none learned"
+	elseif type(need.npcs) == "table" then
+		return ("Data/Routes.lua routeRanks names no NPC with a position for %s"):format(who)
 	end
 	return ("%s, and none in Data/Npcs.lua or learned"):format(
 		data or ("Data/Trainers.lua has no vendor selling %s for %s"):format(tostring(c.thing or "these items"), who)
@@ -783,6 +938,8 @@ local function role(s)
 		return rank and ("%s %s trainer"):format(rank, prof) or ("%s trainer"):format(prof)
 	elseif need.kind == "auction" then
 		return "Auctioneer"
+	elseif need.kind == "quest" then
+		return need.name and ("Quest: %s"):format(need.name) or "Quest giver"
 	end
 	return s.thing and ("Sells " .. s.thing) or "Vendor"
 end
@@ -850,6 +1007,8 @@ function G.describe(s)
 			d.l2 = "Learn the next rank here"
 		elseif need.kind == "auction" then
 			d.l2 = "Buy the materials on the list"
+		elseif need.kind == "quest" then
+			d.l2 = ("Take or hand in %s"):format(need.name or "the quest")
 		else
 			d.l2 = ("Buy %s from this window"):format(s.thing or "the materials")
 		end
@@ -873,6 +1032,9 @@ function G.describe(s)
 			d.l2 = ("Ask a city guard for the %s trainer"):format(s.profession or need.profession or "profession")
 		elseif need.kind == "auction" then
 			d.l1, d.l2 = "No auction house known", "The nearest is in a capital city"
+		elseif need.kind == "quest" then
+			d.l1, d.l2 =
+				"No quest giver known", ("The guide names none for %s on your side"):format(need.name or "this quest")
 		else
 			d.l1 = "No known vendor yet"
 			d.l2 = ("Trade supplies vendors sell %s"):format(s.thing or "most materials")
@@ -891,6 +1053,8 @@ local function thenLabel(need, profession)
 		return ("%s trainer"):format(profession or need.profession or "profession")
 	elseif need.kind == "auction" then
 		return "auction house"
+	elseif need.kind == "quest" then
+		return "quest giver"
 	end
 	return "vendor"
 end
@@ -934,6 +1098,8 @@ function G.strip(s)
 			out.a = ("No known %s trainer yet"):format(s.profession or need.profession or "profession")
 		elseif need.kind == "auction" then
 			out.a = "No auction house known yet"
+		elseif need.kind == "quest" then
+			out.a = "No quest giver known for this quest"
 		else
 			out.a = ("No known vendor for %s yet"):format(s.thing or "these materials")
 		end
