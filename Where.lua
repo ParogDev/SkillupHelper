@@ -1942,7 +1942,21 @@ function W.errands(ctx)
 		return "item " .. tostring(item)
 	end
 	local cities, order = {}, {}
+	-- a need that names its NPCs (a rank unlock, Guide.needNpcs) adds those no other record lists
+	local npcs, seen = {}, {}
 	for _, npc in ipairs(ctx.npcs or {}) do
+		npcs[#npcs + 1] = npc
+		seen[npc.id or npc.name] = true
+	end
+	for _, need in ipairs(needs) do
+		for _, npc in ipairs(need.npcs and G.needNpcs(ctx.npcs, need) or {}) do
+			if not seen[npc.id or npc.name] and not npc.nopos then
+				npcs[#npcs + 1] = npc
+				seen[npc.id or npc.name] = true
+			end
+		end
+	end
+	for _, npc in ipairs(npcs) do
 		local city = npc.place or (q.maps[npc.map] and q.maps[npc.map].name) or ("map " .. tostring(npc.map))
 		for ni, need in ipairs(needs) do
 			local s = G.serves(npc, need)
@@ -2441,6 +2455,8 @@ function W.lines(steps, ctx)
 				by = num(st.by),
 				level = num(st.level),
 				have = num(st.have),
+				-- how the guide says it is got (Data/Routes.lua routeRanks): a trainer, a book or a quest
+				unlock = st.unlock,
 			}
 		elseif st.kind == "train" or st.kind == "buyRecipe" then
 			pending[#pending + 1] = i
@@ -2650,6 +2666,54 @@ local function haveOf(ctx, item)
 	return ok and num(n) or nil
 end
 
+-- The NPCs of a rank unlock (Data/Routes.lua routeRanks, already filtered to the faction) by name and place:
+-- "Wulan, Shadowprey Village (Desolace)", several joined with " or ". nil without a named NPC.
+function W.unlockWho(npcs)
+	local G = ns.Guide
+	if not G or type(npcs) ~= "table" then
+		return nil
+	end
+	local parts = {}
+	for _, r in ipairs(G.unlockRecords(npcs)) do
+		local where = r.place
+		if r.place and r.zone and r.place ~= r.zone then
+			where = ("%s (%s)"):format(r.place, r.zone)
+		end
+		parts[#parts + 1] = where and ("%s, %s"):format(r.name, where) or r.name
+	end
+	return #parts > 0 and table.concat(parts, " or ") or nil
+end
+
+-- An unlock item's name: nameOf(item, fallback) (the client's, when it answers), else the unlock's own names
+-- (items Data/Recipes.lua lacks), else "item N".
+function W.unlockItemName(unlock, item, nameOf)
+	local own = type(unlock.names) == "table" and unlock.names[item] or nil
+	local n = nameOf and nameOf(item, own) or nil
+	if (n == nil or n == ("item " .. tostring(item))) and own then
+		n = own
+	end
+	return n or ("item " .. tostring(item))
+end
+
+-- The sentence of a rank unlock (a trainRank step's unlock): "Buy the Expert Cookbook from Wulan, Shadowprey
+-- Village (Desolace)", "Quest: Clamlette Surprise from Dirge Quikcleave, Gadgetzan (Tanaris)", "Train Artisan at
+-- Hahrana Ironhide, Camp Mojache (Feralas)". rankName: the rank's name. nil for an unlock of no known kind.
+function W.unlockText(unlock, nameOf, rankName)
+	if type(unlock) ~= "table" then
+		return nil
+	end
+	local who = W.unlockWho(unlock.npcs)
+	if unlock.kind == "book" then
+		local book = unlock.item and W.unlockItemName(unlock, unlock.item, nameOf) or "the book"
+		return ("Buy the %s%s"):format(book, who and (" from " .. who) or "")
+	elseif unlock.kind == "quest" then
+		return ("Quest: %s%s"):format(tostring(unlock.questName or "the rank's quest"), who and (" from " .. who) or "")
+	elseif unlock.kind == "trainer" then
+		return ("Train %s at %s"):format(tostring(rankName or "the rank"), who or "the trainer")
+	end
+	return nil
+end
+
 -- "Train Journeyman at 50, 5s: needed to pass 75". The character level is said only when it is too low, or when
 -- the rank asks for one and the level is not known (then without "unknown": "needs level 10").
 local function rankText(rank, ctx, money)
@@ -2672,11 +2736,12 @@ local function rankText(rank, ctx, money)
 			pass = rk.cap
 		end
 	end
+	local how = rank.unlock and W.unlockText(rank.unlock, ctx.nameOf, rank.name)
 	return ("Train %s %s%s"):format(
 		rank.name,
 		table.concat(parts, ", "),
 		pass and (": needed to pass %d"):format(pass) or ""
-	)
+	) .. (how and (". " .. how) or "")
 end
 
 -- "Get the recipe" of a craft line: { text, tone, known }.
@@ -2935,7 +3000,9 @@ function W.path(ctx)
 				row.title = ("Train %s"):format(tostring(st.name or "the next rank"))
 				row.sub = st.cap and ("raises the cap to %d"):format(st.cap) or ""
 				row.cost = num(st.cost) and money(st.cost) or nil
-				m.tip = ("%s at the trainer%s"):format(row.title, row.cost and (", " .. row.cost) or "")
+				local how = st.unlock and W.unlockText(st.unlock, nameOf, st.name)
+				m.tip = how and (how .. (row.cost and (", " .. row.cost) or ""))
+					or ("%s at the trainer%s"):format(row.title, row.cost and (", " .. row.cost) or "")
 			else
 				m.at = num(st.at) or at
 				m.kind = "train"

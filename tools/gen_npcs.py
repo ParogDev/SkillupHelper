@@ -13,6 +13,17 @@ Python 3 standard library only; shares the zone mapping and the dump reader with
   --cmangos      the Classic 1.12 dump: creature spawns give the position, creature_template checks the name,
                  npc_vendor / npc_vendor_template give the recipes sold and their limited stock. Classic data.
   --places FILE  the addon's Data/Npcs.lua (default): a row of it on the same map and close by lends its town name.
+  --seen FILE    tools/data/npcs_seen.json (default, optional): positions players' games saw. They win over all.
+  --site FILE    tools/data/npcs_site.json (default, optional; `python tools/wowprof.py trainers ... --out`): the
+                 trainers of wow-professions.com's Forever pages. A site NPC is matched to a trainer row by name and
+                 skill line; its /way position replaces the Classic one (site = true, classic = nil) unless the
+                 game saw the NPC, and its rank replaces the tag's rank, with its rank rows as `ranks`.
+
+    python tools/gen_npcs.py --relayer [--out Data/Trainers.lua]
+
+--relayer re-applies only the site and seen layers to the shipped Data/Trainers.lua (read with tools/luatable.py)
+and writes it back through the same writer: the header and every other row stay as they are. It needs neither the
+cmangos dump nor the NPC list.
 
 An NPC the dump lacks, or has under another name, is kept without a position (nopos = true): the addon learns it
 when the player opens the NPC. Exit code 2 = a broken link, named on stderr.
@@ -28,8 +39,13 @@ import sys
 from pathlib import Path
 
 import gen_spots as gs
+import luatable
 
 HERE = Path(__file__).resolve().parent
+DEFAULT_OUT = HERE.parent / "Data" / "Trainers.lua"
+# the order a row's fields are written in (a field this list lacks goes last, in the order it came)
+ORDER = ("id", "name", "mismatch", "map", "x", "y", "place", "role", "trains", "skill", "rank", "ranks", "tag",
+         "faction", "recipes", "sells", "limited", "unsure", "classic", "seen", "site", "nopos")
 SQL_TABLES = ("creature", "creature_template", "npc_vendor", "npc_vendor_template")
 RANKS = ("Grand Master", "Apprentice", "Journeyman", "Expert", "Artisan", "Master")
 PLACE_REACH = 6.0  # map percent: how near a Data/Npcs.lua row must be to lend its town name
@@ -83,8 +99,113 @@ def read_seen(path: Path) -> dict:
     return seen
 
 
+def read_site(path: Path) -> dict:
+    """tools/data/npcs_site.json's npcs ({ slug: { name, map, x, y, rank, ranks, skillLine } }), empty when absent."""
+    if not path.is_file():
+        return {}
+    site = read_json(path, "site trainers").get("npcs") or {}
+    for slug, n in site.items():
+        if not isinstance(n, dict) or not n.get("name") or any(
+                not isinstance(n.get(k), (int, float)) for k in ("map", "x", "y")):
+            raise gs.GenError(f"{path.name}: npcs[{slug!r}] needs name, map, x and y")
+    return site
+
+
+def ordered(row: dict) -> collections.OrderedDict:
+    rank = {k: i for i, k in enumerate(ORDER)}
+    return collections.OrderedDict(sorted(row.items(), key=lambda kv: rank.get(kv[0], len(ORDER))))
+
+
+def skills_of(row: dict) -> set:
+    s = row.get("skill")
+    return set(s) if isinstance(s, (list, tuple)) else {s} if s is not None else set()
+
+
+def place_near(mp: int, x: float, y: float, places: list, fallback):
+    near = [(math.hypot(px - x, py - y), place) for pm, px, py, place in places if pm == mp]
+    near = [p for p in near if p[0] <= PLACE_REACH]
+    return min(near)[1] if near else fallback
+
+
+def layer_site(rows: list, site: dict, places: list) -> dict:
+    """Apply the site trainers to the trainer rows they match (same name, same skill line). Rows the game saw keep
+    that position. Returns { matched: [(row, before)], unmatched: [slug ...], ambiguous: [slug ...] }."""
+    out = {"matched": [], "unmatched": [], "ambiguous": []}
+    for slug, n in site.items():
+        hits = [r for r in rows if r.get("role") == ROLE_TRAINER and same_name(r.get("name") or "", n["name"])
+                and n.get("skillLine") in skills_of(r)]
+        if len(hits) != 1:
+            out["ambiguous" if hits else "unmatched"].append(slug)
+            continue
+        row = hits[0]
+        before = dict(row)
+        if n.get("rank"):
+            row["rank"] = n["rank"]
+        if n.get("ranks"):
+            row["ranks"] = [collections.OrderedDict((k, r.get(k)) for k in ("rank", "skill", "level", "cost"))
+                            for r in n["ranks"]]
+        if not row.get("seen"):
+            mp, x, y = int(n["map"]), round(float(n["x"]), 1), round(float(n["y"]), 1)
+            if mp != row.get("map") or row.get("nopos"):
+                row["place"] = place_near(mp, x, y, places, row.get("place"))
+            row["map"], row["x"], row["y"] = mp, x, y
+            row["site"], row["classic"], row["nopos"] = True, None, None
+        out["matched"].append((row, before))
+    return out
+
+
+def layer_seen(rows: list, seen: dict, places: list) -> int:
+    """Positions players' games saw (no zone table here: a town name only from a Data/Npcs.lua row nearby)."""
+    n = 0
+    for row in rows:
+        pos = seen.get(str(row.get("id")))
+        if pos:
+            mp, x, y = int(pos["map"]), round(pos["x"], 1), round(pos["y"], 1)
+            if mp != row.get("map"):
+                row["place"] = place_near(mp, x, y, places, row.get("place"))
+            row["map"], row["x"], row["y"] = mp, x, y
+            row["seen"], row["classic"], row["site"], row["nopos"] = True, None, None, None
+            n += 1
+    return n
+
+
+def render(header: list[str], rows: list) -> str:
+    return "\n".join(header + ["\t" + gs.lua(ordered(r)) + "," for r in rows] + ["}", ""])
+
+
+def _plain(v):
+    """luatable's tables back to Python: a table keyed 1..n is a list."""
+    if isinstance(v, dict):
+        v = {k: _plain(x) for k, x in v.items()}
+        if v and list(v) == list(range(1, len(v) + 1)):
+            return list(v.values())
+        return collections.OrderedDict(v)
+    return v
+
+
+def relayer(path: Path, site: dict, seen: dict, places: list) -> tuple[str, dict]:
+    """The shipped file with the site and seen layers applied again; header and other rows unchanged."""
+    if not path.is_file():
+        raise gs.GenError(f"Data/Trainers.lua missing: {path}")
+    text = path.read_text(encoding="utf-8")
+    cut = text.find("ns.Data.trainers = {")
+    if cut < 0:
+        raise gs.GenError(f"{path.name}: no 'ns.Data.trainers = {{' line")
+    try:
+        table = luatable.read_assignment(text, "ns.Data.trainers")
+    except luatable.LuaError as e:
+        raise gs.GenError(f"{path.name}: {e}") from e
+    rows = _plain(table) or []
+    header = text[:cut].split("\n")[:-1] + ["ns.Data.trainers = {"]
+    n_seen = layer_seen(rows, seen, places)
+    info = layer_site(rows, site, places)
+    info["seen"] = n_seen
+    info["rows"] = len(rows)
+    return render(header, rows), info
+
+
 def build(w: dict, sql: dict, npcs: dict, items: dict, places: list, wowf_build: str,
-          seen: dict | None = None) -> tuple[str, dict]:
+          seen: dict | None = None, site: dict | None = None) -> tuple[str, dict]:
     zones = gs.Zones(w)
     templates = {int(t["Entry"]): t for t in sql["creature_template"]}
     spawns = collections.defaultdict(list)
@@ -195,50 +316,81 @@ def build(w: dict, sql: dict, npcs: dict, items: dict, places: list, wowf_build:
                 "Recipe drop sources" if row["role"] == ROLE_DROP else "Recipe vendors")
             stats[(label, faction or "?", "pos" if positioned else "nopos")] += 1
 
+    site_info = layer_site(rows, site or {}, places)
     rows.sort(key=lambda r: (r["role"], str(r.get("trains") or ""), r["id"]))
     L = [
         "-- GENERATED by tools/gen_npcs.py: do not edit.",
         "-- Profession trainers and recipe vendors of WoW: Forever. Who they are: a Wowhead Forever list scrape. Where they",
         "-- stand, and limited stock: derived from the cmangos classic-db (GPL-3.0, LICENSES/cmangos-classic-db.txt):",
         "-- Classic 1.12 data, unconfirmed for Forever. nopos = true: position not known yet. Schema: docs/spots-data.md.",
+        "-- site = true: position, rank and ranks from wow-professions.com's Forever NPC pages (facts only).",
         "local _, ns = ...",
         "ns.Data = ns.Data or {}",
         "",
         f"ns.Data.trainersMeta = {{ version = 1, build = {gs.lua_str(wowf_build)}, classicSource = {gs.lua_str(gs.CLASSIC_SOURCE)} }}",
         "ns.Data.trainers = {",
     ]
-    L += ["\t" + gs.lua(r) + "," for r in rows]
-    L += ["}", ""]
-    return "\n".join(L), {"stats": stats, "mismatches": mismatches, "differs": differs, "rows": len(rows)}
+    return render(L, rows), {"stats": stats, "mismatches": mismatches, "differs": differs, "rows": len(rows),
+                             "site": site_info}
+
+
+def report_site(info: dict) -> None:
+    moved = [(r, b) for r, b in info["matched"] if (r["map"], r.get("x"), r.get("y")) !=
+             (b.get("map"), b.get("x"), b.get("y"))]
+    print(f"site trainers: {len(info['matched'])} rows matched, {len(moved)} moved, "
+          f"unmatched {info['unmatched'] or 'none'}, ambiguous {info['ambiguous'] or 'none'}")
+    for r, b in info["matched"]:
+        if r.get("rank") != b.get("rank"):
+            print(f"  rank {r['id']} {r['name']}: {b.get('rank')} -> {r.get('rank')}")
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--npcs", required=True)
-    ap.add_argument("--items", required=True)
-    ap.add_argument("--wago", required=True)
-    ap.add_argument("--cmangos", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--relayer", action="store_true",
+                    help="re-apply the site and seen layers to the shipped Data/Trainers.lua (--in, --out)")
+    ap.add_argument("--in", dest="infile", default=str(DEFAULT_OUT), help="--relayer: the file to read")
+    ap.add_argument("--npcs")
+    ap.add_argument("--items")
+    ap.add_argument("--wago")
+    ap.add_argument("--cmangos")
+    ap.add_argument("--out")
     ap.add_argument("--build")
     ap.add_argument("--places", default=str(HERE.parent / "Data" / "Npcs.lua"))
     ap.add_argument("--download", action="store_true")
     ap.add_argument("--seen", default=str(HERE / "data" / "npcs_seen.json"),
                     help="positions seen in game (default: tools/data/npcs_seen.json, optional)")
+    ap.add_argument("--site", default=str(HERE / "data" / "npcs_site.json"),
+                    help="wow-professions.com trainers (default: tools/data/npcs_site.json, optional)")
     a = ap.parse_args(argv)
+    if not a.relayer:
+        missing = [f"--{k}" for k in ("npcs", "items", "wago", "cmangos", "out") if not getattr(a, k)]
+        if missing:
+            ap.error("the full build needs " + ", ".join(missing) + " (or --relayer)")
     try:
-        wago = Path(a.wago)
-        wowf_build = gs.read_build(wago, a.build)
-        text, info = build(
-            gs.load_wago(wago, wowf_build, a.download), gs.load_sql(Path(a.cmangos), a.download, SQL_TABLES),
-            read_json(Path(a.npcs), "NPC list"), read_json(Path(a.items), "recipe item list"),
-            read_places(Path(a.places)), wowf_build, read_seen(Path(a.seen)))
-        out = Path(a.out)
+        places, seen, site = read_places(Path(a.places)), read_seen(Path(a.seen)), read_site(Path(a.site))
+        if a.relayer:
+            text, info = relayer(Path(a.infile), site, seen, places)
+            out = Path(a.out) if a.out else Path(a.infile)
+        else:
+            wago = Path(a.wago)
+            wowf_build = gs.read_build(wago, a.build)
+            text, info = build(
+                gs.load_wago(wago, wowf_build, a.download), gs.load_sql(Path(a.cmangos), a.download, SQL_TABLES),
+                read_json(Path(a.npcs), "NPC list"), read_json(Path(a.items), "recipe item list"),
+                places, wowf_build, seen, site)
+            out = Path(a.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         with open(out, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
     except gs.GenError as e:
         print(f"gen_npcs: {e}", file=sys.stderr)
         return 2
+    if a.relayer:
+        print(f"seen in game: {info['seen']} rows")
+        report_site(info)
+        print(f"{out}: {info['rows']} rows, {len(text.encode('utf-8')) / 1024:.1f} KB (relayered)")
+        return 0
+    report_site(info["site"])
     table = collections.defaultdict(collections.Counter)
     for (label, faction, state), n in info["stats"].items():
         table[label][f"{faction} {state}"] += n

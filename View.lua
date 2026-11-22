@@ -150,7 +150,15 @@ function V.rankTerms(st, env)
 	elseif type(st.by) == "number" then
 		parts[#parts + 1] = ("by %d"):format(st.by)
 	end
-	parts[#parts + 1] = type(st.cost) == "number" and env.money(st.cost) or "price not known yet"
+	local kind = type(st.unlock) == "table" and st.unlock.kind or nil
+	if type(st.cost) == "number" then
+		parts[#parts + 1] = env.money(st.cost)
+	elseif kind == "book" then
+		parts[#parts + 1] = "book price not known yet"
+	elseif kind ~= "quest" then
+		-- a quest's price is its hand-in items, listed on the card
+		parts[#parts + 1] = "price not known yet"
+	end
 	local need = type(st.level) == "number" and st.level or nil
 	local have = (type(st.have) == "number" and st.have) or (type(env.level) == "number" and env.level) or nil
 	if need and have and have < need then
@@ -164,7 +172,10 @@ end
 -- "Train Journeyman (to 150) at 50, 5s".
 function V.rankLine(st, env)
 	local cap = type(st.cap) == "number" and (" (to %d)"):format(st.cap) or ""
+	-- with the guide's unlock (Data/Routes.lua routeRanks): ". Buy the Expert Cookbook from Wulan, ..."
+	local how = type(st.unlock) == "table" and ns.Where and ns.Where.unlockText(st.unlock, env.nameOf, st.name)
 	return ("Train %s%s %s"):format(st.name or "the next rank", cap, V.rankTerms(st, env))
+		.. (how and (". " .. how) or "")
 end
 
 local SRC_TEXT = {
@@ -484,7 +495,38 @@ function V.mailWords(r, env)
 end
 
 -- The Next card of a planner step.
-local WHERE_RANK = { trainer = "at the trainer", book = "from a book", special = "special NPC / dungeon" }
+local WHERE_RANK =
+	{ trainer = "at the trainer", book = "from a book", quest = "from a quest", special = "special NPC / dungeon" }
+
+-- The hand-in items of a quest unlock as material rows (craftMats' shape: have/need, what to buy, where, price).
+local function unlockMats(unlock, env)
+	local pseudo = { used = {}, buy = {} }
+	for _, m in ipairs(unlock.mats or {}) do
+		local have = math.min(env.have and env.have(m.item) or 0, m.count)
+		if have > 0 then
+			pseudo.used[#pseudo.used + 1] = { item = m.item, count = have }
+		end
+		if m.count > have then
+			pseudo.buy[#pseudo.buy + 1] = {
+				item = m.item,
+				count = m.count - have,
+				where = m.where,
+				each = m.each,
+				unpriced = m.unpriced,
+			}
+		end
+	end
+	local nameOf = env.nameOf
+	return craftMats(pseudo, {
+		have = env.have or function()
+			return 0
+		end,
+		money = env.money,
+		nameOf = function(item)
+			return ns.Where.unlockItemName(unlock, item, nameOf)
+		end,
+	})
+end
 
 local function nextCard(st, env, listed)
 	local money = env.money
@@ -496,6 +538,14 @@ local function nextCard(st, env, listed)
 		card.verb = V.rankTerms(st, env)
 		card.gain = st.skill and ("needs skill %d"):format(st.skill) or "skill needed unknown"
 		card.cost = st.where and (WHERE_RANK[st.where] or tostring(st.where)) or "where unknown"
+		-- the guide's way to the rank (Data/Routes.lua routeRanks): who sells the book, gives the quest or trains it
+		card.unlock = st.unlock and ns.Where and ns.Where.unlockText(st.unlock, env.nameOf, st.name) or nil
+		if card.unlock then
+			card.name = card.unlock
+			if st.unlock.kind == "quest" then
+				card.mats = unlockMats(st.unlock, env)
+			end
+		end
 		if st.at and st.by then
 			card.notes[#card.notes + 1] = ("Train it between %d and %d"):format(st.at, st.by)
 		elseif st.by then
@@ -666,6 +716,23 @@ local function cardFace(card, st, env)
 		card.title = ("Train %s%s"):format(st.name or "the next rank", cap)
 		card.sub = upper1(V.rankTerms(st, env))
 			.. (st.where and (", " .. (WHERE_RANK[st.where] or tostring(st.where))) or "")
+		if card.unlock then
+			-- the real step names itself; the rank and its terms go under it
+			card.title = card.unlock
+			card.sub = ("%s%s: %s"):format(st.name or "The next rank", cap, V.rankTerms(st, env))
+			local total = 0
+			for _, r in ipairs(card.mats) do
+				if r.buy then
+					add(r.text, "bone")
+					total = total + (r.buy.unpriced and 0 or r.buy.cost)
+				end
+			end
+			if #card.mats > 0 and total == 0 then
+				add("You have every hand-in item", "green")
+			elseif total > 0 then
+				add(("%s for the hand-in"):format(money(total)), "ash")
+			end
+		end
 		add(card.notes[1], "ash", nil, true)
 		return card
 	elseif st.kind == "gap" then

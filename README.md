@@ -98,7 +98,12 @@ These rules hold for every plan, every replan and every alternative the panel of
    unless it saves at least 10% of the remaining cost.
 6. **Caps are planned.** The live cap comes from the client; ranks above it come from what the addon read at a
    profession trainer, or the usual ranks (75, 150, 225, 300) until then. A rank-up goes between its unlock skill and
-   the cap and never splits a craft run. A rank your character level can't train yet is a hard stop.
+   the cap and never splits a craft run. A rank your character level can't train yet is a hard stop. Where the
+   wow-professions.com guide says how a rank is got (`Data/Routes.lua`, `routeRanks`), its skill and level win over
+   the usual ranks and the step names the real errand: "Buy the Expert Cookbook from Wulan, Shadowprey Village
+   (Desolace)", "Quest: Clamlette Surprise from Dirge Quikcleave, Gadgetzan (Tanaris)" with the hand-in items as
+   materials, or the named trainer for your faction. The guide chip goes to those NPCs, also for recipes learned past
+   that rank's skill (Leatherworking's Artisan recipes: Hahrana Ironhide or Drakk Stonehand).
 7. **Shopping by place.** Blocks are grouped by city, nearest first, and inside a city the order is trainer, vendor,
    auction house. Never vendor, AH, vendor in one city.
 8. **Only recipes you can surely get.** The plan uses recipes you know, trainer recipes, auto-learned ones and

@@ -87,6 +87,21 @@ Arrays of `{ id, name, map, x, y, place, role, trains, skill, rank, faction = "A
 classic, nopos }`. Field meanings: `docs/spots-data.md`, "`ns.Data.trainers`". `Data/Npcs.lua` rows use roles
 `trade`, `cook`, `lwtrainer`, `cooktrainer`, `auction`, `trainer`.
 
+### `ns.Data.routeRanks` (`Data/Routes.lua`)
+
+```
+{ [line] = { { name, skill, level, kind = "trainer"|"book"|"quest", item, quest, questName,
+               items = { item, count, ... }, names = { [item] = name },
+               npcs = { { id, name, faction = "A"|"H"|nil, map, x, y } } } } }
+```
+
+How the guide says each rank is got. `Planner.rankUnlocks` lays a row over the `ranks` entry of the same name (skill,
+level, `where = kind`; a rank read at a trainer keeps its own) and the `trainRank` step carries `step.unlock` with the
+player's faction's NPCs and `mats` (the quest's hand-in items at the plan's prices). A `train` step learned at or past
+a trainer unlock's skill gets `step.trainers`. `npcs[].id` may be nil: the rows carry their own positions, and
+`Guide.unlockRecords` turns them into guide records. `names` holds only items `Data/Recipes.lua` lacks. Without the
+table the plan uses the data's ranks unchanged.
+
 ### `ns.Data.plan` (`Data/Plan.lua`, optional)
 
 See `Data/Plan.example.lua`: `{ version = 2, pricesAt, effort, sellShare, vendor, items = { [item] = { name, sell,
@@ -157,8 +172,10 @@ Python 3, standard library only. Inputs are downloaded on request (`--download`)
 | `python tools/gen_recipes.py ... --out Data/Recipes.lua` (`--check` lists uncovered ranges) | `Data/Recipes.lua` | the wago.tools CSV export of the Forever build; `tools/data/overlay.json` |
 | `python tools/import_wowhead.py ...` | `tools/data/overlay.json` | a research export of Wowhead's Forever section |
 | `python tools/gen_spots.py --wago DIR --cmangos FILE.sql --build B --out Data/Spots.lua` | `Data/Spots.lua` | client tables, cmangos dump, `tools/data/spots_curated.json` |
-| `python tools/gen_npcs.py --npcs npcs.json --items recipe_items.json --wago DIR --cmangos FILE.sql --out Data/Trainers.lua` | `Data/Trainers.lua` | the same, plus the Forever NPC lists |
-| `python tools/gen_routes.py` (`--only leatherworking cooking`, `--dry-run`) | `Data/Routes.lua` | network (wow-professions.com); `tools/wowprof.py` reads the pages |
+| `python tools/gen_npcs.py --npcs npcs.json --items recipe_items.json --wago DIR --cmangos FILE.sql --out Data/Trainers.lua` | `Data/Trainers.lua` | the same, plus the Forever NPC lists; `tools/data/npcs_site.json` and `npcs_seen.json` when present |
+| `python tools/gen_npcs.py --relayer` | `Data/Trainers.lua` (only the rows the site / seen layers touch) | `tools/data/npcs_site.json`, `tools/data/npcs_seen.json` |
+| `python tools/wowprof.py trainers leatherworking cooking --out tools/data/npcs_site.json` | `tools/data/npcs_site.json` | network (wow-professions.com trainers and NPC pages) |
+| `python tools/gen_routes.py` (`--only leatherworking cooking`, `--dry-run`) | `Data/Routes.lua` (`routes` and `routeRanks`) | network (wow-professions.com); `tools/wowprof.py` reads the pages; NPC ids from `Data/Trainers.lua` / `Data/Npcs.lua` |
 | `python tools/update_data.py --report report.md` (`--dry-run`) | all of the above that changed | network (wago.tools) |
 | `python tools/import_savedvars.py FILE ... --dry-run` | `tools/data/overlay.manual.json`, `tools/data/npcs_seen.json` | players' shared SavedVariables files |
 

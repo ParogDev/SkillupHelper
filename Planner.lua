@@ -196,6 +196,70 @@ local function excluded(exclude, spell, r, learned)
 	return exclude.dungeon == true and r.patternSrc == "dungeon"
 end
 
+-- Whether an unlock NPC (Data/Routes.lua routeRanks, faction "A" | "H" | nil = both) is for the player's side
+-- (faction "Alliance" | "Horde"; nil keeps every NPC).
+local function unlockNpcMine(npc, faction)
+	if npc.faction == nil or type(faction) ~= "string" then
+		return true
+	end
+	return npc.faction == faction:sub(1, 1):upper()
+end
+
+-- The ranks (input.ranks' shape) with the guide's rank unlocks (Data/Routes.lua routeRanks[line]: { { name, skill,
+-- level, kind = "trainer" | "book" | "quest", item, quest, questName, items, names, npcs } }) laid over the rank of
+-- the same name, as new tables: skill, level and where = kind from the guide, and rk.unlock = { kind, item, quest,
+-- questName, items, names, npcs } with the NPCs of the player's faction. A rank read at a trainer (rk.seen) keeps
+-- its own skill, level and where, and takes only a trainer unlock. nil or empty unlocks: the ranks unchanged.
+function P.rankUnlocks(ranks, unlocks, faction)
+	if type(unlocks) ~= "table" or #unlocks == 0 or type(ranks) ~= "table" then
+		return ranks
+	end
+	local byName = {}
+	for _, u in ipairs(unlocks) do
+		if type(u) == "table" and type(u.name) == "string" then
+			byName[u.name:lower()] = u
+		end
+	end
+	local out = {}
+	for i, rk in ipairs(ranks) do
+		local u = type(rk) == "table" and type(rk.name) == "string" and byName[rk.name:lower()] or nil
+		if u and (not rk.seen or u.kind == "trainer") then
+			local c = {}
+			for k, v in pairs(rk) do
+				c[k] = v
+			end
+			if not rk.seen then
+				c.skill = type(u.skill) == "number" and u.skill or rk.skill
+				c.level = type(u.level) == "number" and u.level or rk.level
+				c.where = type(u.kind) == "string" and u.kind or rk.where
+				if u.kind == "book" or u.kind == "quest" then
+					-- no trainer fee: a book costs its price (stepUnlock), a quest its hand-in items
+					c.cost = nil
+				end
+			end
+			local npcs = {}
+			for _, n in ipairs(type(u.npcs) == "table" and u.npcs or {}) do
+				if type(n) == "table" and type(n.name) == "string" and unlockNpcMine(n, faction) then
+					npcs[#npcs + 1] = n
+				end
+			end
+			c.unlock = {
+				kind = u.kind,
+				item = u.item,
+				quest = u.quest,
+				questName = u.questName,
+				items = u.items,
+				names = u.names,
+				npcs = npcs,
+			}
+			out[i] = c
+		else
+			out[i] = rk
+		end
+	end
+	return out
+end
+
 -- The cap model: the skill the plan reaches and the ranks it trains on the way. Walks input.ranks above the live
 -- cap: a rank whose character level is known and above the player's stops there (ctx.capBlock), any other raises
 -- the effective cap and is trained between its unlock skill (at; nil = unknown, placed as by) and the cap before it
@@ -204,7 +268,10 @@ local function capModel(ctx, input)
 	local live = input.cap
 	ctx.liveCap = live
 	ctx.rankUps = {}
-	local ranks = input.ranks or {}
+	-- input.unlocks: the guide's rank unlocks for this skill line (Data/Routes.lua routeRanks, P.rankUnlocks)
+	local ranks = P.rankUnlocks(input.ranks or {}, input.unlocks, input.faction)
+	-- every rank with its unlock, also the ones already trained: a recipe's trainer may be an unlock's (markUnlocks)
+	ctx.ranks = ranks
 	local target = input.target or live
 	if #ranks == 0 or not live then
 		ctx.cap = live and math.min(live, target) or live
@@ -243,6 +310,7 @@ local function capModel(ctx, input)
 				level = rk.level,
 				cost = rk.cost,
 				where = rk.where,
+				unlock = rk.unlock,
 			}
 			eff = rk.cap
 		end
@@ -316,6 +384,8 @@ end
 -- with a price as candidates to buy. The client's colour at the current skill wins over the exported thresholds.
 -- input.exclude (dungeon, ahPatterns, notNow[spell]) drops recipes; input.ranks, level and target set the cap model.
 -- input.route: the guide's entries for this skill line ({ { from, to, spell, alt, faction } }, Data/Routes.lua), rule 4.
+-- input.unlocks: the guide's rank unlocks for this skill line (Data/Routes.lua routeRanks[line], P.rankUnlocks); a
+-- trainRank step then carries step.unlock, a recipe's train step step.trainers (markUnlocks).
 function P.prepare(input)
 	local ctx = {
 		skill = input.skill,
@@ -1970,9 +2040,74 @@ end
 -- it goes where its cap is reached: immediately before the first step that ends past `by` (before that step's own
 -- "train" or "buy recipe" step, which stays next to its craft). When that step starts before the rank can be trained
 -- (it straddles the whole window) it is never split: the step carries step.rankUp ("train between at and by").
+-- A rank's unlock for its step: the rank's (P.rankUnlocks) with the hand-in items as mats = { { item, count, where
+-- ("vendor" | "ah" | nil), each (copper | nil), unpriced } } at the plan's prices. nil without an unlock.
+local function stepUnlock(ctx, u)
+	if type(u) ~= "table" then
+		return nil
+	end
+	local out = {}
+	for k, v in pairs(u) do
+		out[k] = v
+	end
+	local mats = {}
+	local items = type(u.items) == "table" and u.items or {}
+	for k = 1, #items - 1, 2 do
+		local item, count = items[k], items[k + 1]
+		if type(item) == "number" and type(count) == "number" then
+			local pr = ctx.price and ctx.price[item]
+			local each = pr and type(pr.buy) == "number" and pr.buy or nil
+			mats[#mats + 1] = {
+				item = item,
+				count = count,
+				where = each and pr.where or nil,
+				each = each,
+				unpriced = each == nil or nil,
+			}
+		end
+	end
+	out.mats = mats
+	if u.kind == "book" and type(u.item) == "number" then
+		-- the book's price at the plan's prices, the rank step's cost (nil: not known)
+		local pr = ctx.price and ctx.price[u.item]
+		out.price = pr and type(pr.buy) == "number" and pr.buy or nil
+	end
+	return out
+end
+
+-- Trainer unlocks on recipe steps: a "train" step whose recipe is learned at or past the training skill of a rank
+-- the guide sends to named trainers (unlock.kind "trainer") gets step.trainers = those NPCs (the highest such rank
+-- below the recipe's skill), so the guide chip goes to them.
+local function markUnlocks(ctx, steps)
+	local list = {}
+	for _, rk in ipairs(ctx.ranks or {}) do
+		local u = rk.unlock
+		if u and u.kind == "trainer" and type(rk.skill) == "number" and #(u.npcs or {}) > 0 then
+			list[#list + 1] = rk
+		end
+	end
+	if #list == 0 then
+		return
+	end
+	for _, st in ipairs(steps) do
+		if st.kind == "train" and type(st.at) == "number" then
+			local best
+			for _, rk in ipairs(list) do
+				if st.at >= rk.skill and (not best or rk.skill > best.skill) then
+					best = rk
+				end
+			end
+			if best then
+				st.trainers, st.trainerRank = best.unlock.npcs, best.name
+			end
+		end
+	end
+end
+
 local function placeRanks(ctx, steps)
 	for _, up in ipairs(ctx.rankUps or {}) do
 		local lo, hi = up.at or up.by, up.by
+		local unlock = stepUnlock(ctx, up.unlock)
 		local function rankStep(skill)
 			return {
 				kind = "trainRank",
@@ -1983,9 +2118,11 @@ local function placeRanks(ctx, steps)
 				level = up.level,
 				-- the character's level when the plan was made (nil: not known)
 				have = type(ctx.level) == "number" and ctx.level or nil,
-				cost = up.cost,
+				cost = up.cost or (unlock and unlock.price),
 				where = up.where,
 				skill = skill,
+				-- how the guide says the rank is got (Data/Routes.lua routeRanks): kind, npcs, item, quest, mats
+				unlock = unlock,
 			}
 		end
 		local placed = false
@@ -2600,6 +2737,7 @@ local function finishCore(ctx, baseline, have, commits, own)
 	plan.shortcuts = nCuts
 	plan.unconfirmed = ctx.unconfirmed > 0 and ctx.unconfirmed or nil
 	placeRanks(ctx, steps)
+	markUnlocks(ctx, steps)
 	-- rule 4 in numbers: craft steps on the guide and off it, and the last reason off it (the selftest's route)
 	if ctx.guide then
 		local g = { steps = 0, onGuide = 0, offGuide = 0 }
@@ -2969,7 +3107,7 @@ end
 -- Returns { total, spent, back, trainingCost, steps, gaps = { { from, to, why, reason } }, recipesToBuy = { { spell,
 -- name, item, price } }, unknownPrices (reagents that have no price), unknownItems, unknownRecipeItems (tradeable
 -- recipe items with no price), unpriced (what the plan itself buys at an unknown price: plan.unpriced), reached,
--- complete }; opts.faction and opts.route as Planner.prepare's input.faction and input.route.
+-- complete }; opts.faction, opts.route and opts.unlocks as Planner.prepare's input.faction, route and unlocks.
 -- total = spent - back + recipe items + trainingCost, in copper, buying for the luck percentile (rule 1); with
 -- unpriced.count > 0 it is "at least" that. A gap is a stretch no obtainable recipe covers (reason: gapReason's, or
 -- "cap" for the stretch past the reachable cap), never a missing price: with complete data there is none.
@@ -3035,6 +3173,16 @@ function P.costToCap(prof, from, to, priceFn, opts)
 			auto[spell] = true
 		end
 	end
+	-- the hand-in items of the guide's rank unlocks (opts.unlocks): priced when a price exists, never counted unknown
+	for _, u in ipairs(type(opts.unlocks) == "table" and opts.unlocks or {}) do
+		local items = type(u) == "table" and type(u.items) == "table" and u.items or {}
+		for k = 1, #items - 1, 2 do
+			need(items[k], false, true)
+		end
+		if type(u) == "table" and u.kind == "book" and type(u.item) == "number" then
+			need(u.item, false, true)
+		end
+	end
 	table.sort(unknownItems)
 	learned = learned or auto
 	local ranks = opts.ranks or prof.ranks or {}
@@ -3053,6 +3201,7 @@ function P.costToCap(prof, from, to, priceFn, opts)
 		target = to,
 		level = opts.level,
 		ranks = ranks,
+		unlocks = opts.unlocks,
 		exclude = opts.exclude,
 		trainerSeen = opts.trainerSeen,
 		faction = opts.faction,

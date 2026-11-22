@@ -438,6 +438,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 				priced.recipes[spell] = r
 			end
 		end
+		-- the rank unlocks' hand-in items (a quest's shopping), priced like reagents
+		priced.recipes.unlocks = S.unlockMats(caps.unlocks)
 		local price, product, counts = ns.TSM.prices(plan, priced, nil, settings.sellShare)
 		pc = { at = now, price = price, product = product, counts = counts, stamp = (pc and pc.stamp or 0) + 1 }
 		pc.sellShare = settings.sellShare
@@ -469,6 +471,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		S.worldKey(caps.world),
 		-- a regenerated Data/Routes.lua (new source date) or another row count replans
 		caps.route and (tostring(ns.Data.routes and ns.Data.routes.source) .. "#" .. #caps.route) or "noroute",
+		-- the guide's rank unlocks (Data/Routes.lua routeRanks) and the faction their NPCs are filtered to
+		caps.unlocks and ("unlocks#" .. #caps.unlocks .. tostring(caps.faction)) or "nounlocks",
 	}, ":")
 	local bc = baseCache[cacheKey]
 	if not bc or bc.key ~= key then
@@ -483,6 +487,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 			faction = caps.faction,
 			-- the guide's route for this skill line (Data/Routes.lua, planner rule 4); nil plans by price alone
 			route = caps.route,
+			-- the guide's rank unlocks (Data/Routes.lua routeRanks): the trainRank steps say how a rank is got
+			unlocks = caps.unlocks,
 			trainerSeen = caps.trainerSeen,
 			recipes = prof.recipes,
 			items = plan and plan.items or {},
@@ -731,6 +737,7 @@ function S.build(plan)
 				trainerSeen = trainerSeen,
 				faction = S.faction(),
 				route = S.routeFor(line, settings),
+				unlocks = S.unlocksFor(line),
 				-- Mining between its smelting recipes: the node stretches of Where's route, never a hole
 				world = S.worldFor(line, skill, target, level, S.faction()),
 			})
@@ -984,6 +991,34 @@ function S.routeFor(line, settings)
 	return type(r) == "table" and #r > 0 and r or nil
 end
 
+-- The guide's rank unlocks for a skill line (Data/Routes.lua routeRanks[line]: how Expert and Artisan are got, a
+-- trainer, a book or a quest), or nil when the data has none. Facts, not a route choice: "/skillup guide off" keeps
+-- them.
+function S.unlocksFor(line)
+	local all = ns.Data and ns.Data.routeRanks
+	if type(all) ~= "table" or line == nil then
+		return nil
+	end
+	local r = all[tonumber(line) or line]
+	return type(r) == "table" and #r > 0 and r or nil
+end
+
+-- The unlocks' hand-in items as a recipe-shaped entry for TSM.prices ({ mats = { item, count, ... } }), or nil.
+function S.unlockMats(unlocks)
+	local mats = {}
+	for _, u in ipairs(unlocks or {}) do
+		for k = 1, #(type(u.items) == "table" and u.items or {}) - 1, 2 do
+			mats[#mats + 1] = u.items[k]
+			mats[#mats + 1] = u.items[k + 1]
+		end
+		if u.kind == "book" and type(u.item) == "number" then
+			mats[#mats + 1] = u.item
+			mats[#mats + 1] = 1
+		end
+	end
+	return #mats > 0 and { mats = mats } or nil
+end
+
 -- The player's professions by skill line id: { [id] = { skill, cap } } (GetProfessions; secrets left out).
 function S.playerSkills()
 	local out = {}
@@ -1022,6 +1057,9 @@ function S.costOf(plan, id, prof, own, settings)
 			priced.recipes[spell] = r
 		end
 	end
+	local unlocks = S.unlocksFor(id)
+	-- the rank unlocks' hand-in items (a quest's shopping), priced like reagents
+	priced.recipes.unlocks = S.unlockMats(unlocks)
 	local price, product = ns.TSM.prices(plan, priced, nil, settings.sellShare)
 	local saved = S.ranksArray(ns.savedRanks and ns.savedRanks(id))
 	local ok, r = pcall(ns.Planner.costToCap, prof, from, to, nil, {
@@ -1030,6 +1068,7 @@ function S.costOf(plan, id, prof, own, settings)
 		items = plan.items,
 		cap = own and own.cap or nil,
 		ranks = #saved > 0 and saved or nil,
+		unlocks = unlocks,
 		exclude = settings.exclude,
 		faction = S.faction(),
 		route = S.routeFor(id, settings),
