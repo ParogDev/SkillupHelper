@@ -11,7 +11,7 @@ relative to the addon folder. The game is WoW: Forever: a Mainline 12.1 client w
 | Never edit `WTF\...\SavedVariables\SkillupHelper.lua` while the game runs | the game overwrites it on logout and `/reload` |
 | A new file (a new `.lua`, a new `SkillupHelper_Custom` folder) needs a game restart | the client reads the TOC and file list at start |
 | An edit to an existing listed file needs `/reload` | |
-| Never edit `Data/Recipes.lua`, `Data/Spots.lua`, `Data/Trainers.lua` by hand | generated; a regeneration drops your edit. Use `SkillupHelper_Custom` |
+| Never edit `Data/Recipes.lua`, `Data/Spots.lua`, `Data/Trainers.lua`, `Data/Routes.lua` by hand | generated; a regeneration drops your edit. Use `SkillupHelper_Custom` |
 | No globals beyond the seven in `tests/wiring_spec.lua` (`ALLOWED_GLOBALS`) | the load-order test fails on any other |
 | Check `issecretvalue(v)` before using any client value in an instance or encounter | Forever hands out secret values there; use them and the addon errors |
 | Nothing that taints in combat: no frame show/hide of secure frames, no binding change | `InCombatLockdown()` guards are in place; keep them |
@@ -24,6 +24,7 @@ relative to the addon folder. The game is WoW: Forever: a Mainline 12.1 client w
 | `Data/Recipes.lua` | generated: every recipe of every profession (`ns.Data.recipes`) |
 | `Data/Spots.lua` | generated: where to level world skills (`ns.Data.spots`) |
 | `Data/Trainers.lua` | generated: trainers and recipe vendors (`ns.Data.trainers`) |
+| `Data/Routes.lua` | generated: the wow-professions.com guides' routes (`ns.Data.routes[line] = { { from, to, spell, alt, faction } }`, planner rule 4) |
 | `Data/Npcs.lua` | hand-kept seed NPCs for the guide chip (`ns.Data.npcs`) |
 | `Data/Plan.lua` | optional, local: fallback prices from a price tool (shape in `Data/Plan.example.lua`) |
 | `extras/SkillupHelper_Custom/` | a template addon folder for the player's own changes, copied next to `SkillupHelper`; not loaded from here (shape in its `Custom.example.lua` and below) |
@@ -157,6 +158,7 @@ Python 3, standard library only. Inputs are downloaded on request (`--download`)
 | `python tools/import_wowhead.py ...` | `tools/data/overlay.json` | a research export of Wowhead's Forever section |
 | `python tools/gen_spots.py --wago DIR --cmangos FILE.sql --build B --out Data/Spots.lua` | `Data/Spots.lua` | client tables, cmangos dump, `tools/data/spots_curated.json` |
 | `python tools/gen_npcs.py --npcs npcs.json --items recipe_items.json --wago DIR --cmangos FILE.sql --out Data/Trainers.lua` | `Data/Trainers.lua` | the same, plus the Forever NPC lists |
+| `python tools/gen_routes.py` (`--only leatherworking cooking`, `--dry-run`) | `Data/Routes.lua` | network (wow-professions.com); `tools/wowprof.py` reads the pages |
 | `python tools/update_data.py --report report.md` (`--dry-run`) | all of the above that changed | network (wago.tools) |
 | `python tools/import_savedvars.py FILE ... --dry-run` | `tools/data/overlay.manual.json`, `tools/data/npcs_seen.json` | players' shared SavedVariables files |
 
@@ -199,6 +201,7 @@ the player to.
 |---|---|
 | `version` | the code that loaded (`ns.CODE_VERSION`) |
 | `data` | data layers: shipped build and counts, `custom.errors`, `status` (data age), `gameIsNewer` |
+| `route` | `Data/Routes.lua` loaded (source, skillLines, rows), `off` (`/skillup guide off`), and for the last profession planned the craft steps `onGuide` / `offGuide` and `lastOffGuide` ("skill: reason") |
 | `lastError`, panel errors | the docked panel's last failure |
 | `journal` | `JournalUI.diag()`: pages drawn, `missing` provider callbacks, `lastWhy`, map mode and art |
 | `journalWiring` | `firstError` of the wiring, planner `costRuns` / `costMaxMs`, `customPlaces`, `worldTries` |

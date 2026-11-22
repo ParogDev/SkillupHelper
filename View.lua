@@ -631,6 +631,12 @@ local function nextCard(st, env, listed)
 	if st.thresholds then
 		card.thresholds = { st.thresholds[1], st.thresholds[2] }
 	end
+	-- planner rule 4: the guide's route (Data/Routes.lua), or why this step leaves it
+	if st.guide then
+		card.guide = st.guideAlt and "Guide alt" or "Guide"
+	elseif st.offGuide then
+		card.offGuide = "Off guide: " .. tostring(st.offGuide)
+	end
 	return card
 end
 
@@ -713,7 +719,14 @@ local function cardFace(card, st, env)
 		local a, b = math.floor(st.chance[1] * 100 + 0.5), math.floor(st.chance[2] * 100 + 0.5)
 		sub = sub .. (a == b and (", %d%% a craft"):format(a) or (", %d%% falling to %d%% a craft"):format(a, b))
 	end
+	if card.guide then
+		sub = sub .. ", " .. card.guide
+	end
 	card.sub = sub
+	if card.offGuide then
+		-- not a note the fit may drop: the user trusts the guide, so leaving it is said
+		add(card.offGuide, "warn")
+	end
 	-- what to buy: a sentence per reagent, the rest folded into the last line with their sentences in its tooltip
 	local buys, total = {}, 0
 	for _, r in ipairs(card.mats) do

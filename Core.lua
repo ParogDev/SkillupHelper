@@ -11,7 +11,7 @@ if ns.Data.custom == nil then
 end
 
 -- Bumped with every change, so a /reload shows which code loaded (the TOC says @project-version@ until packaged).
-ns.CODE_VERSION = "0.3.5"
+ns.CODE_VERSION = "0.3.6"
 
 -- The data the planner reads, built once from the three layers (Logic.effectivePlan): the shipped Data/Recipes.lua,
 -- an optional local Data/Plan.lua on top, the optional SkillupHelper_Custom table on top of both. ns.Data.layers says
@@ -137,6 +137,27 @@ function ns.selftest.dataReport(layers, recipes, build, buildNumber)
 	return out
 end
 
+-- selftest.route: the guide's route data (Data/Routes.lua) and, for the last profession planned, how many craft steps
+-- follow it (planner rule 4). A string names the broken link when the file did not load.
+function ns.selftest.routeReport(routes, scan, off)
+	if type(routes) ~= "table" then
+		return "Data/Routes.lua not loaded: plans go by price alone (a new file needs a game restart)"
+	end
+	local skillLines, rows = 0, 0
+	for k, v in pairs(routes) do
+		if type(k) == "number" and type(v) == "table" then
+			skillLines, rows = skillLines + 1, rows + #v
+		end
+	end
+	local out = { source = routes.source, skillLines = skillLines, rows = rows, off = off and true or nil }
+	local g = type(scan) == "table" and scan.planner and scan.planner.guide
+	if type(g) == "table" then
+		out.profession = scan.profession
+		out.steps, out.onGuide, out.offGuide, out.lastOffGuide = g.steps, g.onGuide, g.offGuide, g.lastOffGuide
+	end
+	return out
+end
+
 local function refreshSelftest()
 	if not db then
 		return
@@ -152,6 +173,7 @@ local function refreshSelftest()
 	st.data = ns.selftest.dataReport(ns.Data.layers, ns.Data.recipes, build, buildNumber)
 	st.plan = ns.selftest.planSummary(ns.Data.plan) or "Data/Plan.lua absent (optional: the shipped data plans alone)"
 	st.lastScan = ns.lastScan
+	st.route = ns.selftest.routeReport(ns.Data.routes, ns.lastScan, db.noGuide)
 	-- the last scan of every profession opened this session, so Cooking and Leatherworking both show after one reload
 	st.scans = ns.scans
 	st.settings = ns.settings()
@@ -398,6 +420,8 @@ function ns.scanSummary(model)
 			tsmStale = ageHours ~= nil and ageHours > ns.TSM.STALE_HOURS,
 			-- the plan ran on the data's default ranks: no trainer of this profession was read yet
 			ranksAssumed = model.ranksAssumed,
+			-- craft steps on and off the guide's route (planner rule 4); nil without a route
+			guide = p.guide,
 		}
 		local list = {}
 		for i, st in ipairs(p.steps) do
@@ -424,6 +448,8 @@ function ns.settings()
 		noRecipeBuys = db and db.noRecipeBuys,
 		noAlts = db and db.noAlts,
 		resale = db and db.resale,
+		-- true: plan by price alone, without the guide's route (/skillup guide off)
+		noGuide = db and db.noGuide,
 		luck = db and db.luck,
 		trips = db and db.trips,
 		exclude = db and db.exclude,
@@ -1073,6 +1099,25 @@ function ns.command(msg)
 		print(
 			off and "SkillupHelper: planning without buying recipes."
 				or "SkillupHelper: planning with recipes to buy (/skillup recipes off to stop)."
+		)
+		ns.refresh()
+		return true
+	end
+	if cmd == "guide" then
+		-- "/skillup guide off": plan by price alone; on (the default): the guide's route decides the recipes
+		local word = arg:lower()
+		if word ~= "on" and word ~= "off" then
+			print(("SkillupHelper: /skillup guide on|off (now %s)."):format(db and db.noGuide and "off" or "on"))
+			return true
+		end
+		if not db then
+			print("SkillupHelper: SavedVariables not loaded yet, setting not changed.")
+			return true
+		end
+		db.noGuide = word == "off" or nil
+		print(
+			db.noGuide and "SkillupHelper: planning by price alone, without the guide's route."
+				or "SkillupHelper: planning along the guide's route (wow-professions.com)."
 		)
 		ns.refresh()
 		return true

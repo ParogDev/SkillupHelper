@@ -467,6 +467,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 		S.seenKey(caps.trainerSeen),
 		recipeKey,
 		S.worldKey(caps.world),
+		-- a regenerated Data/Routes.lua (new source date) or another row count replans
+		caps.route and (tostring(ns.Data.routes and ns.Data.routes.source) .. "#" .. #caps.route) or "noroute",
 	}, ":")
 	local bc = baseCache[cacheKey]
 	if not bc or bc.key ~= key then
@@ -479,6 +481,8 @@ function S.runPlanner(plan, prof, skill, cap, learned, difficulty, settings, cap
 			exclude = exclude,
 			-- "Alliance" | "Horde": whether a recipe vendor of the data can be assumed reachable
 			faction = caps.faction,
+			-- the guide's route for this skill line (Data/Routes.lua, planner rule 4); nil plans by price alone
+			route = caps.route,
 			trainerSeen = caps.trainerSeen,
 			recipes = prof.recipes,
 			items = plan and plan.items or {},
@@ -726,6 +730,7 @@ function S.build(plan)
 				exclude = settings.exclude,
 				trainerSeen = trainerSeen,
 				faction = S.faction(),
+				route = S.routeFor(line, settings),
 				-- Mining between its smelting recipes: the node stretches of Where's route, never a hole
 				world = S.worldFor(line, skill, target, level, S.faction()),
 			})
@@ -968,6 +973,17 @@ function S.faction()
 	return (f == "Alliance" or f == "Horde") and f or nil
 end
 
+-- The guide's route for a skill line (Data/Routes.lua, planner rule 4), or nil: no route shipped for it, or the
+-- "/skillup guide off" setting (settings.noGuide).
+function S.routeFor(line, settings)
+	local routes = ns.Data and ns.Data.routes
+	if (settings and settings.noGuide) or type(routes) ~= "table" or line == nil then
+		return nil
+	end
+	local r = routes[tonumber(line) or line]
+	return type(r) == "table" and #r > 0 and r or nil
+end
+
 -- The player's professions by skill line id: { [id] = { skill, cap } } (GetProfessions; secrets left out).
 function S.playerSkills()
 	local out = {}
@@ -1016,6 +1032,7 @@ function S.costOf(plan, id, prof, own, settings)
 		ranks = #saved > 0 and saved or nil,
 		exclude = settings.exclude,
 		faction = S.faction(),
+		route = S.routeFor(id, settings),
 		trainerSeen = ns.savedTrainerSeen and ns.savedTrainerSeen(id) or nil,
 		effort = settings.effort or plan.effort,
 		luck = settings.luck,
