@@ -23,6 +23,10 @@ P.CANDS_PER_LEVEL = 6 -- stock candidates kept per level for the greedy fill
 -- 2. Earmarks are hard: a material a later step uses is never spent by a stock alternative, a from-stock verdict or
 --    a replan. Only true spares are offered.
 -- 3. A bought step is committed: its recipe and target hold until the target is reached or the recipe greys.
+-- 4. The guide is the route: at a skill the guide covers (input.route, Data/Routes.lua), the plan chooses only among
+--    the recipes the guide names there (main pick and alternatives, faction-filtered); prices, stock and rule 1 pick
+--    between them. A level where none gives skill falls back to the cheapest recipe and says why (level.offGuide). The
+--    user's swap, "not now" and the settings still win over the guide. Owned stock never moves a guide level off it.
 P.LUCK = 90 -- percentile of crafts every buy covers
 P.TRIP_Z = 1.2816 -- z of the default percentile (normal approximation)
 local Z_OF = { [50] = 0, [75] = 0.6745, [80] = 0.8416, [90] = 1.2816, [95] = 1.6449, [99] = 2.3263 }
@@ -302,6 +306,7 @@ end
 -- Options (recipe variants) the planner can use: learned recipes, trainer recipes from their learn rank, recipe items
 -- with a price as candidates to buy. The client's colour at the current skill wins over the exported thresholds.
 -- input.exclude (dungeon, ahPatterns, notNow[spell]) drops recipes; input.ranks, level and target set the cap model.
+-- input.route: the guide's entries for this skill line ({ { from, to, spell, alt, faction } }, Data/Routes.lua), rule 4.
 function P.prepare(input)
 	local ctx = {
 		skill = input.skill,
@@ -341,6 +346,38 @@ function P.prepare(input)
 	end)
 	capModel(ctx, input)
 	local recipes = input.recipes or {}
+	ctx.recipes = recipes
+	-- the guide's route (rule 4): ctx.guide[s] = { [spell] = "main" | "alt" } for every skill an entry covers, the
+	-- other faction's rows left out (ctx.guideOther[s]: a skill only such rows cover). nil without a route.
+	ctx.guideSpell, ctx.guideWhy = {}, {}
+	if type(input.route) == "table" and #input.route > 0 then
+		ctx.guide, ctx.guideOther = {}, {}
+		local side = type(input.faction) == "string" and string.lower(input.faction) or nil
+		for _, e in ipairs(input.route) do
+			if
+				type(e) == "table"
+				and type(e.spell) == "number"
+				and type(e.from) == "number"
+				and type(e.to) == "number"
+			then
+				local other = e.faction ~= nil and side ~= nil and e.faction ~= side
+				for s = math.floor(e.from), math.ceil(e.to) - 1 do
+					if other then
+						ctx.guideOther[s] = true
+					else
+						local g = ctx.guide[s] or {}
+						ctx.guide[s] = g
+						if g[e.spell] ~= "main" then
+							g[e.spell] = e.alt and "alt" or "main"
+						end
+					end
+				end
+				if not other then
+					ctx.guideSpell[e.spell] = true
+				end
+			end
+		end
+	end
 	local spells = sortedKeys(recipes)
 	-- What the trainer lists read so far can say about a recipe: nothing above the highest learn skill they listed.
 	-- A trainer window that hides what the character cannot learn yet (the client's default filter) lists only the
@@ -392,6 +429,13 @@ function P.prepare(input)
 		if out and y and g and g > ctx.skill then
 			-- a recipe the user's settings keep out: a stretch only such recipes cover is a hole with its own reason
 			ctx.excludedOut[#ctx.excludedOut + 1] = { at = learned and -math.huge or (r.learn or 0), g = g }
+		end
+		if ctx.guideSpell[spell] then
+			if out then
+				ctx.guideWhy[spell] = "you left the guide's recipe out"
+			elseif r.gone == true and not learned then
+				ctx.guideWhy[spell] = "the guide's recipe needs an item missing from the game data"
+			end
 		end
 		out = out or (r.gone == true and not learned)
 		local diff = input.difficulty and input.difficulty[spell]
@@ -470,6 +514,25 @@ function P.prepare(input)
 					or src == "unlisted"
 					or (src == "special" and not (input.exclude and input.exclude.special == false))
 				)
+			-- rule 4: the guide confirms a recipe it names, so a gated one is planned, at the skills the guide uses it
+			-- for only (guideOnly), unless it is not learnable yet (tooLow), its only vendor is out of reach, or the
+			-- settings keep recipe buys out. A recipe item to buy is planned at the guide's skills only too.
+			local guideOnly
+			if ctx.guideSpell[spell] and not learned and src ~= "auto" then
+				local why
+				if tooLow then
+					why = "the guide's recipe needs character level " .. tostring(r.level)
+				elseif bopOnly and vendorWhy then
+					why = "the guide's recipe can't be got: " .. vendorWhy
+				elseif ctx.noRecipeBuys and src ~= "trainer" then
+					why = "recipe buys are off (/skillup recipes on)"
+				end
+				if why then
+					ctx.guideWhy[spell] = why
+				elseif gated or src == "item" then
+					gated, guideOnly = false, not allowed
+				end
+			end
 			local at = -math.huge
 			if not learned then
 				-- no learn skill in the data: a recipe item or a level-gated recipe has none, a trainer recipe is
@@ -494,6 +557,8 @@ function P.prepare(input)
 				unchecked = unchecked or nil,
 				gated = gated or nil,
 				allowed = allowed or nil,
+				-- planned only at the skills the guide names it for (rule 4)
+				guideOnly = guideOnly or nil,
 				teacher = (src == "special" or bop) and r.teacher or nil,
 				recipeItem = r.item,
 				recipePrice = recipePrice,
@@ -636,6 +701,71 @@ local function costPt(ctx, o, s, cum, cheap, chance)
 end
 P.costPt = costPt
 
+-- Rule 4. The guide's kind of spell at level s: "main", "alt" or nil (also nil without a route).
+local function guideKind(ctx, s, spell)
+	local g = ctx.guide and ctx.guide[s]
+	return g and g[spell] or nil
+end
+
+-- Whether o may take level s at all: a recipe the guide alone lets in (guideOnly) only where the guide names it.
+local function usableAt(ctx, o, s)
+	return not o.guideOnly or guideKind(ctx, s, o.spell) ~= nil
+end
+
+-- Whether owned stock may put o on level lv (at s): on a guide level only the guide's recipes (rule 4).
+local function stockMay(ctx, lv, o, s)
+	if lv and lv.guide then
+		return guideKind(ctx, s, o.spell) ~= nil
+	end
+	return usableAt(ctx, o, s)
+end
+
+-- Why the guide gives nothing at level s (a level the plan takes off the guide): the reason of its main pick first.
+local function offGuideWhy(ctx, s)
+	local g = ctx.guide and ctx.guide[s]
+	if not g then
+		return ctx.guideOther and ctx.guideOther[s] and "the guide's recipes here are the other faction's"
+			or "the guide has nothing for this level"
+	end
+	if not ctx.optionOf then
+		ctx.optionOf = {}
+		for _, list in ipairs({ ctx.options, ctx.hidden }) do
+			for _, o in ipairs(list) do
+				ctx.optionOf[o.spell] = ctx.optionOf[o.spell] or o
+			end
+		end
+	end
+	local spells = sortedKeys(g)
+	table.sort(spells, function(a, b)
+		if g[a] ~= g[b] then
+			return g[a] == "main"
+		end
+		return a < b
+	end)
+	for _, spell in ipairs(spells) do
+		local o, r = ctx.optionOf[spell], ctx.recipes and ctx.recipes[spell]
+		if ctx.guideWhy[spell] then
+			return ctx.guideWhy[spell]
+		elseif not r then
+			return "the guide's recipe is not in the recipe data"
+		elseif not o then
+			if r.g and r.g <= s then
+				return "the guide's recipes are grey here"
+			end
+			return "the guide's recipe has no thresholds in the data"
+		elseif s >= o.g then
+			return "the guide's recipes are grey here"
+		elseif s < o.at then
+			return ("the guide's recipe is learned at %d"):format(o.at)
+		elseif o.gated then
+			return "the guide's recipe is not sure to be obtainable"
+		elseif o.missing then
+			return "no price for the guide's recipe's reagents"
+		end
+	end
+	return "the guide's recipes give no skill here"
+end
+
 -- The fallback: recipes for a level no sure, fully priced recipe covers. The owner's rule: a stretch is never a hole
 -- because a price is missing or a recipe is gated; it is planned with the best recipe by what is known, and the step
 -- says what is not known (step.unpriced, step.gated). Only a stretch no obtainable recipe covers is a hole.
@@ -682,12 +812,16 @@ end
 
 -- The best fallback at skill s among those of rank <= maxRank (nil: any). Returns o, its estimated cost per point
 -- (unpriced reagents at ctx.unknownEach), points per craft, the cost per point of its priced reagents alone, its rank;
--- nil when none gives skill.
-local function fallbackAt(ctx, list, s, chance, maxRank)
+-- nil when none gives skill. only: the guide's spells at s (rule 4): nothing else is looked at.
+local function fallbackAt(ctx, list, s, chance, maxRank, only)
 	local best, bc, bp, bk
 	for _, f in ipairs(list) do
 		local o = f.o
-		local p = (s >= o.at and (not maxRank or f.rank <= maxRank)) and chance(s, o.y, o.g) * o.k or 0
+		local fits = s >= o.at and (not maxRank or f.rank <= maxRank) and usableAt(ctx, o, s)
+		if only then
+			fits = fits and only[o.spell] ~= nil
+		end
+		local p = fits and chance(s, o.y, o.g) * o.k or 0
 		if p > 0 then
 			local back, effort = backOf(o, 0), ctx.effort * (1 + o.precrafts)
 			local net = f.known + f.units * ctx.unknownEach - back
@@ -766,13 +900,19 @@ local function smooth(ctx, levels, chance)
 				local save, repl = 0, {}
 				for s = b.from, b.to do
 					local c, p = costPt(ctx, a, s, cum, nil, chance)
-					-- a level the user's swap picked is never smoothed away
-					if not c or levels[s].picked then
+					local kind = guideKind(ctx, s, a.spell)
+					-- a level the user's swap picked is never smoothed away, nor a guide level off the guide (rule 4)
+					if not c or levels[s].picked or not usableAt(ctx, a, s) or (levels[s].guide and not kind) then
 						repl = nil
 						break
 					end
 					cum = cum + 1 / p
 					repl[s] = { o = a, c = c, p = p, costs = levels[s].costs }
+					if kind then
+						repl[s].guide, repl[s].guideAlt = true, kind == "alt" or nil
+					else
+						repl[s].offGuide = levels[s].offGuide
+					end
 					save = save + c - levels[s].c
 				end
 				if repl then
@@ -830,7 +970,10 @@ local function forward(ctx, opts, chance)
 	local levels, cum = {}, {}
 	local fallbacks
 	for s = ctx.skill, ctx.cap - 1 do
+		-- rule 4: on a skill the guide covers, the best of the guide's options (gb) wins whenever one gives skill
+		local g = ctx.guide and ctx.guide[s]
 		local best, bc, bp, bnet
+		local gb, gc, gp, gnet
 		local costs = {}
 		for _, o in ipairs(opts) do
 			local c, p, net = costPt(ctx, o, s, cum[o], nil, chance)
@@ -838,8 +981,11 @@ local function forward(ctx, opts, chance)
 				if not costs[o.spell] or c < costs[o.spell] then
 					costs[o.spell] = c
 				end
-				if better(c, p, net, bc, bp, bnet) then
+				if usableAt(ctx, o, s) and better(c, p, net, bc, bp, bnet) then
 					best, bc, bp, bnet = o, c, p, net
+				end
+				if g and g[o.spell] and better(c, p, net, gc, gp, gnet) then
+					gb, gc, gp, gnet = o, c, p, net
 				end
 			end
 		end
@@ -849,21 +995,32 @@ local function forward(ctx, opts, chance)
 				costs[o.spell] = c
 			end
 		end
+		fallbacks = fallbacks or fallbackOpts(ctx)
+		-- a guide option without a price for a reagent keeps the level on the guide (the fallback, guide spells only)
+		local gfo, gfc, gfp, gfk, gfrank
+		if g then
+			gfo, gfc, gfp, gfk, gfrank = fallbackAt(ctx, fallbacks, s, chance, gb and 1 or nil, g)
+		end
+		local onGuide = gb ~= nil or gfo ~= nil
+		if gb then
+			best, bc, bp = gb, gc, gp
+		end
 		local so, sc, sp = nil, nil, nil
-		if best then
+		if best and (gb or not onGuide) then
 			so, sc, sp = swapAt(ctx, opts, best, s, cum, chance)
 		end
 		-- the fallback (above): against a priced recipe only a sure one with an unpriced reagent, at its estimate;
 		-- with nothing priced, any. level.fallback = "unpriced" (c is the estimate, known the priced part) or "gated".
 		local fo, fc, fp, fk, frank
-		if not (so and so.spell ~= best.spell) then
-			fallbacks = fallbacks or fallbackOpts(ctx)
+		if onGuide then
+			fo, fc, fp, fk, frank = gfo, gfc, gfp, gfk, gfrank
+		elseif not (so and so.spell ~= best.spell) then
 			fo, fc, fp, fk, frank = fallbackAt(ctx, fallbacks, s, chance, best and 1 or nil)
 		end
 		if so and so.spell ~= best.spell then
 			cum[so] = (cum[so] or 0) + 1 / sp
 			levels[s] = { o = so, c = sc, p = sp, costs = costs, picked = true, swapFrom = best.spell }
-		elseif best and not (fo and fc < bc - 1e-9) then
+		elseif best and (not onGuide or gb) and not (fo and fc < bc - 1e-9) then
 			cum[best] = (cum[best] or 0) + 1 / bp
 			levels[s] = { o = best, c = bc, p = bp, costs = costs }
 		elseif fo then
@@ -871,6 +1028,17 @@ local function forward(ctx, opts, chance)
 			levels[s] = { o = fo, c = fc, p = fp, known = fk, costs = costs, fallback = kind }
 		else
 			levels[s] = false
+		end
+		local lv = levels[s]
+		if lv and ctx.guide then
+			local kind = guideKind(ctx, s, lv.o.spell)
+			if kind then
+				lv.guide, lv.guideAlt = true, kind == "alt" or nil
+			elseif lv.picked then
+				lv.offGuide = "you chose this recipe instead"
+			else
+				lv.offGuide = offGuideWhy(ctx, s)
+			end
 		end
 	end
 	return smooth(ctx, levels, chance)
@@ -896,13 +1064,21 @@ local function baselineFor(ctx, chance)
 	for _, to in pairs(ctx.exclude and ctx.exclude.swap or {}) do
 		swapTo[to] = true
 	end
+	-- and so is one the guide names (rule 4): bought when a guide level uses it, whatever it saves
 	for _, c in ipairs(cands) do
-		if swapTo[c.spell] then
+		local guided = ctx.guideSpell and ctx.guideSpell[c.spell]
+		if swapTo[c.spell] or guided then
 			opts[#opts + 1] = c
 			if not bought[c.spell] then
 				bought[c.spell] = true
-				buys[#buys + 1] =
-					{ spell = c.spell, item = c.recipeItem, price = c.recipePrice, learn = c.at, swap = true }
+				buys[#buys + 1] = {
+					spell = c.spell,
+					item = c.recipeItem,
+					price = c.recipePrice,
+					learn = c.at,
+					swap = swapTo[c.spell] or nil,
+					guide = (guided and not swapTo[c.spell]) or nil,
+				}
 				buys[#buys].where, buys[#buys].vendor = c.recipeWhere, c.recipeVendor
 			end
 		end
@@ -919,6 +1095,10 @@ local function baselineFor(ctx, chance)
 				for s = ctx.skill, ctx.cap - 1 do
 					local cost, p = costPt(ctx, c, s, cum, nil, chance)
 					local v = (levels[s] and levels[s].fallback ~= "gated") and levels[s].c or HUGE
+					-- a guide level takes only the guide's recipes (rule 4): no saving there
+					if levels[s] and levels[s].guide and not guideKind(ctx, s, c.spell) then
+						cost = nil
+					end
 					if cost and cost < v then
 						save = save + (v - cost)
 						cum = cum + 1 / p
@@ -962,7 +1142,7 @@ local function baselineFor(ctx, chance)
 			insteadName = (not fillsGap and instead) and instead.name or nil,
 		}
 	end
-	-- a swap's recipe buy stands only when the swap took a level (a stale or costless swap buys nothing)
+	-- a swap's or the guide's recipe buy stands only when it took a level (a stale or costless swap buys nothing)
 	local used = {}
 	for s = ctx.skill, ctx.cap - 1 do
 		local lv = levels[s]
@@ -985,7 +1165,7 @@ local function baselineFor(ctx, chance)
 	end
 	local kept = {}
 	for _, b in ipairs(buys) do
-		if not b.swap or used[b.spell] then
+		if not (b.swap or b.guide) or used[b.spell] then
 			kept[#kept + 1] = b
 		end
 	end
@@ -1091,10 +1271,12 @@ local function stockPass(ctx, base, have, route)
 					if p <= 0 then
 						break
 					end
+					-- rule 4: stock may change which of the guide's recipes a guide level uses, never leave the guide
 					local c = numer / p
-					-- a gated fallback level counts as uncovered: owned stock of a sure recipe takes it
+					-- a gated fallback level counts as uncovered: owned stock of a sure recipe takes it. Rule 4: stock
+					-- may change which of the guide's recipes a guide level uses, never take the level off the guide.
 					local gain = ((lv and lv.fallback ~= "gated") and lv.c or HUGE) - c + P.BIAS
-					if gain > 0 then
+					if gain > 0 and stockMay(ctx, lv, o, s) then
 						local list = perLevel[s] or {}
 						perLevel[s] = list
 						list[#list + 1] = { s = s, o = o, c = c, p = p, mine = mine, ratio = gain * p / worst }
@@ -1410,11 +1592,12 @@ local function trueCostPt(ctx, o, s, have, st, chance)
 	return costPt(ctx, o, s, 0, cheap, chance)
 end
 
--- The cheapest learned option craftable now from stock plus vendor reagents, other than `skip`.
-local function stockAlternative(ctx, s, pool, skip, st, have, chance)
+-- The cheapest learned option craftable now from stock plus vendor reagents, other than `skip`. lv: the level at s;
+-- on a guide level only the guide's recipes are an alternative (rule 4).
+local function stockAlternative(ctx, s, pool, skip, st, have, chance, lv)
 	local best, bc, bcrafts, bp
 	for _, o in ipairs(ctx.options) do
-		if o.learned and o.spell ~= skip and o.variant == 1 then
+		if o.learned and o.spell ~= skip and o.variant == 1 and stockMay(ctx, lv, o, s) then
 			local crafts, any = math.huge, false
 			for i, n in pairs(o.mats) do
 				if not isVendor(ctx, i) then
@@ -1498,6 +1681,11 @@ local function commitLevels(ctx, base, commits, chance)
 				if c then
 					local lv0 = base.levels[s]
 					levels[s] = { o = pick, c = c, p = p, committed = true, costs = lv0 and lv0.costs or nil }
+					if ctx.guide then
+						local kind = guideKind(ctx, s, pick.spell)
+						levels[s].guide, levels[s].guideAlt = kind and true or nil, kind == "alt" or nil
+						levels[s].offGuide = not kind and "a step on your AH list holds its recipe" or nil
+					end
 					any = true
 				end
 			end
@@ -1599,6 +1787,8 @@ local function othersOf(ctx, base, step, info)
 				unchecked = o and o.unchecked,
 				-- gated: shown, never switched to ("Use it" on a shortcut is the way in)
 				gated = o and o.gated,
+				-- one of the guide's recipes at the step's first skill (rule 4)
+				guide = guideKind(ctx, lo, spell) and true or nil,
 			}
 		end
 	end
@@ -2001,6 +2191,22 @@ local function finishCore(ctx, baseline, have, commits, own)
 				tags = {},
 				costPt = seg.pts > 0 and seg.cost / seg.pts or nil,
 			}
+			-- rule 4: on the guide when the guide names the recipe at every skill of the stretch (guideAlt: as one of
+			-- its alternatives); else offGuide says why, from the first level off it
+			if ctx.guide then
+				local on, alt, why = true, false, nil
+				local glo = math.max(math.floor(from), seg.from)
+				for s = glo, math.min(math.max(glo, seg.to - 1), ctx.cap - 1) do
+					local kind = guideKind(ctx, s, o.spell)
+					if not kind then
+						local lv = base.levels[s]
+						on, why = false, why or (lv and lv.offGuide) or "the guide uses another recipe here"
+					elseif kind == "alt" then
+						alt = true
+					end
+				end
+				step.guide, step.guideAlt, step.offGuide = on or nil, (on and alt) or nil, why
+			end
 			local out, export = 0, o.prodExport == true
 			local poolBefore = {}
 			for i, q in pairs(pool) do
@@ -2120,8 +2326,8 @@ local function finishCore(ctx, baseline, have, commits, own)
 				end
 			end
 			local lo = math.floor(step.from)
-			local alt, ac, acrafts = stockAlternative(ctx, lo, avail, step.spell, st, have, chance)
 			local lv0 = base.levels[lo]
+			local alt, ac, acrafts = stockAlternative(ctx, lo, avail, step.spell, st, have, chance, lv0)
 			local v = lv0 and lv0.c or step.costPt
 			if alt and v then
 				local apts = P.expectedPoints(step.from, acrafts, alt, chance, ctx.cap)
@@ -2370,6 +2576,22 @@ local function finishCore(ctx, baseline, have, commits, own)
 	plan.shortcuts = nCuts
 	plan.unconfirmed = ctx.unconfirmed > 0 and ctx.unconfirmed or nil
 	placeRanks(ctx, steps)
+	-- rule 4 in numbers: craft steps on the guide and off it, and the last reason off it (the selftest's route)
+	if ctx.guide then
+		local g = { steps = 0, onGuide = 0, offGuide = 0 }
+		for _, step in ipairs(steps) do
+			if step.kind == "craft" then
+				g.steps = g.steps + 1
+				if step.guide then
+					g.onGuide = g.onGuide + 1
+				else
+					g.offGuide = g.offGuide + 1
+					g.lastOffGuide = ("%d: %s"):format(math.floor(step.from), tostring(step.offGuide))
+				end
+			end
+		end
+		plan.guide = g
+	end
 	plan.liveCap = ctx.liveCap
 	plan.rankUps = ctx.rankUps
 	plan.capBlock = ctx.capBlock
@@ -2723,7 +2945,7 @@ end
 -- Returns { total, spent, back, trainingCost, steps, gaps = { { from, to, why, reason } }, recipesToBuy = { { spell,
 -- name, item, price } }, unknownPrices (reagents that have no price), unknownItems, unknownRecipeItems (tradeable
 -- recipe items with no price), unpriced (what the plan itself buys at an unknown price: plan.unpriced), reached,
--- complete }; opts.faction as Planner.prepare's input.faction.
+-- complete }; opts.faction and opts.route as Planner.prepare's input.faction and input.route.
 -- total = spent - back + recipe items + trainingCost, in copper, buying for the luck percentile (rule 1); with
 -- unpriced.count > 0 it is "at least" that. A gap is a stretch no obtainable recipe covers (reason: gapReason's, or
 -- "cap" for the stretch past the reachable cap), never a missing price: with complete data there is none.
@@ -2761,10 +2983,17 @@ function P.costToCap(prof, from, to, priceFn, opts)
 	end
 	local learned = opts.learned
 	local auto = {}
+	-- the guide's spells (opts.route, rule 4): planned like a recipe the user allowed, so priced the same way
+	local guided = {}
+	for _, e in ipairs(type(opts.route) == "table" and opts.route or {}) do
+		if type(e) == "table" and e.spell then
+			guided[e.spell] = true
+		end
+	end
 	for spell, r in pairs(recipes) do
 		-- only recipes the plan may use by itself: not the unlisted, special or bind-on-pickup shortcuts
 		-- (one the user allowed, "Use it", is planned like any other, so its reagents are priced too)
-		local allowed = opts.exclude and opts.exclude.allow and opts.exclude.allow[spell] == true
+		local allowed = guided[spell] or (opts.exclude and opts.exclude.allow and opts.exclude.allow[spell] == true)
 		local shortcut = r.src == "unlisted" or r.src == "special" or (r.src == "item" and r.bop and not r.vendor)
 		if not r.gone and (allowed or not shortcut) then
 			for k = 1, #(r.mats or {}) - 1, 2 do
@@ -2803,6 +3032,7 @@ function P.costToCap(prof, from, to, priceFn, opts)
 		exclude = opts.exclude,
 		trainerSeen = opts.trainerSeen,
 		faction = opts.faction,
+		route = opts.route,
 		recipes = recipes,
 		items = opts.items or {},
 		learned = learned,
