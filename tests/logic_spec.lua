@@ -663,7 +663,26 @@ describe("Core", function()
 		assert.equal(3, sum.planner.priceSources.live)
 		assert.matches("^craft 1x Big Bear Steak 173.0%-173.4", sum.planner.first[1])
 		assert.is_false(ns.command("toggle"))
-		assert.equal("0.3.5", ns.CODE_VERSION)
+		assert.equal("0.3.6", ns.CODE_VERSION)
+		-- selftest.route: the route file, and the last plan's steps on and off the guide
+		assert.matches("^Data/Routes%.lua not loaded", ns.selftest.routeReport(nil))
+		local routes = { source = "src", [165] = { { from = 1, to = 2, spell = 3 } } }
+		local scan = {
+			profession = "Leatherworking",
+			planner = { guide = { steps = 4, onGuide = 3, offGuide = 1, lastOffGuide = "210: grey" } },
+		}
+		assert.same({
+			source = "src",
+			lines = 1,
+			off = true,
+			profession = "Leatherworking",
+			steps = 4,
+			onGuide = 3,
+			offGuide = 1,
+			lastOffGuide = "210: grey",
+		}, ns.selftest.routeReport(routes, scan, true))
+		-- the scan summary carries the plan's guide counts through
+		assert.is_nil(sum.planner.guide)
 	end)
 end)
 
